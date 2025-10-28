@@ -460,9 +460,9 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{sbds2025,
   title={SBDS: Score-Based Schrödinger Bridge Diffusion Solver},
-  author={Solvers Developers},
+  author={Thierry Silvio Claude Soreze},
   year={2025},
-  url={https://github.com/TSOR666/Solvers-}
+  url={https://github.com/TSOR666/OT-diffusion-toolkit}
 }
 ```
 
