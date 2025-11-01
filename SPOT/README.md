@@ -1,36 +1,47 @@
-# SPOT &mdash; Schrodinger Partial Optimal Transport Solver
+# SPOT – Schrodinger Partial Optimal Transport Solver
 
-SPOT is a production-ready Schrodinger Partial Optimal Transport (SPOT) sampler
-designed for high-fidelity diffusion pipelines. It combines numerically robust
-optimal transport kernels, DPM-Solver++ integrators, and patch-based transport
-acceleration to deliver deterministic, reproducible sampling on modern GPUs.
+SPOT is a Schrodinger bridge sampler specialised for partial optimal transport. It
+pairs DPM-Solver++ integrators with patch-based transport maps, deterministic
+execution modes, and a command-line validation utility.
 
-## Highlights
-- **Production-focused solver** &mdash; hardened configurations for balanced,
-  fast, and reproducible deployments.
-- **Deterministic modes** &mdash; bit-exact computation paths (including
-  Sinkhorn CPU fallbacks) for auditability.
-- **Patch-based OT** &mdash; efficient large-image transport via cached norms
-  and adaptive Richardson extrapolation.
-- **Pluggable schedules and correctors** &mdash; cosine / linear schedules plus
-  Langevin, Tweedie, and adaptive correctors (loaded lazily when available).
-- **Self-diagnostics** &mdash; `python -m SPOT` runs the integrated validation
-  suite to verify numerical assumptions on the target machine.
+---
 
 ## Installation
-1. Install PyTorch (2.1 or newer recommended) with CUDA, ROCm, or CPU support.
-2. (Optional) Install Triton for the accelerated Sinkhorn kernels:
-   `pip install triton`.
-3. From the repository root:
-   ```bash
-   cd SPOT
-   pip install -e .
-   ```
+```bash
+pip install .             # core (PyTorch, NumPy, tqdm)
+pip install .[dev]        # tests, linting
+pip install triton        # optional: accelerates Sinkhorn kernels
+```
 
-The solver automatically selects CUDA or CPU execution. Mixed precision is
-enabled on CUDA devices, while full precision is used elsewhere.
+---
+
+## Mathematical Overview
+
+### Partial Optimal Transport
+Partial OT seeks a transport plan `π` that moves only a fraction of mass between
+two distributions. SPOT implements an entropy-regularised objective:
+```
+min_π ⟨C, π⟩ + ε KL(π || a ⊗ b) + λ (||π 1 - a||_1 + ||π^T 1 - b||_1),
+```
+where `λ` controls the unbalanced mass penalty. The solution feeds the drift of the
+probability-flow ODE.
+
+### DPM-Solver++ Integrators
+Probability-flow integration is handled by DPM-Solver++ variants (order 1/2/3). Each
+step applies:
+1. Predictor update (Heun, exponential, or adaptive integrators).
+2. Optional corrector (Langevin, Tweedie, or adaptive correctors).
+3. Partial OT barycentric projection using the current transport plan.
+
+### Patch-Based Transport
+For grid-structured data, SPOT tiles the domain into overlapping patches, computes
+local transport maps, and blended barycentric updates. This reduces the dimensionality
+of each transport solve while preserving global structure.
+
+---
 
 ## Quick Start
+
 ```python
 import torch
 from SPOT.builder import SolverBuilder
@@ -64,42 +75,64 @@ samples, stats = solver.sample_enhanced(
     return_stats=True,
     seed=42,
 )
-print("Generated batch:", samples.shape)
+print("Samples:", samples.shape)
 print("Average score latency:", stats["avg_score_time"])
 
-solver.cleanup()  # Restore TF32 flags and release cached resources
-
+solver.cleanup()
 ```
 
-The convenience helpers `create_balanced_solver`, `create_fast_solver`, and `create_repro_solver` return preconfigured `ProductionSPOTSolver` instances if you prefer not to use the fluent builder.
+**Convenience helpers**
+```python
+from SPOT.builder import create_balanced_solver, create_fast_solver, create_repro_solver
 
+balanced_solver = create_balanced_solver(score_model)
+fast_solver = create_fast_solver(score_model)
+repro_solver = create_repro_solver(score_model)
+```
 
-### CLI self-test
+---
+
+## Configuration Notes
+- `patch_size` controls the local OT granularity; 32–64 works well for 512x512 images.
+- `richardson_threshold` governs when Richardson extrapolation fires; tightening improves accuracy at the cost of time.
+- `deterministic=True` enforces bit-exact execution (Sinkhorn CPU fallbacks, TF32 disabled).
+- `with_tf32(True)` enables TF32 matrix multiplications on Ampere+ GPUs for speed.
+
+---
+
+## CLI Self-Test
+SPOT ships with a validation flow to ensure numerical assumptions hold on the target machine:
 ```bash
 python -m SPOT
 ```
-The command runs the bundled validation suite and reports whether the solver is
-ready for deployment on the current hardware.
+The command runs kernel checks, transport accuracy tests, and reports deterministic mode readiness.
 
-## Configuration Guide
-- `SPOT.builder.SolverBuilder` offers a fluent API for configuring devices,
-  determinism, patch-based transport, Richardson extrapolation, and schedule
-  overrides.
-- `SPOT.builder.create_balanced_solver`, `create_fast_solver`, and
-  `create_repro_solver` provide pre-tuned profiles.
-- `SPOT.config.SolverConfig` exposes the full set of knobs (e.g. Sinkhorn
-  iterations, mixed precision, adaptive epsilon scaling) for advanced users.
-- `SPOT.solver.ProductionSPOTSolver.sample_enhanced` returns either tensors or a
-  `SamplingResult` dataclass with execution statistics.
+---
 
-## Testing
-- Run `python -m SPOT` for the integrated validation flow.
-- Import `SPOT.selftest.selftest` in unit tests to assert that the solver is
-  correctly linked against PyTorch and Triton backends.
+## Mathematical Diagnostics
+`solver.test_mathematical_correctness()` (available within `SPOT/solver.py`) performs:
+- kernel derivative finite-difference checks,
+- transport idempotence tests under partial mass,
+- determinism verification (GPU/CPU parity),
+- Richardson extrapolation overhead monitoring.
 
-## License
-SPOT is distributed under the Apache License 2.0 (see `LICENSE`). Please retain
-proper attribution to Thierry Silvio Claude Soreze in derivative works.
+---
 
+## Training Integration
+SPOT consumes a trained score network; training is handled outside the package. When
+adapting a new model:
+1. Train the score model with variance-preserving noise.
+2. Export checkpoints and match the compute dtype used during sampling (FP32 or AMP).
+3. Wrap the model with any required conditioning (e.g., classifier-free guidance).
 
+---
 
+## Troubleshooting
+- **OOM during transport**: reduce `patch_size`, increase `lambda_unbalanced`, or lower batch size.
+- **Slow convergence**: increase `richardson_max_overhead` or `corrector_steps`.
+- **Determinism mismatches**: ensure `with_deterministic(True, cdist_cpu=True)` and run `python -m SPOT` to validate.
+
+---
+
+## License & Citation
+SPOT is distributed under the Apache License 2.0. Retain attribution to Thierry Silvio Claude Soreze in derivative works. Cite the repository if SPOT supports your research.

@@ -720,11 +720,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
             else:
                 beta_t = 0.02  # Default value
         
-        # Compute σ(t)^2 = 1 - α_bar(t)
-        sigma2 = 1.0 - alpha_t
-        
-        # Probability flow ODE drift: dx/dt = -β(t)/2 * x - β(t)*σ(t)^2 * s_θ(x,t)
-        drift = -0.5 * beta_t * x - beta_t * sigma2 * score
+        # Probability flow ODE drift for variance-preserving SDEs: dx/dt = -β(t)/2 * x - β(t) * s_θ(x,t)
+        drift = -0.5 * beta_t * x - beta_t * score
         
         return drift * dt
     

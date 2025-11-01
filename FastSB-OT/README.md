@@ -1,92 +1,135 @@
 # FastSB-OT Solver Toolkit
 
-## Overview
-FastSB-OT delivers a production-grade implementation of a Fast Schrodinger
-Bridge sampler with optimal transport refinements. The solver couples
-score-based generative models with regularised optimal transport updates to
-stabilise long denoising trajectories and accelerate convergence on modern
-GPU hardware. The package now ships as a modular Python subpackage
-(`fastsb_ot`) with clearly separated configuration, kernels, transport and
-solver layers.
+FastSB-OT delivers a production-grade Schrodinger bridge sampler tailored to fast
+optimal transport updates. It complements trained score networks with entropy-regularised
+transport, Fisher-aware momentum, and Triton-accelerated kernels.
+
+---
+
+## Installation
+```bash
+pip install .             # core (PyTorch, NumPy, tqdm)
+pip install .[dev]        # development tools (pytest, ruff)
+```
+Optional extras:
+- `pip install triton` for accelerated Gaussian kernels and Fisher estimators.
+- `pip install .[env]` if you maintain separate requirements for deployment.
+
+---
 
 ## Mathematical Foundations
-- **Schrodinger bridge formulation**: The sampler follows the forward
-  SDE/ODE pair
-  ```
-  dx = f(x, t) dt + g(t) dW,        dy = [f(x, t) - g(t)**2 * grad_x log p_t(x)] dt
-  ```
-  where the score network approximates `grad_x log p_t`. The bridge solves for
-  the most likely path between the prior (pure noise) and data marginals.
-- **Entropy-regularised optimal transport**: Each iteration solves a
-  Sinkhorn-regularised OT problem with adaptive `epsilon`, optionally switching
-  to sliced projections when full kernels exceed memory budgets.
-- **Momentum and hierarchical bridges**: The transport module adds a
-  discrete-time momentum update and multi-scale residual correction driven by
-  Fisher information estimates to maintain stability at high resolutions.
-- **Fisher-aware kernels**: Triton-accelerated kernels compute diagonal
-  Fisher approximations and spectrum-weighted Gaussian convolutions to curb
-  score bias at low signal-to-noise ratios.
 
-## Package Layout
-- `fastsb_ot/common.py` - shared utilities, Triton kernels, compile cache.
-- `fastsb_ot/config.py` - `FastSBOTConfig` dataclass with quality presets and
-  hardware-aware defaults.
-- `fastsb_ot/cache.py` - GPU-aware tensor cache for score and kernel reuse.
-- `fastsb_ot/kernels.py` - frequency-domain Gaussian kernels and Fisher
-  estimators with automatic Triton fall-backs.
-- `fastsb_ot/transport.py` - sliced OT, momentum transport and hierarchical
-  bridge helpers.
-- `fastsb_ot/solver.py` - `FastSBOTSolver` glue logic plus sampling schedules.
+### Schrodinger Bridge Formulation
+FastSB-OT solves the dynamic Schrödinger bridge problem: given forward SDE
+```
+dx = f(x, t) dt + g(t) dW_t,
+```
+find the most likely path measure connecting the prior and data marginals subject to
+an entropic constraint. The bridge dynamics are expressed via a pair of dual potentials
+`(phi_t, psi_t)` that correct the score-based drift.
 
-## Training Strategy
-1. **Score network** - train a score model with denoising score matching or
-   diffusion losses on the target data distribution.
-2. **Noise schedule** - fit or select a monotone `alpha_bar(t)` schedule
-   (cosine, Karras, linear). Use the provided `make_schedule` helper for
-   common schedules.
-3. **Guidance** - the solver expects raw score outputs. Classifier-free or
-   conditional guidance can be injected outside the solver by adjusting the
-   score model wrapper.
-4. **Optimisation tips**
-   - Warm-start with the `balanced` preset; switch to `ultra` only after the
-     score network stabilises.
-  - Enable `use_fp32_fisher` when training with mixed precision to avoid
-     bias in Fisher updates.
-   - Cap `sliced_ot_projections` to 64 on consumer GPUs to control memory
-     pressure during early experimentation.
+### Entropy-Regularised Optimal Transport
+Each iteration solves the regularised OT problem
+```
+γ* = argmin_γ ⟨C, γ⟩ + ε KL(γ || a ⊗ b),
+```
+where `C` is the cost matrix (squared Euclidean distance by default) and `a`, `b`
+are marginal weights. Sinkhorn iterations with adaptive `ε` provide the transport plan.
+
+### Fisher-Aware Momentum
+FastSB-OT augments the bridge update with a momentum term driven by diagonal Fisher
+information estimates. This stabilises updates at low signal-to-noise ratios and
+improves convergence on large resolutions.
+
+---
+
+## Training Guide
+
+FastSB-OT assumes you already trained a score network `s_theta(x, t)` on your dataset.
+Typical training loop:
+1. Train a score model with denoising score matching or noise prediction losses.
+2. Export checkpoints compatible with PyTorch (`state_dict` or Lightning weights).
+3. Record the noise schedule used during training (cosine, Karras, linear, etc.).
+
+The package does not ship a full trainer, but `fastsb_ot.config.FastSBOTConfig`
+captures the solver hyperparameters used during sampling.
+
+---
 
 ## Sampling Workflow
+
 ```python
 import torch
 from fastsb_ot import FastSBOTConfig, FastSBOTSolver, make_schedule
 
-# 1. Load a trained score model (must implement .to(device) and __call__)
-score_model = MyScoreNetwork().eval()
+# 1. Load a trained score network
+score_model = MyScoreNetwork().to("cuda").eval()
+state = torch.load("checkpoints/score_model.pt", map_location="cuda")
+score_model.load_state_dict(state)
 
 # 2. Configure solver and schedule
-config = FastSBOTConfig(quality="balanced", use_mixed_precision=True)
+config = FastSBOTConfig(
+    quality="balanced",
+    use_mixed_precision=True,
+    use_triton_kernels=True,
+)
 schedule = make_schedule("cosine", num_timesteps=config.num_timesteps)
 
-# 3. Construct solver and sample
+# 3. Construct solver and generate samples
 solver = FastSBOTSolver(score_model, schedule, config=config)
 samples = solver.sample((8, 4, 256, 256), verbose=True)
 ```
-The solver automatically handles CUDA initialisation, score caching,
-compilation and fallback strategies. Use the `persistent_cache` argument to
-reuse kernel/Fisher caches across solver instances in long-running services.
 
-## Hardware and Performance Notes
-- Triton kernels provide highest throughput on Ampere+ GPUs; set
-  `use_triton_kernels=False` when targeting older architectures.
-- The memory cache aggressively adapts to available VRAM; monitor
-  `cache_size_mb` and `memory_limit_ot_mb` for large-batch inference.
-- Mixed precision sampling is enabled by default with automatic fall-back to
-  FP32 for numerically sensitive paths.
+**Quality presets**
+- `quality="fast"`: fewer OT iterations, lower transport ranks.
+- `quality="balanced"`: default trade-off for high-res synthesis.
+- `quality="ultra"`: full bridge with maximal accuracy (requires high-end GPUs).
 
-## License
-FastSB-OT is distributed under the Apache License 2.0 (see `LICENSE`). Please
-retain attribution to **Thierry Silvio Claude Soreze** in derivative works.
+---
 
-## Citation
-If you build upon FastSB-OT in academic work, please cite the repository and
-acknowledge Thierry Silvio Claude Soreze as the original author.
+## Configuration Highlights
+
+`FastSBOTConfig` exposes the following knobs:
+
+| Param | Description |
+|-------|-------------|
+| `num_timesteps` | Number of diffusion steps used during sampling. |
+| `epsilon` | Sinkhorn entropic regularisation parameter. |
+| `use_triton_kernels` | Enable Triton kernels for Gaussian convolution and Fisher estimates. |
+| `sliced_ot_projections` | Number of random projections used for sliced OT fallback. |
+| `use_fp32_fisher` | Force Fisher updates to FP32 when using AMP to reduce bias. |
+| `momentum_alpha` | Strength of momentum correction in the transport update. |
+| `memory_limit_ot_mb` | VRAM budget for OT buffers (auto-tunes defaults per preset). |
+
+---
+
+## Mathematical Checks
+
+The solver includes diagnostic routines (see `fastsb_ot/tests` for more examples):
+- `solver.self_check()` validates Sinkhorn convergence, Fisher estimator stability,
+  and transport symmetry on synthetic data.
+- Setting `config.profile=True` records FLOPs, memory usage, and adaptive epsilon traces.
+
+---
+
+## Deployment Notes
+- Triton kernels provide the best throughput on Ampere+ GPUs. Disable them when targeting
+  older architectures or CPU deployments.
+- Use the persistent cache (`fastsb_ot.cache.PersistentKernelCache`) for services that
+  instantiate multiple solvers; it stores FFT kernels and Fisher buffers on disk.
+- For multi-GPU inference, shard batches manually and reuse the same `FastSBOTConfig`
+  to ensure deterministic behaviour across workers.
+
+---
+
+## Testing
+```bash
+pytest
+python -m fastsb_ot.selftest
+```
+Both commands run lightweight transport and Sinkhorn tests to confirm the installation.
+
+---
+
+## License & Citation
+FastSB-OT is distributed under the Apache License 2.0. Retain attribution to Thierry Silvio Claude Soreze in derivative works. If the solver supports your research, cite the repository and acknowledge the author.

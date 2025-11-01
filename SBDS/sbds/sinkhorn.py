@@ -45,6 +45,14 @@ class HilbertSinkhornDivergence:
                 f"got '{kernel_type}'"
             )
 
+        # When use_rff=True, only Gaussian kernels are supported by the RFF implementation
+        if use_rff and kernel_type != "gaussian":
+            raise NotImplementedError(
+                f"Random Fourier Features (use_rff=True) currently only supports 'gaussian' kernel. "
+                f"For kernel type '{kernel_type}', either set use_rff=False to use exact kernel computation, "
+                f"or use kernel_type='gaussian'."
+            )
+
         self.epsilon = epsilon
         self.max_iter = max_iter
         self.tol = tol

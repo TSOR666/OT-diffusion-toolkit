@@ -39,6 +39,18 @@ class KernelDerivativeRFF:
                 f"got '{kernel_type}'"
             )
 
+        # RFF implementation only supports Gaussian kernels correctly
+        # For Laplacian and Cauchy kernels, the spectral measure differs and requires
+        # different sampling distributions and derivative formulas
+        if kernel_type != "gaussian":
+            raise NotImplementedError(
+                f"Random Fourier Features currently only supports 'gaussian' kernel. "
+                f"Kernel type '{kernel_type}' requires different spectral sampling: "
+                f"Laplacian kernel needs Cauchy-distributed features, "
+                f"Cauchy kernel needs Laplace-distributed features. "
+                f"The derivative formulas also differ from the Gaussian case."
+            )
+
         self.input_dim = input_dim
         self.feature_dim = feature_dim
         self.sigma = sigma
@@ -58,12 +70,8 @@ class KernelDerivativeRFF:
         )
 
     def _initialize_random_features(self) -> None:
-        if self.kernel_type == "gaussian":
-            scale = 1.0 / self.sigma
-        elif self.kernel_type in {"laplacian", "cauchy"}:
-            scale = 1.0 / self.sigma
-        else:
-            raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
+        # Gaussian kernel: spectral measure is also Gaussian, scale by 1/σ
+        scale = 1.0 / self.sigma
 
         if self.orthogonal:
             num_blocks = self.feature_dim // self.input_dim
@@ -124,6 +132,11 @@ class KernelDerivativeRFF:
         order: int = 1,
         coordinate: Optional[int | tuple[int, int]] = None,
     ) -> torch.Tensor:
+        """
+        Compute kernel derivatives using Gaussian kernel derivative formulas.
+        For order=1: ∂k(x,y)/∂x_i = k(x,y) * (y_i - x_i) / σ²
+        For order=2: ∂²k(x,y)/∂x_i∂x_j = k(x,y) * (y_i - x_i)(y_j - x_j) / σ⁴ - δ_ij * k(x,y) / σ²
+        """
         if order > self.derivative_order:
             raise ValueError(
                 f"Requested derivative order {order} > supported order {self.derivative_order}"
