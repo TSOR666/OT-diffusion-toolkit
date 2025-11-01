@@ -230,7 +230,7 @@ class AdaptiveIntegrator:
         """Integrate from t_start to t_end with adaptive step size.
 
         Handles both forward (t_start < t_end) and backward (t_start > t_end) integration.
-        Backward integration is typical for diffusion sampling (t: 1 → 0).
+        Backward integration is typical for diffusion sampling (t: 1 -> 0).
 
         Args:
             x0: Initial state

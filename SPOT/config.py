@@ -26,9 +26,9 @@ class SolverConfig:
     max_tensor_size_elements: int = 250_000_000
     max_dense_matrix_elements: int = 50_000_000
     use_patch_based_ot: bool = True
-    patch_size: int = 64
-    highres_patch_size: int = 96
-    ultrares_patch_size: int = 128
+    patch_size: int = 32  # Reduced from 64 to ensure multiple patches for common image sizes (64x64, 128x128)
+    highres_patch_size: int = 64  # Reduced from 96 for better patch coverage on high-res images
+    ultrares_patch_size: int = 96  # Reduced from 128 for ultra-high-res images
     auto_tune_highres: bool = True
     force_per_pixel_b1: bool = False
     timestep_shape_b1: bool = False
@@ -69,6 +69,10 @@ class SolverConfig:
     compile_warmup: bool = True
 
     def validate(self) -> None:
+        if self.eps <= 0:
+            raise ValueError(f"eps must be positive, got {self.eps}")
+        if self.sinkhorn_iterations <= 0:
+            raise ValueError(f"sinkhorn_iterations must be positive, got {self.sinkhorn_iterations}")
         if self.error_tolerance <= 0:
             raise ValueError("error_tolerance must be positive")
         if self.dpm_solver_order not in [1, 2, 3]:
@@ -91,6 +95,14 @@ class SolverConfig:
             raise ValueError("highres_patch_size must be positive")
         if self.ultrares_patch_size <= 0:
             raise ValueError("ultrares_patch_size must be positive")
+        if self.max_fallbacks < 0:
+            raise ValueError("max_fallbacks must be non-negative")
+        if self.max_tensor_size_elements <= 0:
+            raise ValueError("max_tensor_size_elements must be positive")
+        if self.max_dense_matrix_elements <= 0:
+            raise ValueError("max_dense_matrix_elements must be positive")
+        if self.richardson_threshold < 0:
+            raise ValueError("richardson_threshold must be non-negative")
 
         # Validate new options
         valid_integrators = ["dpm_solver++", "heun", "ddim", "adaptive", "exponential"]

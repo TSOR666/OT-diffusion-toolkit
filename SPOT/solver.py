@@ -625,7 +625,7 @@ class ProductionSPOTSolver:
         n_pixels = H * W
         if xb.device.type == 'cpu' and n_pixels * n_pixels > 16_000_000:
             logger.debug(
-                "CPU fallback: per-pixel OT (%d² elements) too large, using identity",
+                "CPU fallback: per-pixel OT (%d^2 elements) too large, using identity",
                 n_pixels,
             )
             self._increment_fallback()
@@ -640,7 +640,7 @@ class ProductionSPOTSolver:
         else:
             # Allow substantially larger dense problems on CPU now that the solver
             # uses more efficient tensor reuse. The previous 2M cap caused the
-            # common 64×64 case to fall back to the extremely slow blockwise
+            # common 64x64 case to fall back to the extremely slow blockwise
             # transport, so we raise the heuristic limit to 64M elements
             # (~256MB for fp32) which remains conservative for CI environments
             # and still respects the config-level cap.
@@ -737,9 +737,7 @@ class ProductionSPOTSolver:
         B = x.size(0)
         
         if B == 1 and self._patch_transport is not None and not self.config.force_per_pixel_b1:
-            xf = x.reshape(1, -1)
-            yf = y.reshape(1, -1)
-            return self._patch_transport(xf, yf, eps)
+            return self._patch_transport(x, y, eps)
         
         transport_maps = []
         for b in range(B):
@@ -759,27 +757,21 @@ class ProductionSPOTSolver:
         """Fallback for batch > 1 in patch transport."""
         B = x.size(0)
         
-        flat_pairs = [(x[b:b+1], y[b:b+1]) for b in range(B)]
+        image_pairs = [(x[b:b+1], y[b:b+1]) for b in range(B)]
         cached_transports = [None] * B
         
         def batched_transport(z):
             outputs = []
             for b in range(B):
                 if cached_transports[b] is None:
-                    xb_flat, yb_flat = flat_pairs[b]
-                    
+                    xb_img, yb_img = image_pairs[b]
+
                     if z.dim() == 4:
-                        _, C, H, W = z[b:b+1].shape
-                        expected_size = C * H * W
-                        if xb_flat.shape[1] == expected_size:
-                            xb = xb_flat.view(1, C, H, W)
-                            yb = yb_flat.view(1, C, H, W)
-                            cached_transports[b] = self._per_sample_pixel_transport(xb, yb, eps)
-                        else:
-                            logger.warning("Flat/image size mismatch for sample %d; using identity fallback - may affect quality", b)
-                            self._increment_fallback()
-                            cached_transports[b] = lambda z: z
+                        cached_transports[b] = self._per_sample_pixel_transport(xb_img, yb_img, eps)
                     else:
+                        xb_flat = xb_img.reshape(xb_img.size(0), -1)
+                        yb_flat = yb_img.reshape(yb_img.size(0), -1)
+
                         if xb_flat.size(0) == 1 and yb_flat.size(0) == 1:
                             logger.warning("N=M=1 degenerate case, using identity fallback - may affect quality")
                             self._increment_fallback()
@@ -801,24 +793,32 @@ class ProductionSPOTSolver:
         
         return batched_transport
     
-    def _create_transport_map(self, x, y, u, v, eps):
-        """Create transport map from dual variables with blockwise computation for large problems."""
+    def _create_transport_map(self, x, y, u, v, eps, allow_single_point=False):
+        """Create transport map from dual variables with blockwise computation for large problems.
+
+        Args:
+            x: Source points
+            y: Target points
+            u, v: Sinkhorn dual variables
+            eps: Entropic regularization
+            allow_single_point: If True, allows N=M=1 case (e.g., for single-patch transport)
+        """
         if not (torch.isfinite(u).all() and torch.isfinite(v).all()):
             logger.debug("Non-finite duals, returning identity transport")
             self._increment_fallback()
             return lambda z: z
-        
+
         if eps < EPSILON_MIN:
             logger.debug(f"Epsilon too small ({eps:.2e}), returning identity")
             self._increment_fallback()
             return lambda z: z
-        
+
         xf = x.reshape(x.size(0), -1)
         yf = y.reshape(y.size(0), -1)
-        
+
         n, m = xf.size(0), yf.size(0)
-        
-        if n == 1 and m == 1:
+
+        if n == 1 and m == 1 and not allow_single_point:
             logger.warning(
                 "N=M=1 degenerate case detected. Using identity transport. "
                 "This typically indicates invalid input data or configuration."
@@ -842,7 +842,7 @@ class ProductionSPOTSolver:
         required_elems = n * m
         if xf.device.type == 'cpu' and required_elems > 16_000_000:
             logger.debug(
-                "CPU fallback: transport %d×%d=%d elements too large, using identity",
+                "CPU fallback: transport %dx%d=%d elements too large, using identity",
                 n,
                 m,
                 required_elems,
@@ -851,7 +851,7 @@ class ProductionSPOTSolver:
             return lambda z: z
 
         if required_elems > max_elems * 2:
-            logger.debug(f"Transport problem too large: {n}×{m}={required_elems} elements, using identity")
+            logger.debug(f"Transport problem too large: {n}x{m}={required_elems} elements, using identity")
             self._increment_fallback()
             return lambda z: z
         
@@ -860,7 +860,7 @@ class ProductionSPOTSolver:
         needs_blockwise = needs_blockwise_hw or needs_blockwise_cfg
         
         if needs_blockwise:
-            logger.debug(f"Using blockwise transport for {n}×{m} problem (max_elems={max_elems})")
+            logger.debug(f"Using blockwise transport for {n}x{m} problem (max_elems={max_elems})")
         
         with torch.no_grad():
             with torch.amp.autocast(device_type='cuda' if xf.is_cuda else 'cpu', enabled=False):
@@ -967,7 +967,7 @@ class ProductionSPOTSolver:
 
         # Input validation for better error messages
         if not isinstance(shape, (tuple, list)) or len(shape) < 3:
-            raise ValueError(f"Shape must be tuple/list with ≥3 dimensions, got: {shape}")
+            raise ValueError(f"Shape must be tuple/list with >=3 dimensions, got: {shape}")
 
         if num_steps < 2:
             raise ValueError(f"num_steps must be at least 2, got: {num_steps}")
@@ -1165,9 +1165,7 @@ class ProductionSPOTSolver:
         """Richardson extrapolation for unbiased OT with performance budget."""
         B = x.size(0)
         if B == 1 and self._patch_transport is not None and not self.config.force_per_pixel_b1:
-            xf = x.reshape(1, -1)
-            yf = y.reshape(1, -1)
-            return self._patch_transport(xf, yf, eps)
+            return self._patch_transport(x, y, eps)
         
         eps1 = eps
         eps2 = eps / 2
@@ -1204,144 +1202,153 @@ class ProductionSPOTSolver:
     
     def selftest(self, verbose: bool = True) -> Dict[str, Any]:
         """Run comprehensive self-tests to validate correctness.
-        
+
         Forces deterministic mode for reliable testing.
         """
-        results = {'status': 'passed', 'tests': {}, 'timings': {}}
-        
-        # Force deterministic mode for self-test
+        results: Dict[str, Any] = {"status": "passed", "tests": {}, "timings": {}}
+
         old_det = self.config.deterministic
         old_det_cdist = self.config.deterministic_cdist_cpu
         old_rich = self.config.richardson_extrapolation
-        
+
         try:
             self.config.deterministic = True
             self.config.deterministic_cdist_cpu = True
             self.config.richardson_extrapolation = False
-            
+
             t_vals = torch.linspace(0, 1, 10, device=self.device)
-            
-            # Test 1: λ(t) always fp32
+
+            # Test 1: lambda(t) is always float32
             test_start = time.time()
-            for schedule_name, schedule in [
-                ('current', self.noise_schedule),
-                ('cosine_fp16', CosineSchedule(device=self.device, dtype=torch.float16)),
-                ('linear_fp16', LinearSchedule(device=self.device, dtype=torch.float16))
-            ]:
+            schedules = [
+                ("current", self.noise_schedule),
+                ("cosine_fp16", CosineSchedule(device=self.device, dtype=torch.float16)),
+                ("linear_fp16", LinearSchedule(device=self.device, dtype=torch.float16)),
+            ]
+            for schedule_name, schedule in schedules:
                 lambda_result = schedule.lambda_(0.5)
                 test_passed = lambda_result.dtype == torch.float32
-                results['tests'][f'{schedule_name}_lambda_fp32'] = test_passed
+                results["tests"][f"{schedule_name}_lambda_fp32"] = bool(test_passed)
                 if not test_passed:
-                    results['status'] = 'failed'
-                    logger.error(f"CRITICAL: {schedule_name} lambda returned {lambda_result.dtype}, expected fp32")
+                    results["status"] = "failed"
+                    logger.error(
+                        "CRITICAL: %s lambda returned dtype %s, expected torch.float32",
+                        schedule_name,
+                        lambda_result.dtype,
+                    )
                 if verbose:
-                    status = "✅" if test_passed else "❌"
-                    logger.info(f"   {status} {schedule_name}: λ(t) dtype = {lambda_result.dtype} (must be fp32)")
-            results['timings']['lambda_test'] = time.time() - test_start
-            
-            # Test 2: λ(t) monotonicity
+                    status_text = "PASS" if test_passed else "FAIL"
+                    logger.info(
+                        "   [%s] %s: lambda(t) dtype = %s (expected torch.float32)",
+                        status_text,
+                        schedule_name,
+                        lambda_result.dtype,
+                    )
+            results["timings"]["lambda_test"] = time.time() - test_start
+
+            # Test 2: lambda(t) monotonicity
             test_start = time.time()
-            if results['status'] == 'passed':
-                lambda_vals = torch.stack([self.noise_schedule.lambda_(float(t)) for t in t_vals]).squeeze(-1)
-                is_monotonic = torch.all(lambda_vals[:-1] >= lambda_vals[1:]).item()
-                results['tests']['lambda_monotonic'] = is_monotonic
-                if not is_monotonic:
-                    results['status'] = 'failed'
-                if verbose:
-                    status = "✅" if is_monotonic else "❌"
-                    logger.info(f"   {status} λ(t) monotonicity: λ(0)={lambda_vals[0].item():.3f} > λ(1)={lambda_vals[-1].item():.3f}")
-            results['timings']['monotonicity_test'] = time.time() - test_start
-            
-            # Test 3: α² + σ² ≈ 1
+            lambda_vals = torch.stack([self.noise_schedule.lambda_(float(t)) for t in t_vals]).squeeze(-1)
+            is_monotonic = torch.all(lambda_vals[:-1] >= lambda_vals[1:]).item()
+            results["tests"]["lambda_monotonic"] = bool(is_monotonic)
+            if not is_monotonic:
+                results["status"] = "failed"
+            if verbose:
+                status_text = "PASS" if is_monotonic else "FAIL"
+                logger.info(
+                    "   [%s] lambda(t) monotonicity: lambda(0)=%.3f >= lambda(1)=%.3f",
+                    status_text,
+                    lambda_vals[0].item(),
+                    lambda_vals[-1].item(),
+                )
+            results["timings"]["monotonicity_test"] = time.time() - test_start
+
+            # Test 3: alpha^2 + sigma^2 ~= 1
             test_start = time.time()
             alpha, sigma = self.noise_schedule.alpha_sigma(t_vals)
-            sum_squares = (alpha.float()**2 + sigma.float()**2)
+            sum_squares = torch.square(alpha.float()) + torch.square(sigma.float())
             max_error = (sum_squares - 1).abs().max().item()
             test_passed = max_error < 1e-5
-            results['tests']['alpha_sigma_unity'] = test_passed
-            results['tests']['alpha_sigma_max_error'] = max_error
+            results["tests"]["alpha_sigma_unity"] = bool(test_passed)
+            results["tests"]["alpha_sigma_max_error"] = max_error
             if not test_passed:
-                results['status'] = 'failed'
+                results["status"] = "failed"
             if verbose:
-                status = "✅" if test_passed else "❌"
-                logger.info(f"   {status} α² + σ² ≈ 1: max error = {max_error:.2e}")
-            results['timings']['unity_test'] = time.time() - test_start
-            
+                status_text = "PASS" if test_passed else "FAIL"
+                logger.info(
+                    "   [%s] alpha^2 + sigma^2 ~= 1: max error = %.2e",
+                    status_text,
+                    max_error,
+                )
+            results["timings"]["unity_test"] = time.time() - test_start
+
             # Test 4: Determinism
             if verbose:
-                logger.info("   🔄 Testing determinism...")
+                logger.info("   Testing determinism...")
             test_start = time.time()
             shape = (1, 3, 32, 32)
-            
+
             x1 = self.sample_enhanced(shape, num_steps=2, verbose=False, seed=42)
             x2 = self.sample_enhanced(shape, num_steps=2, verbose=False, seed=42)
             is_deterministic = torch.allclose(x1, x2, atol=0, rtol=0)
-            results['tests']['deterministic_sampling'] = is_deterministic
+            results["tests"]["deterministic_sampling"] = bool(is_deterministic)
             if not is_deterministic:
-                results['status'] = 'failed'
+                results["status"] = "failed"
             if verbose:
-                status = "✅" if is_deterministic else "❌"
-                logger.info(f"   {status} Deterministic sampling (same solver instance)")
-            results['timings']['determinism_test'] = time.time() - test_start
-            
-            # Additional tests (small images, thread safety)
+                status_text = "PASS" if is_deterministic else "FAIL"
+                logger.info(
+                    "   [%s] Deterministic sampling (same solver instance)",
+                    status_text,
+                )
+            results["timings"]["determinism_test"] = time.time() - test_start
+
+            # Test 5: Small image support
+            if verbose:
+                logger.info("   Testing small image support...")
             test_start = time.time()
-            if verbose:
-                logger.info("   🔄 Testing small image support...")
-            
-            try:
-                small_sizes = [(1, 3, 16, 16), (1, 3, 32, 32), (1, 3, 8, 8)]
-                all_work = True
-                for sz in small_sizes:
-                    try:
-                        # ``sample_enhanced`` enforces ``num_steps >= 2`` for numerical
-                        # stability. The legacy self-test still used ``num_steps=1``, which
-                        # now triggers the validation guard and incorrectly reports the small
-                        # image regression as a transport failure. Align the smoke-test with
-                        # the production contract so we validate actual functionality instead
-                        # of tripping the input validator.
-                        x_small = self.sample_enhanced(sz, num_steps=2, verbose=False, seed=42)
-                        if x_small.shape != sz:
-                            all_work = False
-                            break
-                    except Exception as e:
-                        logger.debug(f"Small image {sz} failed: {e}")
+            small_sizes = [(1, 3, 16, 16), (1, 3, 32, 32), (1, 3, 8, 8)]
+            all_work = True
+            for sz in small_sizes:
+                try:
+                    x_small = self.sample_enhanced(sz, num_steps=2, verbose=False, seed=42)
+                    if x_small.shape != sz:
+                        logger.debug("Small image %s returned shape %s", sz, tuple(x_small.shape))
                         all_work = False
                         break
-                
-                results['tests']['small_image_support'] = all_work
-                if not all_work:
-                    results['status'] = 'failed'
-                if verbose:
-                    status = "✅" if all_work else "❌"
-                    logger.info(f"   {status} Small image support (8x8, 16x16, 32x32)")
-            except Exception as e:
-                results['tests']['small_image_support'] = False
-                results['status'] = 'failed'
-                if verbose:
-                    logger.info(f"   ❌ Small image support: {e}")
-            results['timings']['small_image_test'] = time.time() - test_start
-            
-        except Exception as e:
-            results['status'] = 'error'
-            results['error'] = str(e)
+                except Exception as small_exc:  # pragma: no cover - diagnostic logging
+                    logger.debug("Small image %s failed: %s", sz, small_exc)
+                    all_work = False
+                    break
+
+            results["tests"]["small_image_support"] = all_work
+            if not all_work:
+                results["status"] = "failed"
             if verbose:
-                logger.error(f"   ❌ Self-test failed: {e}")
+                status_text = "PASS" if all_work else "FAIL"
+                logger.info(
+                    "   [%s] Small image support (8x8, 16x16, 32x32)",
+                    status_text,
+                )
+            results["timings"]["small_image_test"] = time.time() - test_start
+
+        except Exception as exc:
+            results["status"] = "error"
+            results["error"] = str(exc)
+            if verbose:
+                logger.error("   [FAIL] Self-test terminated with exception: %s", exc)
         finally:
-            # Restore original config
             self.config.deterministic = old_det
             self.config.deterministic_cdist_cpu = old_det_cdist
             self.config.richardson_extrapolation = old_rich
-        
+
         if verbose:
-            if results['status'] == 'passed':
-                logger.info(f"\n🏁 Self-test result: {results['status'].upper()}")
-                logger.info(f"✅ SPOT {__version__} is production-ready!")
-                total_time = sum(results['timings'].values())
-                logger.info(f"   Total test time: {total_time:.3f}s")
-            else:
-                logger.info(f"\n🏁 Self-test result: {results['status'].upper()}")
-        
+            summary = f"\n[SELFTEST] Result: {results['status'].upper()}"
+            logger.info(summary)
+            if results["status"] == "passed":
+                total_time = sum(results["timings"].values()) if results["timings"] else 0.0
+                logger.info("SPOT %s is production-ready!", __version__)
+                logger.info("   Total test time: %.3fs", total_time)
+
         return results
     
     def cleanup(self):

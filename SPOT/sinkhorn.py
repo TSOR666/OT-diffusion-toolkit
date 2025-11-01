@@ -86,6 +86,13 @@ class OptimizedSinkhornKernel:
     def _sinkhorn_native(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
         N, M = x.size(0), y.size(0)
 
+        # Handle degenerate case where N=0 or M=0
+        if N == 0 or M == 0:
+            logger.warning("Sinkhorn called with empty tensor (N=%d, M=%d), returning NaN duals", N, M)
+            u = torch.full((N,), float("nan"), device=self.device, dtype=self.dtype)
+            v = torch.full((M,), float("nan"), device=self.device, dtype=self.dtype)
+            return u, v
+
         if self.config.deterministic_cdist_cpu and self.device.type == "cuda":
             with torch.amp.autocast(device_type="cpu", enabled=False):
                 x_cpu = x.float().cpu()
@@ -195,6 +202,13 @@ class OptimizedSinkhornKernel:
         """Triton-accelerated Sinkhorn with log-stabilization."""
         N, M = x.size(0), y.size(0)
 
+        # Handle degenerate case where N=0 or M=0
+        if N == 0 or M == 0:
+            logger.warning("Triton Sinkhorn called with empty tensor (N=%d, M=%d), returning NaN duals", N, M)
+            u = torch.full((N,), float("nan"), device=self.device, dtype=self.dtype)
+            v = torch.full((M,), float("nan"), device=self.device, dtype=self.dtype)
+            return u, v
+
         # Initialize log marginals
         log_a = torch.full((N,), -math.log(N), device=self.device, dtype=torch.float32)
         log_b = torch.full((M,), -math.log(M), device=self.device, dtype=torch.float32)
@@ -244,11 +258,20 @@ class OptimizedSinkhornKernel:
     def _sinkhorn_pot(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
         import ot  # Local import to ensure optional dependency is available when needed
 
+        N, M = x.size(0), y.size(0)
+
+        # Handle degenerate case where N=0 or M=0
+        if N == 0 or M == 0:
+            logger.warning("POT Sinkhorn called with empty tensor (N=%d, M=%d), returning NaN duals", N, M)
+            u = torch.full((N,), float("nan"), device=self.device, dtype=self.dtype)
+            v = torch.full((M,), float("nan"), device=self.device, dtype=self.dtype)
+            return u, v
+
         x_np = x.detach().cpu().float().numpy()
         y_np = y.detach().cpu().float().numpy()
 
-        a = np.ones(x.size(0), dtype=np.float32) / x.size(0)
-        b = np.ones(y.size(0), dtype=np.float32) / y.size(0)
+        a = np.ones(N, dtype=np.float32) / N
+        b = np.ones(M, dtype=np.float32) / M
 
         C = np.sum((x_np[:, None, :] - y_np[None, :, :]) ** 2, axis=2)
 

@@ -12,87 +12,114 @@ __all__ = ["make_grid_patch_transport", "blockwise_soft_assignment"]
 
 
 def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None = None) -> Callable:
-    """Create a patch-based transport map factory bound to a solver instance."""
+    """Create a patch-based transport map factory bound to a solver instance.
 
-    stride = stride or patch_size // 2
+    Args:
+        solver: The solver instance
+        patch_size: Size of each patch (will be adjusted if too large for image)
+        stride: Stride between patches (default: patch_size // 2 for 50% overlap)
 
-    unfold_cache: Dict[Tuple[int, int, int], torch.nn.Unfold] = {}
-    fold_cache: Dict[Tuple[int, int, int], torch.nn.Fold] = {}
-    norm_cache: Dict[Tuple[int, int, int], torch.Tensor] = {}
-    y_patches_cache: Dict[Tuple[int, int, int], torch.Tensor] = {}
+    Returns:
+        A factory function that creates patch-based transport maps for BCHW image pairs
+    """
 
-    def factory(x_flat: torch.Tensor, y_flat: torch.Tensor, eps: float):
-        if x_flat.dim() != 2 or y_flat.dim() != 2:
-            raise ValueError("Patch transport expects flattened inputs")
+    # Ensure stride is at least 1 to avoid division by zero
+    stride = stride or max(1, patch_size // 2)
 
-        B, N = x_flat.shape
-        C = solver.config.patch_size
+    unfold_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.nn.Unfold] = {}
+    fold_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.nn.Fold] = {}
+    norm_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.Tensor] = {}
+
+    def factory(x_img: torch.Tensor, y_img: torch.Tensor, eps: float):
+        if x_img.dim() != 4 or y_img.dim() != 4:
+            logger.debug("Patch transport expects BCHW tensors; using identity")
+            return lambda z: z
+
+        if x_img.shape != y_img.shape:
+            logger.debug("Patch transport requires matching shapes; using identity")
+            return lambda z: z
+
+        B, C, H, W = x_img.shape
         if B != 1:
-            logger.debug("Patch transport only supports batch=1; falling back to identity")
+            logger.debug("Patch transport currently supports batch size 1; using identity")
             return lambda z: z
 
-        C = solver.config.patch_size
-        H = W = int((N / C) ** 0.5)
-        if H * W * C != N:
-            logger.debug("Patch transport input size mismatch, using identity")
+        if patch_size > min(H, W):
+            logger.debug("Patch size %d exceeds spatial dimensions %dx%d; using identity", patch_size, H, W)
             return lambda z: z
 
+        # Adjust patch size to ensure at least 2x2 patches for meaningful patch-based OT
         ps = patch_size
         st = stride
 
-        cache_key = (ps, st, N)
+        # Calculate number of patches with current settings
+        num_patches_h = ((H - ps) // st) + 1
+        num_patches_w = ((W - ps) // st) + 1
+        potential_num_patches = num_patches_h * num_patches_w
 
-        def transport(z: torch.Tensor):
-            if z.dim() != 4:
-                logger.debug("Patch transport expects BCHW tensors; falling back to identity")
-                return z
-
-            B, C_channels, H_img, W_img = z.shape
-            if (H_img, W_img) != (H, W) or C_channels != C:
-                logger.debug("Patch transport shape mismatch, using identity")
-                return z
-
-            if cache_key not in unfold_cache:
-                unfold_cache[cache_key] = torch.nn.Unfold(kernel_size=ps, stride=st)
-                fold_cache[cache_key] = torch.nn.Fold(output_size=(H, W), kernel_size=ps, stride=st)
-
-            unfold = unfold_cache[cache_key]
-            fold = fold_cache[cache_key]
-
-            patches = unfold(z)
-            B_, D_, L = patches.shape
-
-            if cache_key not in norm_cache:
-                ones = torch.ones((B, D_, L), device=z.device, dtype=z.dtype)
-                norm_cache[cache_key] = fold(ones).clamp_min(1e-6)
-            norm = norm_cache[cache_key]
-
-            if cache_key not in y_patches_cache:
-                y_img = y_flat.view(1, C, H, W).to(z.device, z.dtype)
-                y_p = unfold(y_img).transpose(1, 2)
-                y_patches_cache[cache_key] = y_p.reshape(-1, y_p.size(-1))
-
-            y_pf = y_patches_cache[cache_key]
-
-            x_p = patches.transpose(1, 2)
-            x_pf = x_p.reshape(-1, x_p.size(-1))
-
-            u, v = solver.sinkhorn_kernel.sinkhorn_log_stabilized(
-                x_pf, y_pf, eps, n_iter=solver.config.sinkhorn_iterations
+        # If only 1 patch, reduce patch_size to get at least 4 patches (2x2 grid)
+        # This ensures patch-based OT provides meaningful spatial transport
+        if potential_num_patches == 1 and min(H, W) > ps:
+            # Aim for 2x2 patches with 50% overlap
+            ps = max(min(H, W) // 2, 16)  # Minimum 16x16 patches
+            st = max(1, ps // 2)  # Ensure stride >= 1
+            logger.debug(
+                "Adjusted patch_size from %d to %d to avoid single-patch case (image=%dx%d)",
+                patch_size, ps, H, W
             )
 
-            if not (torch.isfinite(u).all() and torch.isfinite(v).all()):
-                logger.debug("Patch OT produced non-finite values, using identity")
+        cache_key = (C, H, W, ps, st, x_img.device, x_img.dtype)
+        if cache_key not in unfold_cache:
+            unfold_cache[cache_key] = torch.nn.Unfold(kernel_size=ps, stride=st)
+            fold_cache[cache_key] = torch.nn.Fold(output_size=(H, W), kernel_size=ps, stride=st)
+
+        unfold = unfold_cache[cache_key]
+        fold = fold_cache[cache_key]
+
+        patches_x = unfold(x_img)
+        patches_y = unfold(y_img)
+        _, patch_dim, num_patches = patches_x.shape
+
+        logger.debug(
+            "Patch transport: patch_size=%d, stride=%d, image=%dx%d, num_patches=%d",
+            ps, st, H, W, num_patches
+        )
+
+        if cache_key not in norm_cache:
+            ones = torch.ones((B, patch_dim, num_patches), device=x_img.device, dtype=x_img.dtype)
+            norm_cache[cache_key] = fold(ones).clamp_min(1e-6)
+        norm = norm_cache[cache_key]
+
+        x_vec = patches_x.transpose(1, 2).reshape(-1, patch_dim)
+        y_vec = patches_y.transpose(1, 2).reshape(-1, patch_dim)
+
+        u, v = solver.sinkhorn_kernel.sinkhorn_log_stabilized(
+            x_vec, y_vec, eps, n_iter=solver.config.sinkhorn_iterations
+        )
+
+        if not (torch.isfinite(u).all() and torch.isfinite(v).all()):
+            logger.debug("Patch Sinkhorn produced non-finite values; using identity transport")
+            return lambda z: z
+
+        # Allow single-patch case (N=M=1) for patch-based transport
+        transport_map = solver._create_transport_map(x_vec, y_vec, u, v, eps, allow_single_point=True)
+
+        def apply_transport(z: torch.Tensor) -> torch.Tensor:
+            if z.dim() != 4:
+                logger.debug("Patch transport expects BCHW tensors; returning input unchanged")
                 return z
 
-            tm = solver._create_transport_map(x_pf, y_pf, u, v, eps)
+            if z.shape[1:] != (C, H, W):
+                logger.debug("Patch transport received mismatched shape %s; returning input unchanged", tuple(z.shape))
+                return z
 
-            z_p_next = tm(x_pf).reshape(B, L, D_).transpose(1, 2)
-            z_next = fold(z_p_next) / norm
+            patches_z = unfold(z)
+            z_vec = patches_z.transpose(1, 2).reshape(-1, patch_dim)
+            transported_vec = transport_map(z_vec).reshape(B, num_patches, patch_dim).transpose(1, 2)
+            transported = fold(transported_vec) / norm
+            return transported.to(z.dtype)
 
-            return z_next
-
-        return transport
+        return apply_transport
 
     return factory
 
