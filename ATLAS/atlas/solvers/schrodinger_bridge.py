@@ -607,8 +607,10 @@ class SchroedingerBridgeSolver:
                 )
                 # Return current solution but indicate not fully converged
                 return x, False
-                
-            beta = rsnew / rsold
+
+            # Compute beta with numerical stability check
+            rsold_safe = torch.clamp(rsold, min=torch.finfo(rsold.dtype).tiny)
+            beta = rsnew / rsold_safe
             p = r + beta * p
             rsold = rsnew
             

@@ -67,7 +67,7 @@ class RFFKernelOperator(KernelOperator):
             return 1.0 / math.sqrt(max(self.epsilon, 1e-12))
         if self.kernel_type in {"laplacian", "cauchy"}:
             return 1.0 / max(self.epsilon, 1e-12)
-        raise AssertionError("Unsupported kernel type")
+        raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
 
     def _sample_weights(self, num_features: int, scale: float) -> torch.Tensor:
         if self.orthogonal:
