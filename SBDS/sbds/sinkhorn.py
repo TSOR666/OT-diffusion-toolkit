@@ -86,7 +86,8 @@ class HilbertSinkhornDivergence:
         if use_rff:
             dim = x.size(1) if x.dim() > 1 else 1
             self._initialize_rff(dim)
-            assert self.rff is not None
+            if self.rff is None:
+                raise RuntimeError("Failed to initialize RFF kernel")
             x_features = self.rff.compute_features(x)
             y_features = self.rff.compute_features(y)
             x_features = F.normalize(x_features, p=2, dim=1)
@@ -196,7 +197,8 @@ class HilbertSinkhornDivergence:
             if self.use_rff:
                 dim = x_flat.size(1)
                 self._initialize_rff(dim)
-                assert self.rff is not None
+                if self.rff is None:
+                    raise RuntimeError("Failed to initialize RFF kernel")
                 x_features = self.rff.compute_features(x_flat)
                 y_features = self.rff.compute_features(y_flat)
                 x_sample = x_features[: min(100, x_features.size(0))]

@@ -730,7 +730,8 @@ class FastSBOTSolver(nn.Module):
             learned_variance_used = True
             c = noise_pred.shape[1]
             xc = x_t.shape[1]
-            assert c == 2 * xc, f"Expected [ε||logvar] with {2*xc} channels, got {c}"
+            if c != 2 * xc:
+                raise ValueError(f"Expected [ε||logvar] with {2*xc} channels, got {c}")
             # Split noise_pred if model predicts both mean and variance
             noise_pred, log_variance = torch.chunk(noise_pred, 2, dim=1)
             # Interpolate between minimum and maximum variance

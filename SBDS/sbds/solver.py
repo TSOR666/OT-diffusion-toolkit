@@ -445,7 +445,10 @@ class EnhancedScoreBasedSBDiffusionSolver:
                         if metrics_logger is not None and not enable_profiling:
                             metrics_logger.log_module_flops('multiscale_sb', np.prod(shape) * np.log2(shape[0]) * 3)  # Approximate FLOPs
                     else:
-                        raise ValueError(f"Unknown computational tier: {tier}")
+                        raise ValueError(
+                            f"Unknown computational tier: '{tier}'. "
+                            f"Valid options: 'auto', 'full', 'rff', 'nystrom', 'multiscale'"
+                        )
                 
                 # Apply corrector if requested (Langevin MCMC refinement)
                 if self.corrector_steps > 0:
@@ -1406,7 +1409,8 @@ def test_mathematical_correctness():
     dK = rff.compute_kernel_derivative(x, y, order=1)
     
     # Verify shape
-    assert dK.shape == (2, 10, 15), f"Wrong derivative shape: {dK.shape}"
+    if dK.shape != (2, 10, 15):
+        raise ValueError(f"Wrong derivative shape: expected (2, 10, 15), got {dK.shape}")
     
     # Numerical check: ∂k/∂x_i ≈ (k(x+h*e_i,y) - k(x,y))/h
     h = 1e-5
@@ -1417,7 +1421,8 @@ def test_mathematical_correctness():
         dK_numerical = (K_plus - K) / h
         error = torch.max(torch.abs(dK[i] - dK_numerical))
         print(f"  Derivative error for dim {i}: {error:.6f}")
-        assert error < 1e-3, f"Large derivative error: {error}"
+        if error >= 1e-3:
+            raise ValueError(f"Large derivative error: {error}")
     
     # Test 2: Probability flow ODE drift
     print("\n2. Testing probability flow ODE drift...")
@@ -1432,9 +1437,10 @@ def test_mathematical_correctness():
     dt = 0.01
     
     drift = solver._compute_drift(x, t, dt)
-    
+
     # Verify drift has correct shape
-    assert drift.shape == x.shape, f"Wrong drift shape: {drift.shape}"
+    if drift.shape != x.shape:
+        raise ValueError(f"Wrong drift shape: expected {x.shape}, got {drift.shape}")
     
     # Test 3: Stable exp/log
     print("\n3. Testing stable exp/log...")
@@ -1443,10 +1449,13 @@ def test_mathematical_correctness():
     
     exp_pos = solver._stable_exp(large_pos)
     exp_neg = solver._stable_exp(large_neg)
-    
-    assert torch.isfinite(exp_pos), "Stable exp failed for large positive"
-    assert torch.isfinite(exp_neg), "Stable exp failed for large negative"
-    assert exp_pos <= torch.exp(torch.tensor(50.0)), "Stable exp didn't clamp properly"
+
+    if not torch.isfinite(exp_pos):
+        raise ValueError("Stable exp failed for large positive")
+    if not torch.isfinite(exp_neg):
+        raise ValueError("Stable exp failed for large negative")
+    if exp_pos > torch.exp(torch.tensor(50.0)):
+        raise ValueError("Stable exp didn't clamp properly")
     
     # Test 4: MMD computation
     print("\n4. Testing MMD computation...")
@@ -1457,11 +1466,13 @@ def test_mathematical_correctness():
     y_features = torch.randn(100, 256)
     
     mmd_sq = schedule._compute_mmd(x_features, y_features)
-    assert mmd_sq >= 0, f"MMD² should be non-negative: {mmd_sq}"
+    if mmd_sq < 0:
+        raise ValueError(f"MMD² should be non-negative: {mmd_sq}")
     
     # Same distribution should have small MMD
     mmd_same = schedule._compute_mmd(x_features, x_features)
-    assert mmd_same < 1e-6, f"MMD² for same distribution should be ~0: {mmd_same}"
+    if mmd_same >= 1e-6:
+        raise ValueError(f"MMD² for same distribution should be ~0: {mmd_same}")
     
     # Test 5: Sinkhorn convergence
     print("\n5. Testing Sinkhorn algorithm...")
@@ -1471,12 +1482,15 @@ def test_mathematical_correctness():
     y = torch.randn(25, 2)
     
     divergence = sinkhorn.compute_divergence(x, y)
-    assert torch.isfinite(divergence), "Sinkhorn divergence is not finite"
-    assert divergence >= 0, f"Divergence should be non-negative: {divergence}"
+    if not torch.isfinite(divergence):
+        raise ValueError("Sinkhorn divergence is not finite")
+    if divergence < 0:
+        raise ValueError(f"Divergence should be non-negative: {divergence}")
     
     # Test debiased property
     div_xx = sinkhorn.compute_divergence(x, x)
-    assert abs(div_xx) < 1e-4, f"Debiased divergence X,X should be ~0: {div_xx}"
+    if abs(div_xx) >= 1e-4:
+        raise ValueError(f"Debiased divergence X,X should be ~0: {div_xx}")
     
     print("\nAll mathematical tests passed! ✓")
 

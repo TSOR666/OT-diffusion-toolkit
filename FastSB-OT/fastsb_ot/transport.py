@@ -88,8 +88,10 @@ class SlicedOptimalTransport:
         dtype = x.dtype
 
         if os.environ.get('FASTSBOT_ASSERTS', '0') == '1':
-            assert x.shape == y.shape, f"Shape mismatch: x={x.shape}, y={y.shape}"
-            assert x.dim() == 3, f"Expected 3D tensor (B,N,d), got {x.dim()}D"
+            if x.shape != y.shape:
+                raise ValueError(f"Shape mismatch: x={x.shape}, y={y.shape}")
+            if x.dim() != 3:
+                raise ValueError(f"Expected 3D tensor (B,N,d), got {x.dim()}D")
 
         transported = torch.zeros_like(x)
         transported_proj = x.new_zeros(B, N)  # Zero-init for safety
@@ -120,8 +122,10 @@ class SlicedOptimalTransport:
         B, N, d = x.shape
 
         if os.environ.get('FASTSBOT_ASSERTS', '0') == '1':
-            assert x.shape == y.shape, f"Shape mismatch: x={x.shape}, y={y.shape}"
-            assert x.dim() == 3, f"Expected 3D tensor, got {x.dim()}D"
+            if x.shape != y.shape:
+                raise ValueError(f"Shape mismatch: x={x.shape}, y={y.shape}")
+            if x.dim() != 3:
+                raise ValueError(f"Expected 3D tensor, got {x.dim()}D")
 
         x_expanded = x.unsqueeze(2)
         y_expanded = y.unsqueeze(1)

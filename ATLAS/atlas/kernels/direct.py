@@ -71,7 +71,8 @@ class DirectKernelOperator(KernelOperator):
         if self.kernel_matrix is None or x.shape != self.last_x_shape:
             self.setup(x)
 
-        assert self.kernel_matrix is not None
+        if self.kernel_matrix is None:
+            raise RuntimeError("Kernel matrix not initialized after setup")
         if v.dim() > 1 and v.shape[0] == self.kernel_matrix.shape[0]:
             v_shape = v.shape
             v_flat = v.reshape(v.shape[0], -1)
@@ -83,7 +84,8 @@ class DirectKernelOperator(KernelOperator):
         if self.kernel_matrix is None or x.shape != self.last_x_shape:
             self.setup(x)
 
-        assert self.kernel_matrix is not None
+        if self.kernel_matrix is None:
+            raise RuntimeError("Kernel matrix not initialized after setup")
         if v.dim() > 1 and v.shape[0] == self.kernel_matrix.shape[0]:
             v_shape = v.shape
             v_flat = v.reshape(v.shape[0], -1)

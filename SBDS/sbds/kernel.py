@@ -223,5 +223,5 @@ class KernelDerivativeRFF:
         return {
             "kernel": base_error,
             "first_derivative": base_error / (self.sigma**2),
-            "second_derivative": base_error / (self.sigma**2),
+            "second_derivative": base_error / (self.sigma**4),
         }

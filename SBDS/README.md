@@ -13,10 +13,10 @@ SBDS implements a state-of-the-art diffusion solver that combines:
 
 ## Installation
 
-The package is part of the `solvers` module:
+Import the package:
 
 ```python
-from solvers import sbds
+import sbds
 ```
 
 ## Quick Start
@@ -24,7 +24,7 @@ from solvers import sbds
 ```python
 import torch
 import torch.nn as nn
-from solvers.sbds import (
+from sbds import (
     EnhancedScoreBasedSBDiffusionSolver,
     EnhancedAdaptiveNoiseSchedule,
     create_standard_timesteps,
@@ -156,7 +156,7 @@ samples = solver.sample(
 Track performance metrics during sampling:
 
 ```python
-from solvers.sbds import MetricsLogger
+from sbds import MetricsLogger
 
 # Create logger
 logger = MetricsLogger(log_file='metrics.json')
@@ -338,7 +338,7 @@ samples = solver.sample(
 For smoother gradients on grid data:
 
 ```python
-from solvers.sbds import spectral_gradient
+from sbds import spectral_gradient
 
 # Compute spectral gradient
 grad = spectral_gradient(
