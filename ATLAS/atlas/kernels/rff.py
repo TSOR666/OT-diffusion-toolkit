@@ -113,13 +113,18 @@ class RFFKernelOperator(KernelOperator):
         while len(self._feature_cache) > self.max_cached_batch_size:
             self._feature_cache.popitem(last=False)
 
-    def _cache_key(self, x: torch.Tensor) -> Optional[Tuple[int, torch.dtype]]:
+    def _cache_key(
+        self, x: torch.Tensor
+    ) -> Optional[Tuple[int, torch.dtype, int, int]]:
         if x.size(0) > self.max_cached_batch_size:
             return None
-        return (x.size(0), x.dtype)
+        storage = x.storage()
+        return (x.size(0), x.dtype, storage.data_ptr(), x.storage_offset())
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
         x = x.to(self.device)
+        # Ensure the tensor has a well-defined storage layout for caching.
+        x = x.contiguous()
         if x.dim() > 2:
             x = x.reshape(x.shape[0], -1)
         if x.shape[1] != self.input_dim:

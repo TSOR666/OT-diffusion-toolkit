@@ -21,19 +21,18 @@ Quick Start:
     )
 
 GPU Memory Presets:
-------------------
+
 - "6GB": Consumer GPUs (GTX 1660, RTX 3050)
 - "8GB": Mid-range GPUs (RTX 3060, RTX 4060)
 - "12GB": High-end consumer (RTX 3080, RTX 4070)
 - "16GB": Prosumer (RTX 4080, RTX 4090)
 - "24GB": Professional (RTX 4090, A5000)
-"""
-
+- "32GB": Flagship GPUs (RTX 5090 / 5090 Ti, 4090 Ti)
 import torch
 import warnings
 from pathlib import Path
 from typing import Union, List, Optional, Dict, Any, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from atlas.models.score_network import HighResLatentScoreModel
 from atlas.solvers.hierarchical_sampler import AdvancedHierarchicalDiffusionSampler
@@ -52,6 +51,7 @@ from atlas.utils.memory import get_peak_memory_mb
 @dataclass
 class GPUProfile:
     """Configuration profile optimized for specific GPU memory constraints."""
+
     name: str
     memory_mb: int
     batch_size: int
@@ -62,6 +62,8 @@ class GPUProfile:
     enable_clip: bool
     gradient_checkpointing: bool
     description: str
+    supports_bf16: bool = False
+    auto_tune: bool = False
 
 
 GPU_PROFILES = {
@@ -99,7 +101,9 @@ GPU_PROFILES = {
         kernel_cache_size=12,
         enable_clip=True,
         gradient_checkpointing=False,
-        description="High-end consumer: RTX 3080, RTX 4070 Ti"
+        description="High-end consumer: RTX 3080, RTX 4070 Ti",
+        supports_bf16=False,
+        auto_tune=False,
     ),
     "16GB": GPUProfile(
         name="16GB",
@@ -111,19 +115,37 @@ GPU_PROFILES = {
         kernel_cache_size=16,
         enable_clip=True,
         gradient_checkpointing=False,
-        description="Prosumer GPUs: RTX 4080, RTX 4090, A4000"
+        description="Prosumer GPUs: RTX 4080, RTX 4090, A4000",
+        supports_bf16=True,
+        auto_tune=True,
     ),
     "24GB": GPUProfile(
         name="24GB",
         memory_mb=24576,
         batch_size=16,
         resolution=1024,
-        use_mixed_precision=False,  # Can afford FP32
+        use_mixed_precision=True,
         kernel_solver="auto",
         kernel_cache_size=32,
         enable_clip=True,
         gradient_checkpointing=False,
-        description="Professional GPUs: RTX 4090, A5000, A5500"
+        description="Professional GPUs: RTX 4090, RTX 4090 D, A5000",
+        supports_bf16=True,
+        auto_tune=True,
+    ),
+    "32GB": GPUProfile(
+        name="32GB",
+        memory_mb=32768,
+        batch_size=20,
+        resolution=1536,
+        use_mixed_precision=True,
+        kernel_solver="auto",
+        kernel_cache_size=48,
+        enable_clip=True,
+        gradient_checkpointing=False,
+        description="Flagship GPUs: RTX 5090 / 5090 Ti, A6000 Ada",
+        supports_bf16=True,
+        auto_tune=True,
     ),
 }
 
@@ -147,7 +169,8 @@ def detect_gpu_profile() -> GPUProfile:
         )
 
     # Get GPU memory in GB
-    gpu_memory_mb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
+    props = torch.cuda.get_device_properties(0)
+    gpu_memory_mb = props.total_memory / (1024 ** 2)
     gpu_name = torch.cuda.get_device_name(0)
 
     # Select profile based on available memory
@@ -157,13 +180,19 @@ def detect_gpu_profile() -> GPUProfile:
         profile = GPU_PROFILES["8GB"]
     elif gpu_memory_mb < 14000:
         profile = GPU_PROFILES["12GB"]
-    elif gpu_memory_mb < 20000:
+    elif gpu_memory_mb < 22000:
         profile = GPU_PROFILES["16GB"]
-    else:
+    elif gpu_memory_mb < 30000:
         profile = GPU_PROFILES["24GB"]
+    else:
+        profile = GPU_PROFILES["32GB"]
 
     print(f"[ATLAS] Detected GPU: {gpu_name}")
-    print(f"[ATLAS] Available memory: {gpu_memory_mb:.0f} MB")
+    try:
+        free_mb = torch.cuda.mem_get_info()[0] / (1024 ** 2)
+    except Exception:
+        free_mb = gpu_memory_mb
+    print(f"[ATLAS] Total memory: {gpu_memory_mb:.0f} MB | Free memory: {free_mb:.0f} MB")
     print(f"[ATLAS] Selected profile: {profile.name} - {profile.description}")
 
     return profile
@@ -343,81 +372,78 @@ class EasySampler:
         latent_size = self.profile.resolution // 8  # Assuming 8x downsampling
 
         # Generate samples in batches
-        try:
-            print(f"[ATLAS] Generating {total_samples} samples with {timesteps} steps...")
-            print(f"[ATLAS] Using batch_size={batch_size}, resolution={self.profile.resolution}")
+        print(f"[ATLAS] Generating {total_samples} samples with {timesteps} steps...")
+        print(f"[ATLAS] Using batch_size={batch_size}, resolution={self.profile.resolution}")
 
-            all_samples = []
-            all_intermediates = [] if return_intermediates else None
-            samples_generated = 0
+        all_samples: List[torch.Tensor] = []
+        all_intermediates = [] if return_intermediates else None
+        samples_generated = 0
 
-            # Loop to generate all requested samples
-            while samples_generated < total_samples:
-                # Determine how many samples in this batch
-                current_batch_size = min(batch_size, total_samples - samples_generated)
-                shape = (current_batch_size, 4, latent_size, latent_size)
+        # Loop to generate all requested samples
+        while samples_generated < total_samples:
+            remaining = total_samples - samples_generated
+            current_batch_size = min(batch_size, remaining)
+            attempt_batch = current_batch_size
 
-                # Generate batch
-                result = self.sampler.sample(
-                    shape=shape,
-                    timesteps=timesteps,
-                    return_intermediates=return_intermediates,
-                )
+            while True:
+                shape = (attempt_batch, 4, latent_size, latent_size)
+                try:
+                    result = self.sampler.sample(
+                        shape=shape,
+                        timesteps=timesteps,
+                        return_intermediates=return_intermediates,
+                    )
+                    break
+                except RuntimeError as exc:
+                    message = str(exc).lower()
+                    oom_error = "out of memory" in message or "cuda out of memory" in message
+                    if oom_error and attempt_batch > 1:
+                        attempt_batch = max(1, attempt_batch // 2)
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        print(
+                            f"[ATLAS] CUDA OOM detected. Retrying with batch_size={attempt_batch} "
+                            f"(profile={self.profile.name})"
+                        )
+                        continue
+                    raise
 
-                # Handle return format
-                if return_intermediates:
-                    batch_samples, batch_intermediates = result
-                    all_samples.append(batch_samples)
-                    all_intermediates.append(batch_intermediates)
-                else:
-                    all_samples.append(result)
+            if attempt_batch < current_batch_size:
+                batch_size = attempt_batch  # use the reduced batch size for future iterations
 
-                samples_generated += current_batch_size
-
-                # Progress update
-                if total_samples > batch_size:
-                    print(f"[ATLAS] Generated {samples_generated}/{total_samples} samples...")
-
-            # Concatenate all batches
-            samples = torch.cat(all_samples, dim=0)
-
-            # Report memory usage
-            peak_memory = get_peak_memory_mb()
-            print(f"[ATLAS] Generation complete! Peak memory: {peak_memory:.1f} MB")
-
+            # Handle return format
             if return_intermediates:
-                # Flatten intermediates: convert from [batch][timestep] to [timestep]
-                # where each timestep tensor concatenates all batches
-                if len(all_intermediates) == 1:
-                    # Single batch: return as-is
-                    intermediates = all_intermediates[0]
-                else:
-                    # Multiple batches: transpose and concatenate
-                    # Each element in intermediates should be all samples for that timestep
-                    num_steps = len(all_intermediates[0])
-                    intermediates = []
-                    for step_idx in range(num_steps):
-                        # Gather this timestep from all batches
-                        step_tensors = [batch_intermediates[step_idx]
-                                       for batch_intermediates in all_intermediates]
-                        # Concatenate along batch dimension
-                        intermediates.append(torch.cat(step_tensors, dim=0))
-                return samples, intermediates
-            return samples
-
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                raise RuntimeError(
-                    f"Out of GPU memory during generation.\n"
-                    f"Current settings: batch_size={batch_size}, resolution={self.profile.resolution}\n"
-                    f"Suggestions:\n"
-                    f"  1. Use a smaller GPU profile (current: {self.profile.name})\n"
-                    f"  2. Reduce num_samples\n"
-                    f"  3. Reduce timesteps\n"
-                    f"  4. Free GPU memory: torch.cuda.empty_cache()"
-                )
+                batch_samples, batch_intermediates = result  # type: ignore[assignment]
+                all_samples.append(batch_samples)
+                all_intermediates.append(batch_intermediates)  # type: ignore[arg-type]
             else:
-                raise
+                all_samples.append(result)  # type: ignore[arg-type]
+
+            samples_generated += attempt_batch
+
+            if total_samples > batch_size:
+                print(f"[ATLAS] Generated {samples_generated}/{total_samples} samples...")
+
+        # Concatenate all batches
+        samples = torch.cat(all_samples, dim=0)
+
+        # Report memory usage
+        peak_memory = get_peak_memory_mb()
+        print(f"[ATLAS] Generation complete! Peak memory: {peak_memory:.1f} MB")
+
+        if return_intermediates:
+            if len(all_intermediates) == 1:
+                intermediates = all_intermediates[0]
+            else:
+                num_steps = len(all_intermediates[0])
+                intermediates = []
+                for step_idx in range(num_steps):
+                    step_tensors = [
+                        batch_intermediates[step_idx] for batch_intermediates in all_intermediates
+                    ]
+                    intermediates.append(torch.cat(step_tensors, dim=0))
+            return samples, intermediates
+        return samples
 
     def clear_cache(self):
         """Clear kernel operator cache to free GPU memory."""
@@ -444,7 +470,7 @@ def create_sampler(
     Args:
         checkpoint: Path to pretrained model checkpoint (optional)
                    If None, creates a new model (requires training)
-        gpu_memory: GPU memory profile ("6GB", "8GB", "12GB", "16GB", "24GB")
+        gpu_memory: GPU memory profile ("6GB", "8GB", "12GB", "16GB", "24GB", "32GB")
                    If None, automatically detects your GPU
         device: Device to use ("cuda", "cpu", or torch.device)
                If None, uses CUDA if available
@@ -484,6 +510,9 @@ def create_sampler(
         profile = GPU_PROFILES[gpu_memory]
         print(f"[ATLAS] Using manual profile: {profile.name} - {profile.description}")
 
+    # Work with a copy so mutations do not leak back into the global presets
+    profile = replace(profile)
+
     # Override profile settings if specified
     if resolution is not None:
         profile.resolution = resolution
@@ -492,8 +521,30 @@ def create_sampler(
     if enable_clip is not None:
         profile.enable_clip = enable_clip
 
+    # Estimate free memory for the selected device
+    available_memory_mb = profile.memory_mb
+    if device.type == "cuda" and torch.cuda.is_available():
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        torch.cuda.set_device(device_index)
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            available_memory_mb = min(available_memory_mb, free_bytes / (1024 ** 2))
+        except Exception:
+            pass
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.allow_tf32 = True
+
     # Create configurations
     latent_size = profile.resolution // 8
+
+    conditioning_config = ConditioningConfig(
+        use_clip=profile.enable_clip,
+        clip_model="ViT-L-14",
+        context_dim=768 if profile.enable_clip else 0,
+        guidance_scale=7.5,
+    )
 
     model_config = HighResModelConfig(
         in_channels=4,
@@ -502,8 +553,11 @@ def create_sampler(
         channel_mult=(1, 2, 4, 4) if profile.resolution >= 1024 else (1, 2, 2, 4),
         attention_levels=(1, 2),
         time_emb_dim=768,
-        context_dim=768 if profile.enable_clip else None,
+        conditional=profile.enable_clip,
+        use_clip_conditioning=profile.enable_clip,
+        context_dim=conditioning_config.context_dim,
         num_res_blocks=2,
+        conditioning=conditioning_config,
     )
 
     kernel_config = KernelConfig(
@@ -514,31 +568,38 @@ def create_sampler(
         max_kernel_cache_size=profile.kernel_cache_size,
     )
 
+    bf16_capable = (
+        profile.supports_bf16
+        and device.type == "cuda"
+        and torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported()
+    )
+    if bf16_capable:
+        torch.set_float32_matmul_precision("high")
+
     sampler_config = SamplerConfig(
         sb_iterations=3,
         error_tolerance=1e-4,
         use_linear_solver=True,
         hierarchical_sampling=True,
         memory_efficient=True,
-        use_mixed_precision=profile.use_mixed_precision,
-        memory_threshold_mb=profile.memory_mb,
+        use_mixed_precision=profile.use_mixed_precision or bf16_capable,
+        memory_threshold_mb=available_memory_mb,
+        auto_tuning=profile.auto_tune,
+    )
+    sampler_config.max_cached_batch_size = min(
+        sampler_config.max_cached_batch_size, profile.batch_size
     )
 
-    conditioning_config = None
-    if profile.enable_clip:
-        conditioning_config = ConditioningConfig(
-            use_clip=True,
-            clip_model="ViT-L-14",
-            context_dim=768,
-            guidance_scale=7.5,
-        )
+    # Disable conditioning config if CLIP is not requested
+    clip_conditioning_config = conditioning_config if profile.enable_clip else None
 
     # Validate configuration
     issues = validate_configs(
         model_config=model_config,
         kernel_config=kernel_config,
         sampler_config=sampler_config,
-        conditioning_config=conditioning_config,
+        conditioning_config=clip_conditioning_config,
         gpu_profile=profile,
     )
 
@@ -579,21 +640,35 @@ def create_sampler(
     )
 
     # Setup CLIP conditioning if enabled
-    if profile.enable_clip and conditioning_config:
+    if profile.enable_clip and clip_conditioning_config:
         try:
             from atlas.conditioning.clip_interface import CLIPConditioningInterface
+
             clip_conditioner = CLIPConditioningInterface(
-                model_name=conditioning_config.clip_model,
-                device=device,
+                clip_conditioning_config, device=device
             )
             sampler.set_conditioner(clip_conditioner)
-            print(f"[ATLAS] CLIP conditioning enabled: {conditioning_config.clip_model}")
+            print(f"[ATLAS] CLIP conditioning enabled: {clip_conditioning_config.clip_model}")
         except ImportError:
             warnings.warn(
                 "Could not import CLIP. Text conditioning disabled.\n"
                 "Install with: pip install open-clip-torch"
             )
             profile.enable_clip = False
+            if hasattr(sampler, "score_model"):
+                setattr(sampler.score_model, "use_context", False)
+                if hasattr(sampler.score_model, "conditioning_config"):
+                    sampler.score_model.conditioning_config.use_clip = False
+        except Exception as exc:
+            warnings.warn(
+                f"Failed to initialize CLIP conditioning ({exc}). "
+                "Continuing without text guidance."
+            )
+            profile.enable_clip = False
+            if hasattr(sampler, "score_model"):
+                setattr(sampler.score_model, "use_context", False)
+                if hasattr(sampler.score_model, "conditioning_config"):
+                    sampler.score_model.conditioning_config.use_clip = False
 
     print(f"[ATLAS] Sampler ready! Configuration summary:")
     print(f"  - Resolution: {profile.resolution}x{profile.resolution}")
@@ -656,3 +731,4 @@ def list_profiles():
         print(f"  Mixed precision: {profile.use_mixed_precision}")
         print(f"  CLIP enabled: {profile.enable_clip}")
         print(f"  Kernel solver: {profile.kernel_solver}")
+

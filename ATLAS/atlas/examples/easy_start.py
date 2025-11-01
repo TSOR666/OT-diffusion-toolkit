@@ -198,8 +198,8 @@ def main():
     sampler.clear_cache()
 
     print("\n" + "=" * 80)
-    print(f"✓ Successfully generated {len(samples)} images!")
-    print(f"✓ Saved to: {output_dir}")
+    print(f"* Successfully generated {len(samples)} images!")
+    print(f"* Saved to: {output_dir}")
     print("=" * 80)
 
 

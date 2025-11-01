@@ -624,6 +624,84 @@ def professional_24gb_preset() -> Dict[str, Any]:
     }
 
 
+def flagship_32gb_preset() -> Dict[str, Any]:
+    """Preset tuned for 32GB flagship consumer GPUs (e.g. RTX 5090)."""
+
+    model_cfg = HighResModelConfig(
+        in_channels=4,
+        out_channels=4,
+        base_channels=224,
+        channel_mult=(1, 2, 4, 4, 4),
+        num_res_blocks=3,
+        attention_levels=(1, 2, 3),
+        num_heads=8,
+        dropout=0.05,
+        time_emb_dim=896,
+        conditional=True,
+        use_clip_conditioning=True,
+        context_dim=768,
+        cross_attention_levels=(1, 2, 3),
+    )
+
+    kernel_cfg = KernelConfig(
+        solver_type="auto",
+        epsilon=0.008,
+        rff_features=5120,
+        n_landmarks=256,
+        max_kernel_cache_size=48,
+        multi_scale=True,
+        scale_factors=[0.5, 1.0, 2.0, 3.0],
+    )
+
+    sampler_cfg = SamplerConfig(
+        sb_iterations=3,
+        error_tolerance=5e-5,
+        use_linear_solver=True,
+        hierarchical_sampling=True,
+        memory_efficient=False,
+        use_mixed_precision=True,
+        memory_threshold_mb=30720,
+        auto_tuning=True,
+    )
+
+    training_cfg = TrainingConfig(
+        batch_size=20,
+        micro_batch_size=10,
+        learning_rate=1.8e-4,
+        betas=(0.9, 0.99),
+        weight_decay=1e-4,
+        ema_decay=0.9995,
+        epochs=400,
+        log_interval=100,
+        checkpoint_interval=2000,
+        mixed_precision=True,
+        gradient_clip_norm=1.0,
+        compile=True,
+        checkpoint_dir="checkpoints/flagship_32gb",
+    )
+
+    inference_cfg = InferenceConfig(
+        sampler_steps=80,
+        guidance_scale=7.5,
+        batch_size=20,
+        num_samples=80,
+        seed=42,
+        use_ema=True,
+        output_dir="outputs/flagship_32gb",
+    )
+
+    return {
+        "model": model_cfg,
+        "kernel": kernel_cfg,
+        "sampler": sampler_cfg,
+        "training": training_cfg,
+        "inference": inference_cfg,
+        "description": "Optimized for 32GB flagship GPUs (RTX 5090 / 5090 Ti)",
+        "resolution": 1536,
+        "max_batch_size": 20,
+    }
+
+
 PRESETS = {
     "model:highres_default": highres_latent_score_default,
     "kernel:gaussian_multiscale": gaussian_multiscale_kernel,
@@ -636,6 +714,7 @@ PRESETS = {
     "gpu:12gb": consumer_12gb_preset,
     "gpu:16gb": prosumer_16gb_preset,
     "gpu:24gb": professional_24gb_preset,
+    "gpu:32gb": flagship_32gb_preset,
 }
 
 

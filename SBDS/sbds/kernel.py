@@ -92,6 +92,7 @@ class KernelDerivativeRFF:
         self.offset = offset
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.to(self.device)
         if x.dim() > 2:
             x = x.reshape(x.size(0), -1)
 
@@ -197,11 +198,12 @@ class KernelDerivativeRFF:
 
     def estimate_error_bound(self, n_samples: int) -> Dict[str, float]:
         """
-        Estimate theoretical error bounds for RFF kernel approximation.
+        Estimate theoretical error bounds for the random Fourier feature approximation.
 
-        Based on concentration inequalities for random Fourier features:
-        ||k(·,·) - k̂(·,·)||_∞ ≤ O(√(log(n)/D)) with high probability
-        where D is the number of features.
+        The deviation between the exact kernel matrix and its RFF surrogate concentrates
+        at a rate proportional to sqrt(log(n) / D) with high probability, where D is the
+        number of random features. This helper reports the leading-order constants for
+        the kernel and its first two derivatives.
 
         Args:
             n_samples: Number of samples (used for concentration bound)

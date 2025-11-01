@@ -1,6 +1,6 @@
 
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence
 
 import torch
 
@@ -28,8 +28,8 @@ class FFTKernelOperator(KernelOperator):
         epsilon: float = 0.01,
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         multi_scale: bool = True,
-        scale_factors: List[float] = None
-    ):
+        scale_factors: Optional[Sequence[float]] = None,
+    ) -> None:
         """
         Initialize FFT kernel operator.
         
@@ -50,13 +50,25 @@ class FFTKernelOperator(KernelOperator):
         self.grid_shape = grid_shape
         self.kernel_type = kernel_type
         self.multi_scale = multi_scale
-        self.scale_factors = scale_factors if scale_factors else [0.5, 1.0, 2.0]
+        self.scale_factors = [float(factor) for factor in (scale_factors or [0.5, 1.0, 2.0])]
         
         # Precompute FFT of kernel
         if self.multi_scale:
-            self.kernel_ffts = [self._compute_kernel_fft(grid_shape, epsilon * factor) 
-                               for factor in self.scale_factors]
-            self.weights = torch.softmax(torch.tensor([1.0, 2.0, 1.0], device=self.device), dim=0)
+            if not self.scale_factors:
+                raise ValueError("scale_factors must contain at least one value when multi_scale is enabled")
+            self.kernel_ffts = [
+                self._compute_kernel_fft(grid_shape, epsilon * factor)
+                for factor in self.scale_factors
+            ]
+            if scale_factors is None and len(self.scale_factors) == 3:
+                base_weights = torch.tensor(
+                    [1.0, 2.0, 1.0], device=self.device, dtype=torch.float32
+                )
+            else:
+                base_weights = torch.ones(
+                    len(self.scale_factors), device=self.device, dtype=torch.float32
+                )
+            self.weights = base_weights / base_weights.sum()
         else:
             self.kernel_fft = self._compute_kernel_fft(grid_shape, epsilon)
     
