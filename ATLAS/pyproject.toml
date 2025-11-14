@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-diffusion-toolkit"
+dynamic = ["version"]
+description = "High-resolution diffusion research toolkit built around score-based models and Schrödinger bridge solvers."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+  {name = "Thierry Silvio Claude Soreze"}
+]
+keywords = ["diffusion", "generative-models", "optimal-transport", "pytorch"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+  "numpy>=1.23",
+  "torch>=2.1",
+  "torchvision>=0.15",
+  "tqdm>=4.64"
+]
+
+[project.optional-dependencies]
+vision = ["torchvision>=0.15", "pillow>=9.0"]
+clip = ["open-clip-torch>=2.20"]
+dev = [
+  "pytest>=7.0",
+  "ruff>=0.5"
+]
+
+[project.urls]
+Homepage = "https://github.com/tsoreze/OT-diffusion-toolkit"
+Documentation = "https://github.com/tsoreze/OT-diffusion-toolkit/tree/main/ATLAS"
+Source = "https://github.com/tsoreze/OT-diffusion-toolkit"
+
+[tool.setuptools]
+packages = ["atlas"]
+
+[tool.setuptools.dynamic]
+version = {attr = "atlas.__version__"}
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["atlas/tests"]
+
+
+
+
+

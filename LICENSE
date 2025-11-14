@@ -1,0 +1,22 @@
+OT Diffusion Toolkit
+====================
+
+This repository contains multiple packages, each with its own license:
+
+- ATLAS (ATLAS/): Apache License 2.0
+- FastSB-OT (FastSB-OT/): Apache License 2.0
+- SBDS (SBDS/): MIT License
+- SPOT (SPOT/): Apache License 2.0
+
+Please refer to the LICENSE file in each package directory for the full license text.
+
+All packages are authored by Thierry Silvio Claude Soreze.
+
+Attribution Requirements
+========================
+
+When using, redistributing, or creating derivative works from any component of this toolkit,
+you must retain attribution to Thierry Silvio Claude Soreze as specified in the individual
+package licenses.
+
+For research use, please cite the repository and acknowledge the author as appropriate.
