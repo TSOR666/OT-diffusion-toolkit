@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastsb-ot"
+version = "0.1.0"
+description = "FastSB-OT — Fast Schrödinger bridge solver with entropy-regularised optimal transport"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+  {name = "Thierry Silvio Claude Soreze"}
+]
+keywords = ["diffusion", "optimal-transport", "schrodinger-bridge", "pytorch", "triton"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+  "numpy>=1.23",
+  "torch>=2.0",
+  "tqdm>=4.64"
+]
+
+[project.optional-dependencies]
+triton = ["triton>=2.0"]
+dev = ["pytest>=7.0", "ruff>=0.5"]
+env = []  # Placeholder for deployment-specific requirements
+
+[project.urls]
+Homepage = "https://github.com/tsoreze/OT-diffusion-toolkit"
+Source = "https://github.com/tsoreze/OT-diffusion-toolkit"
+Documentation = "https://github.com/tsoreze/OT-diffusion-toolkit/tree/main/FastSB-OT"
+
+[tool.setuptools]
+packages = ["fastsb_ot"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["fastsb_ot/tests"]
