@@ -3,12 +3,17 @@ import logging
 import math
 import time
 from collections import OrderedDict
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+try:
+    from torch.cuda.amp import autocast
+except Exception:  # pragma: no cover - autocast optional
+    autocast = None
 
 from ..config.kernel_config import KernelConfig
 from ..config.sampler_config import SamplerConfig
@@ -86,12 +91,20 @@ class SchroedingerBridgeSolver:
         self.error_tolerance = sampler_config.error_tolerance
         self.use_linear_solver = sampler_config.use_linear_solver
         self.use_multiscale = kernel_config.multi_scale
-        self.use_mixed_precision = sampler_config.use_mixed_precision
+        self.use_mixed_precision = (
+            sampler_config.use_mixed_precision
+            and self.device.type == "cuda"
+            and autocast is not None
+        )
         self.scale_factors = kernel_config.scale_factors
         self.seed = sampler_config.seed
         self.cg_relative_tolerance = sampler_config.cg_relative_tolerance
         self.cg_absolute_tolerance = sampler_config.cg_absolute_tolerance
-        
+        if self.use_mixed_precision:
+            self._amp_context = lambda: autocast(device_type="cuda", dtype=torch.float16)  # type: ignore[call-arg]
+        else:
+            self._amp_context = nullcontext
+
         # Set random seed if provided
         if self.seed is not None:
             set_seed(self.seed)
@@ -170,18 +183,15 @@ class SchroedingerBridgeSolver:
     def _compute_sigma(self, alpha: torch.Tensor) -> torch.Tensor:
         """Compute the noise scale sigma(t) from alpha(t)."""
         info = torch.finfo(alpha.dtype)
-        alpha_clamped = torch.clamp(alpha, min=info.tiny, max=1.0 - info.tiny)
+        alpha_clamped = torch.clamp(alpha, min=info.tiny, max=1.0)
         one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=info.tiny)
-        ratio = one_minus_alpha / alpha_clamped
-        return torch.sqrt(ratio)
+        return torch.sqrt(one_minus_alpha)
 
     def _compute_sde_coefficients(
         self, t: float, reference: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
         alpha_t = self._schedule_to_tensor(t, reference)
-        sigma_t = self._compute_sigma(alpha_t)
-
         delta = 1e-3
         t_upper = min(1.0, t + delta)
         t_lower = max(0.0, t - delta)
@@ -191,7 +201,7 @@ class SchroedingerBridgeSolver:
             t_upper = min(1.0, t + delta)
             t_lower = max(0.0, t - delta)
             if t_upper == t_lower:
-                zero = torch.zeros_like(sigma_t)
+                zero = torch.zeros_like(alpha_t)
                 return zero, zero
 
         alpha_upper = self._schedule_value_to_tensor(
@@ -201,23 +211,17 @@ class SchroedingerBridgeSolver:
             self.noise_schedule(t_lower), reference
         )
 
-        sigma_upper = self._compute_sigma(alpha_upper)
-        sigma_lower = self._compute_sigma(alpha_lower)
-
         denom = max(t_upper - t_lower, 1e-6)
-        denom_tensor = sigma_t.new_tensor(denom)
-        sigma_prime = (sigma_upper - sigma_lower) / denom_tensor
+        denom_tensor = alpha_t.new_tensor(denom)
+        alpha_prime = (alpha_upper - alpha_lower) / denom_tensor
 
-        # Use conservative minimum for numerical stability
-        # tiny (~1e-45 for float32) is too small and can cause instability
-        dtype_eps = torch.finfo(sigma_t.dtype).eps
-        min_sigma = max(1e-8, min(1e-4, dtype_eps * 10))
-        sigma_safe = torch.clamp(sigma_t, min=min_sigma)
-        f_t = -sigma_prime / sigma_safe
-        g_sq_t = -2.0 * sigma_t * sigma_prime
-        g_sq_t = torch.clamp(g_sq_t, min=0.0)
+        info = torch.finfo(alpha_t.dtype)
+        alpha_safe = torch.clamp(alpha_t, min=info.tiny)
+        beta_t = torch.clamp(-alpha_prime / alpha_safe, min=0.0)
+        f_t = -0.5 * beta_t
+        g_sq_t = beta_t
 
-        return f_t, g_sq_t
+        return f_t, torch.clamp(g_sq_t, min=0.0)
 
     def _compute_score(
         self,
@@ -232,7 +236,9 @@ class SchroedingerBridgeSolver:
             raise ValueError("Input tensor must include a batch dimension for scoring.")
 
         with torch.no_grad():
-            noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
+            with self._amp_context():
+                noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
+        noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
         denom = torch.sqrt(
@@ -382,21 +388,25 @@ class SchroedingerBridgeSolver:
             # Use RFF instead of recursively calling this function
             method = 'rff'
         
-        cache_key = self._make_kernel_cache_key(
-            method,
-            batch_size,
-            data_dim,
-            epsilon,
-            grid_shape if method == 'fft' else None,
-            original_shape=tuple(x.shape),
-        )
+        cacheable = method != 'nystrom'
+        cache_key = None
+        operator: Optional[KernelOperator] = None
+        if cacheable:
+            cache_key = self._make_kernel_cache_key(
+                method,
+                batch_size,
+                data_dim,
+                epsilon,
+                grid_shape if method == 'fft' else None,
+                original_shape=tuple(x.shape),
+            )
+            operator = self.kernel_operators.get(cache_key)
+            if operator is not None:
+                self.perf_stats["kernel_cache_hits"] += 1
+                self.kernel_operators.move_to_end(cache_key)
+                self.logger.debug(f"Using cached {method} operator")
 
-        operator = self.kernel_operators.get(cache_key)
-        if operator is not None:
-            self.perf_stats["kernel_cache_hits"] += 1
-            self.kernel_operators.move_to_end(cache_key)
-            self.logger.debug(f"Using cached {method} operator")
-        else:
+        if operator is None:
             self.perf_stats["kernel_cache_misses"] += 1
             if method == 'direct':
                 operator = DirectKernelOperator(
@@ -444,19 +454,19 @@ class SchroedingerBridgeSolver:
             else:
                 raise ValueError(f"Unknown method: {method}")
                 
-            # Cache the operator with LRU eviction
-            self.kernel_operators[cache_key] = operator
-            self.kernel_operators.move_to_end(cache_key)
+            if cacheable and cache_key is not None:
+                self.kernel_operators[cache_key] = operator
+                self.kernel_operators.move_to_end(cache_key)
 
-            while len(self.kernel_operators) > self.max_kernel_cache_size:
-                evicted_key, evicted_operator = self.kernel_operators.popitem(last=False)
-                self.perf_stats["kernel_cache_evictions"] += 1
-                if hasattr(evicted_operator, "clear_cache"):
-                    try:
-                        evicted_operator.clear_cache()
-                    except Exception:
-                        pass
-                self.logger.debug(f"Evicted kernel operator cache entry {evicted_key}")
+                while len(self.kernel_operators) > self.max_kernel_cache_size:
+                    evicted_key, evicted_operator = self.kernel_operators.popitem(last=False)
+                    self.perf_stats["kernel_cache_evictions"] += 1
+                    if hasattr(evicted_operator, "clear_cache"):
+                        try:
+                            evicted_operator.clear_cache()
+                        except Exception:
+                            pass
+                    self.logger.debug(f"Evicted kernel operator cache entry {evicted_key}")
         
         self.perf_stats['kernel_time'] += time.time() - kernel_start_time
         
@@ -644,7 +654,7 @@ class SchroedingerBridgeSolver:
                 return _finalize(True, rsnorm)
 
             # If the residual is increasing or unstable, exit early
-            if rsnew > rsold * 1.5:
+            if rsnew > rsold * 1.02:
                 prev_residual = torch.sqrt(rsold).detach().cpu().item()
                 self.logger.warning(
                     "Conjugate gradient residual increased at iteration %d (%.3e -> %.3e); returning partial solution.",
@@ -782,14 +792,13 @@ class SchroedingerBridgeSolver:
                 P_zx_norm = P_zx / row_sums
                 z_next = P_zx_norm @ x_next_flat
             elif isinstance(kernel_op, FFTKernelOperator):
-                # For FFT, use grid-based transport
-                # This is a simplified version - more accurate would use gradient of potentials
                 alpha = 0.5  # Interpolation parameter
                 z_next = (1 - alpha) * z_flat + alpha * x_next_flat
             else:
-                # Generic fallback
-                # Create a simple interpolation between current and predicted
-                z_next = 0.5 * z_flat + 0.5 * x_next_flat
+                raise RuntimeError(
+                    "Kernel operator must implement pairwise evaluation or support FFT transport "
+                    "to construct a transport map."
+                )
             
             return z_next.reshape(z_shape)
         
@@ -940,25 +949,21 @@ class SchroedingerBridgeSolver:
             validated.append(value)
 
         schedule = sorted(validated, reverse=True)
-        spacing_tol = 1e-6
+        spacing_tol = 1e-8
         deduped: List[float] = []
         for value in schedule:
             if not deduped:
                 deduped.append(value)
                 continue
-
             prev = deduped[-1]
-            min_delta = spacing_tol * max(1.0, abs(prev))
             delta = prev - value
-            if delta <= min_delta:
-                raise ValueError(
-                    "Timesteps must be strictly decreasing with spacing larger than 1e-6."
-                )
+            if delta <= spacing_tol:
+                continue
             deduped.append(value)
 
         if len(deduped) < 2:
             raise ValueError(
-                "Timesteps collapse to a single value after enforcing minimum spacing of 1e-6."
+                "Timesteps collapse to a single value after enforcing minimum spacing."
             )
 
         # Final check to ensure strictly decreasing with tolerance applied
@@ -1036,8 +1041,7 @@ class SchroedingerBridgeSolver:
             self.n_landmarks = min(100, n_samples // 10)  # Starting point
             
             while self.n_landmarks < n_samples:
-                # Increase landmarks until error bound is satisfied
-                error_bound = math.sqrt(n_samples / self.n_landmarks)
+                error_bound = 1.0 / math.sqrt(max(self.n_landmarks, 1))
                 
                 if error_bound <= error_tolerance:
                     break
@@ -1045,7 +1049,7 @@ class SchroedingerBridgeSolver:
                 self.n_landmarks = min(self.n_landmarks * 2, n_samples)
                 
             results['n_landmarks'] = self.n_landmarks
-            results['nystrom_error_bound'] = math.sqrt(n_samples / self.n_landmarks)
+            results['nystrom_error_bound'] = 1.0 / math.sqrt(max(self.n_landmarks, 1))
             
         return results
 
