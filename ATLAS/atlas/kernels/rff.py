@@ -64,7 +64,7 @@ class RFFKernelOperator(KernelOperator):
     # ------------------------------------------------------------------
     def _base_scale(self) -> float:
         if self.kernel_type == "gaussian":
-            return 1.0 / math.sqrt(max(self.epsilon, 1e-12))
+            return 1.0 / max(self.epsilon, 1e-12)
         if self.kernel_type in {"laplacian", "cauchy"}:
             return 1.0 / max(self.epsilon, 1e-12)
         raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
@@ -116,13 +116,12 @@ class RFFKernelOperator(KernelOperator):
     def _cache_key(self, x: torch.Tensor) -> Optional[Tuple]:
         if x.size(0) > self.max_cached_batch_size:
             return None
-        checksum = float(x.sum(dtype=torch.float64).item())
         return (
             tuple(x.shape),
             x.dtype,
             x.device.type,
             x.device.index if x.device.type == 'cuda' else None,
-            checksum,
+            int(x.data_ptr()),
         )
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
@@ -141,6 +140,7 @@ class RFFKernelOperator(KernelOperator):
             return self._feature_cache[cache_key]
 
         projections = []
+        norm_factor = math.sqrt(2.0 / self.feature_dim)
         for weights, offsets in zip(self.weights, self.offsets):
             proj = x @ weights + offsets
             if self.kernel_type == "gaussian":
@@ -148,13 +148,10 @@ class RFFKernelOperator(KernelOperator):
             elif self.kernel_type == "laplacian":
                 features = torch.cos(proj) + torch.sin(proj)
             else:  # cauchy
-                # Clamp to prevent numerical underflow: exp(-x) for x > 20 is effectively 0
-                proj_abs_clamped = torch.clamp(proj.abs(), max=20.0)
-                features = torch.cos(proj) * torch.exp(-proj_abs_clamped)
-            projections.append(features)
+                features = torch.cos(proj)
+            projections.append(features * norm_factor)
 
         phi = torch.cat(projections, dim=1)
-        phi = phi * math.sqrt(2.0 / self.feature_dim)
 
         if cache_key is not None:
             self._feature_cache[cache_key] = phi

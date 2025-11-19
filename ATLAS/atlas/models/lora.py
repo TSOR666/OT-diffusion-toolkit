@@ -28,7 +28,8 @@ class LoRALinear(nn.Module):
 
     def forward(self, x):
         base_out = self.base(x)
-        lora_out = self.lora_up(self.dropout(self.lora_down(x))) * self.scale
+        lora_out = self.lora_up(self.lora_down(x)) * self.scale
+        lora_out = self.dropout(lora_out)
         return base_out + lora_out
 
 
@@ -51,11 +52,11 @@ def apply_lora_to_model(model: nn.Module, config: LoRAConfig) -> None:
     target_patterns = set(config.target_modules)
     replacements: List[Tuple[str, nn.Linear]] = []
 
+    if not target_patterns:
+        return
+
     for name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
-            continue
-        if not target_patterns:
-            replacements.append((name, module))
             continue
         if any(pattern in name for pattern in target_patterns):
             replacements.append((name, module))

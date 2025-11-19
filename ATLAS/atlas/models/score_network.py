@@ -189,10 +189,15 @@ class HighResLatentScoreModel(nn.Module):
         elif condition is None and self.conditional:
             cond_emb = self.uncond_embedding.expand(batch, -1)
 
-        if cond_emb is not None and cond_emb.dim() == 1:
-            cond_emb = cond_emb.unsqueeze(0)
-        if cond_emb is not None and cond_emb.size(0) != batch:
-            cond_emb = cond_emb.expand(batch, -1)
+        if cond_emb is not None:
+            if cond_emb.dim() == 1:
+                cond_emb = cond_emb.unsqueeze(0)
+            if cond_emb.size(0) == 1 and batch > 1:
+                cond_emb = cond_emb.expand(batch, -1)
+            elif cond_emb.size(0) not in (1, batch):
+                raise ValueError(
+                    f"Condition embedding batch ({cond_emb.size(0)}) does not match input batch ({batch})."
+                )
 
         return context, context_mask, cond_emb
 

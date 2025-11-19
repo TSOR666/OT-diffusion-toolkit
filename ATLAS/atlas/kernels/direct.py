@@ -40,7 +40,8 @@ class DirectKernelOperator(KernelOperator):
             xy = x_flat @ y_flat.t()
             dist_sq = x_norm + y_norm - 2 * xy
             dist_sq = torch.clamp(dist_sq, min=0.0)
-            return torch.exp(-dist_sq / (2 * self.epsilon))
+            sigma_sq = max(self.epsilon ** 2, 1e-12)
+            return torch.exp(-dist_sq / (2 * sigma_sq))
 
         if self.kernel_type == "laplacian":
             x_flat = x.reshape(x.size(0), -1)
@@ -63,7 +64,11 @@ class DirectKernelOperator(KernelOperator):
         raise ValueError(f"Unsupported kernel type: {self.kernel_type}")
 
     def setup(self, x: torch.Tensor) -> None:
-        if self.kernel_matrix is None or x.shape != self.last_x_shape:
+        if (
+            self.kernel_matrix is None
+            or x.shape != self.last_x_shape
+            or self.kernel_matrix.device != x.device
+        ):
             self.kernel_matrix = self._compute_kernel_matrix(x)
             self.last_x_shape = x.shape
 

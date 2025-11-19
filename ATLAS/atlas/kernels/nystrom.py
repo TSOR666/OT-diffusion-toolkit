@@ -73,7 +73,8 @@ class NystromKernelOperator(KernelOperator):
             x_norm = (x_flat.square()).sum(dim=1, keepdim=True)
             y_norm = (y_flat.square()).sum(dim=1, keepdim=True).transpose(0, 1)
             dist_sq = torch.clamp(x_norm + y_norm - 2.0 * x_flat @ y_flat.T, min=0.0)
-            return torch.exp(-dist_sq / (2.0 * self.epsilon))
+            sigma_sq = max(self.epsilon ** 2, 1e-12)
+            return torch.exp(-dist_sq / (2.0 * sigma_sq))
 
         if self.kernel_type == "laplacian":
             dist = torch.cdist(x_flat, y_flat, p=2)
@@ -150,7 +151,7 @@ class NystromKernelOperator(KernelOperator):
     def get_error_bound(self, n_samples: int) -> float:  # type: ignore[override]
         if n_samples <= 0:
             raise ValueError("n_samples must be positive")
-        return math.sqrt(n_samples / self.n_landmarks)
+        return math.sqrt(self.n_landmarks / max(n_samples, 1))
 
     def clear_cache(self) -> None:  # type: ignore[override]
         self._cached_kernels.clear()

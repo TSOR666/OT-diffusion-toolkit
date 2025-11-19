@@ -50,25 +50,11 @@ class ContextualAttention2D(nn.Module):
             context_tokens = hidden_norm
         else:
             if context.dim() == 2:
-                # Warn about potential memory explosion for large images
-                num_tokens = hidden_norm.size(1)
-                context_dim = context.size(-1)
-                bytes_per_element = 4 if hidden_norm.dtype == torch.float32 else 2
-                expansion_mb = (b * num_tokens * context_dim * bytes_per_element) / (1024 ** 2)
-
-                if expansion_mb > 1024:  # Warn if expansion > 1GB
-                    import warnings
-                    warnings.warn(
-                        f"Context expansion requires ~{expansion_mb:.0f}MB per batch. "
-                        f"For high-resolution images ({h}x{w}), consider using cross-attention "
-                        f"instead of expanded self-attention to reduce memory usage.",
-                        ResourceWarning,
-                        stacklevel=2
-                    )
-
-                context_tokens = context[:, None, :].expand(-1, num_tokens, -1)
-            else:
+                context_tokens = context.unsqueeze(1)
+            elif context.dim() == 3:
                 context_tokens = context
+            else:
+                raise ValueError("Context tensor must be 2D or 3D.")
             context_tokens = context_tokens.to(hidden_norm.dtype)
 
             if self.context_proj is not None:
@@ -88,7 +74,9 @@ class ContextualAttention2D(nn.Module):
             mask = context_mask.to(dtype=torch.bool)
             if mask.dim() == 2:
                 mask = mask[:, None, None, :]
-            attn_scores = attn_scores.masked_fill(mask, float("-inf"))
+            # Mask out padded (False) positions; assume True=valid
+            invalid_mask = ~mask
+            attn_scores = attn_scores.masked_fill(invalid_mask, float("-inf"))
 
         attn = torch.softmax(attn_scores, dim=-1)
         attn = self.dropout(attn)

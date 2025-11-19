@@ -1,4 +1,5 @@
 from typing import Optional, Tuple
+import warnings
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,13 @@ def make_group_norm(num_channels: int) -> nn.GroupNorm:
     num_groups = min(32, num_channels)
     while num_groups > 1 and num_channels % num_groups != 0:
         num_groups -= 1
+    if num_groups == 1 and num_channels > 1:
+        warnings.warn(
+            f"GroupNorm fell back to a single group for {num_channels} channels; "
+            f"consider using channel counts divisible by larger group sizes.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return nn.GroupNorm(num_groups, num_channels)
 
 
@@ -140,13 +148,13 @@ class UpsampleBlock(nn.Module):
         context_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self.upsample = (
-            nn.ConvTranspose2d(
-                in_channels, out_channels, kernel_size=4, stride=2, padding=1
+        if upsample:
+            self.upsample = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="nearest"),
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             )
-            if upsample
-            else None
-        )
+        else:
+            self.upsample = None
         self.res_blocks = nn.ModuleList()
         projected_channels = out_channels if upsample else in_channels
         in_ch = projected_channels + skip_channels

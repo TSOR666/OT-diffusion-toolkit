@@ -89,7 +89,8 @@ class FFTKernelOperator(KernelOperator):
         
         # Compute kernel
         if self.kernel_type == 'gaussian':
-            kernel = torch.exp(-dist_sq / (2 * epsilon))
+            sigma_sq = max(epsilon ** 2, 1e-12)
+            kernel = torch.exp(-dist_sq / (2 * sigma_sq))
         elif self.kernel_type == 'laplacian':
             kernel = torch.exp(-torch.sqrt(dist_sq + 1e-10) / epsilon)
         elif self.kernel_type == 'cauchy':
@@ -108,6 +109,8 @@ class FFTKernelOperator(KernelOperator):
                 f"This may indicate invalid epsilon ({epsilon}) or numerical issues."
             )
         kernel = kernel / kernel_sum
+
+        kernel = torch.fft.ifftshift(kernel, dim=tuple(range(len(shape))))
 
         # Compute FFT of kernel
         kernel_fft = torch.fft.rfftn(kernel)

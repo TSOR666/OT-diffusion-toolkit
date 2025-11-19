@@ -17,12 +17,14 @@ class SinusoidalTimeEmbedding(nn.Module):
         half_dim = self.dim // 2
         device = t.device
         t = t.float()
+        if half_dim == 0:
+            raise ValueError("Embedding dimension must be at least 2 for sinusoidal embeddings.")
         freqs = torch.exp(
             torch.arange(half_dim, device=device, dtype=t.dtype)
-            * -(math.log(self.max_period) / max(half_dim - 1, 1))
+            * -(math.log(self.max_period) / half_dim)
         )
         args = t[:, None] * freqs[None, :]
         emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
         if self.dim % 2 == 1:
             emb = F.pad(emb, (0, 1))
-        return emb
+        return emb[:, : self.dim]
