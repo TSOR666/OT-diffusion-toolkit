@@ -110,12 +110,12 @@ class AdvancedHierarchicalDiffusionSampler:
             return payload
         if isinstance(payload, torch.Tensor):
             tensor = payload.to(self.device)
-            base = tensor.size(0) if tensor.dim() > 0 else 1
-            if tensor.dim() > 0 and tensor.size(0) not in (batch_size, 1):
-                tensor = safe_expand_tensor(tensor, batch_size, base)
-            elif tensor.dim() > 0 and tensor.size(0) == 1 and batch_size > 1:
-                tensor = tensor.expand(batch_size, *tensor.shape[1:])
-            return tensor
+            if tensor.dim() == 0:
+                return tensor
+            base = tensor.size(0)
+            if base == batch_size:
+                return tensor
+            return safe_expand_tensor(tensor, batch_size, max(base, 1))
 
         if not isinstance(payload, dict):
             return payload
@@ -219,14 +219,14 @@ class AdvancedHierarchicalDiffusionSampler:
         self,
         shape: Sequence[int],
         timesteps: Union[int, Sequence[float]],
-        verbose: bool = True,
+        show_progress: bool = True,
         callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
         conditioning: Optional[Dict[str, Any]] = None,
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
         initial_state: Optional[torch.Tensor] = None,
         return_intermediates: bool = False,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         """
         Sample from the diffusion model.
 
@@ -242,7 +242,8 @@ class AdvancedHierarchicalDiffusionSampler:
             return_intermediates: Return all intermediate states
 
         Returns:
-            Final samples, or (samples, intermediates) if return_intermediates=True
+            Final samples on the sampling device, or
+            (samples, intermediates) if return_intermediates=True where intermediates are on CPU.
 
         Raises:
             ValueError: If inputs are invalid
@@ -269,11 +270,13 @@ class AdvancedHierarchicalDiffusionSampler:
                 if timesteps < 2:
                     raise ValueError("Timesteps integer must be >= 2.")
                 schedule = torch.linspace(
-                    1.0, 0.0, steps=timesteps, dtype=torch.float32
+                    1.0, 0.01, steps=timesteps, dtype=torch.float32
                 ).tolist()
             else:
                 schedule = timesteps
             schedule = self.sb_solver.validate_timesteps(schedule)
+            if any(schedule[i] <= schedule[i + 1] for i in range(len(schedule) - 1)):
+                raise ValueError("Timesteps must be strictly decreasing after validation.")
         except Exception as e:
             raise ValueError(
                 f"Invalid timesteps: {e}\n"
@@ -321,7 +324,7 @@ class AdvancedHierarchicalDiffusionSampler:
         # Setup iteration
         iterator: Iterable[int]
         iterator = range(len(schedule) - 1)
-        if verbose:
+        if show_progress:
             iterator = tqdm(iterator, desc="Sampling", leave=False)
 
         if self.sampler_config.memory_efficient:
