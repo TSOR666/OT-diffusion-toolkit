@@ -32,7 +32,7 @@ GPU Memory Presets:
 import torch
 import warnings
 from pathlib import Path
-from typing import Union, List, Optional, Dict, Any, Tuple
+from typing import Union, List, Optional, Dict, Any, Tuple, Mapping
 from dataclasses import dataclass, replace
 
 from atlas.models.score_network import HighResLatentScoreModel
@@ -44,6 +44,15 @@ from atlas.config.sampler_config import SamplerConfig
 from atlas.config.conditioning_config import ConditioningConfig
 from atlas.utils.hardware import safe_cuda_mem_get_info
 from atlas.utils.memory import get_peak_memory_mb
+
+
+_CLIP_MODEL_CONTEXT_DIMS = {
+    "vit-b-32": 512,
+    "vit-b-16": 512,
+    "vit-l-14": 768,
+    "vit-h-14": 1024,
+    "vit-g-14": 1536,
+}
 
 
 # ============================================================================
@@ -152,6 +161,45 @@ GPU_PROFILES = {
 }
 
 
+def _estimate_memory_usage(
+    gpu_profile: GPUProfile,
+    sampler_config: SamplerConfig,
+    conditioning_config: Optional[ConditioningConfig],
+    model_config: HighResModelConfig,
+) -> float:
+    """Rough but resolution-aware memory estimate in MB."""
+
+    precision_factor = 0.5 if sampler_config.use_mixed_precision else 1.0
+
+    # Parameter memory scales roughly with the square of base channels and network depth
+    base_param_mb = 300
+    channel_scale = max(model_config.base_channels / 192, 0.5)
+    depth_scale = max(len(model_config.channel_mult) / 4, 0.5)
+    param_memory = base_param_mb * channel_scale * depth_scale * precision_factor
+
+    # Activation memory grows with batch size, resolution^2, and channels
+    base_activation_mb = 500
+    resolution_scale = (gpu_profile.resolution / 1024) ** 2
+    activation_channel_scale = max(channel_scale, 0.5)
+    activations = (
+        gpu_profile.batch_size
+        * base_activation_mb
+        * resolution_scale
+        * activation_channel_scale
+        * precision_factor
+    )
+
+    # Kernel cache size grows with configured cache size
+    kernel_cache = 100 + gpu_profile.kernel_cache_size * 5
+
+    clip_memory = 0
+    if conditioning_config and conditioning_config.use_clip:
+        clip_memory = (180 if sampler_config.use_mixed_precision else 360)
+
+    total = param_memory + activations + kernel_cache + clip_memory
+    return total
+
+
 def detect_gpu_profile() -> GPUProfile:
     """
     Automatically detect available GPU and return appropriate profile.
@@ -236,7 +284,21 @@ def validate_configs(
 
     # Check model-conditioning compatibility
     if conditioning_config and conditioning_config.use_clip:
-        expected_context_dim = 768 if "L-14" in conditioning_config.clip_model else 512
+        clip_name = conditioning_config.clip_model or ""
+        normalized_name = clip_name.lower()
+        expected_context_dim = None
+        for key, dim in _CLIP_MODEL_CONTEXT_DIMS.items():
+            if key in normalized_name:
+                expected_context_dim = dim
+                break
+        if expected_context_dim is None:
+            # Default to CLIP-L like dimensions if we cannot infer
+            expected_context_dim = 768
+            warnings_list.append(
+                "Could not infer CLIP context dimension from"
+                f" clip_model='{conditioning_config.clip_model}'."
+                " Assuming 768."
+            )
         if model_config.context_dim != expected_context_dim:
             errors.append(
                 f"Model context_dim={model_config.context_dim} doesn't match "
@@ -264,14 +326,16 @@ def validate_configs(
 
     # Check memory compatibility
     if gpu_profile:
-        # Estimate memory usage
-        param_memory = 150 if sampler_config.use_mixed_precision else 300  # MB
-        batch_memory_per_sample = 250 if sampler_config.use_mixed_precision else 500  # MB
-        estimated_memory = param_memory + (gpu_profile.batch_size * batch_memory_per_sample)
+        estimated_memory = _estimate_memory_usage(
+            gpu_profile=gpu_profile,
+            sampler_config=sampler_config,
+            conditioning_config=conditioning_config,
+            model_config=model_config,
+        )
 
         if estimated_memory > gpu_profile.memory_mb * 0.9:  # Use 90% threshold
             errors.append(
-                f"Estimated memory usage ({estimated_memory} MB) may exceed "
+                f"Estimated memory usage ({estimated_memory:.0f} MB) may exceed "
                 f"GPU capacity ({gpu_profile.memory_mb} MB). Consider reducing batch_size."
             )
 
@@ -377,6 +441,11 @@ class EasySampler:
                     negative_prompts = [negative_prompts]
 
             # Setup conditioning
+            if not hasattr(self.sampler, "prepare_conditioning_from_prompts"):
+                raise RuntimeError(
+                    "Sampler does not support prompt-based conditioning. "
+                    "Ensure you are using AdvancedHierarchicalDiffusionSampler."
+                )
             try:
                 self.sampler.prepare_conditioning_from_prompts(
                     prompts=prompts,
@@ -394,7 +463,13 @@ class EasySampler:
         batch_size = min(self.profile.batch_size, total_samples)
 
         # Calculate latent shape based on model's downsampling factor
-        latent_size = self.profile.resolution // self.model_config.latent_downsampling_factor
+        downsample = self.model_config.latent_downsampling_factor
+        if self.profile.resolution % downsample != 0:
+            raise ValueError(
+                f"Resolution {self.profile.resolution} must be divisible by "
+                f"latent_downsampling_factor {downsample}"
+            )
+        latent_size = self.profile.resolution // downsample
 
         # Generate samples in batches
         print(f"[ATLAS] Generating {total_samples} samples with {timesteps} steps...")
@@ -425,7 +500,10 @@ class EasySampler:
                     if oom_error and attempt_batch > 1:
                         attempt_batch = max(1, attempt_batch // 2)
                         if torch.cuda.is_available():
+                            torch.cuda.synchronize()
                             torch.cuda.empty_cache()
+                            if hasattr(torch.cuda, "reset_peak_memory_stats"):
+                                torch.cuda.reset_peak_memory_stats()
                         print(
                             f"[ATLAS] CUDA OOM detected. Retrying with batch_size={attempt_batch} "
                             f"(profile={self.profile.name})"
@@ -482,6 +560,50 @@ class EasySampler:
     def set_training_mode(self, mode: bool) -> None:
         """Expose score model training/eval control."""
         self.sampler.set_model_training_mode(mode)
+
+
+def _disable_clip_conditioning(
+    profile: GPUProfile,
+    conditioning_config: Optional[ConditioningConfig],
+    sampler: AdvancedHierarchicalDiffusionSampler,
+) -> Optional[ConditioningConfig]:
+    """Disable CLIP across profile, configs, and sampler in a single place."""
+
+    profile.enable_clip = False
+    if conditioning_config is not None:
+        conditioning_config.use_clip = False
+        conditioning_config.context_dim = 0
+
+    if hasattr(sampler, "score_model"):
+        setattr(sampler.score_model, "use_context", False)
+        if hasattr(sampler.score_model, "conditioning_config"):
+            sampler.score_model.conditioning_config.use_clip = False
+
+    return None
+
+
+def _validate_checkpoint_weights(
+    model: torch.nn.Module,
+    checkpoint_weights: Mapping[str, torch.Tensor],
+) -> Tuple[List[str], List[str], List[str]]:
+    """Compare model/state_dict structure before loading for clearer errors."""
+
+    model_state = model.state_dict()
+    missing: List[str] = []
+    mismatched: List[str] = []
+    unexpected = sorted(set(checkpoint_weights.keys()) - set(model_state.keys()))
+
+    for key, tensor in model_state.items():
+        ckpt_tensor = checkpoint_weights.get(key)
+        if ckpt_tensor is None:
+            missing.append(key)
+            continue
+        if ckpt_tensor.shape != tensor.shape:
+            mismatched.append(
+                f"{key}: expected {tuple(tensor.shape)}, got {tuple(ckpt_tensor.shape)}"
+            )
+
+    return missing, mismatched, unexpected
 
 
 def create_sampler(
@@ -735,13 +857,40 @@ def create_sampler(
             ) from e
 
         # Handle different checkpoint formats
+        if "model" in state_dict:
+            checkpoint_weights = state_dict["model"]
+        elif "ema_model" in state_dict:
+            checkpoint_weights = state_dict["ema_model"]
+        else:
+            checkpoint_weights = state_dict
+
+        missing, mismatched, unexpected = _validate_checkpoint_weights(
+            model, checkpoint_weights
+        )
+        if unexpected:
+            warnings.warn(
+                "Checkpoint contains unexpected parameters (showing up to 5): "
+                + ", ".join(unexpected[:5]),
+                UserWarning,
+            )
+        if missing or mismatched:
+            summary = []
+            if missing:
+                summary.append(
+                    "Missing keys: " + ", ".join(missing[:5]) + ("..." if len(missing) > 5 else "")
+                )
+            if mismatched:
+                summary.append(
+                    "Shape mismatches: "
+                    + "; ".join(mismatched[:3])
+                    + ("..." if len(mismatched) > 3 else "")
+                )
+            raise RuntimeError(
+                "Checkpoint architecture mismatch detected.\n" + "\n".join(summary)
+            )
+
         try:
-            if "model" in state_dict:
-                model.load_state_dict(state_dict["model"])
-            elif "ema_model" in state_dict:
-                model.load_state_dict(state_dict["ema_model"])
-            else:
-                model.load_state_dict(state_dict)
+            model.load_state_dict(checkpoint_weights)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load model weights from checkpoint {checkpoint}: {e}\n"
@@ -774,24 +923,21 @@ def create_sampler(
                 "Could not import CLIP. Text conditioning disabled.\n"
                 "Install with: pip install open-clip-torch"
             )
-            profile.enable_clip = False
-            conditioning_config.use_clip = False
-            conditioning_config.context_dim = 0
-            clip_conditioning_config = None
-            if hasattr(sampler, "score_model"):
-                setattr(sampler.score_model, "use_context", False)
-                if hasattr(sampler.score_model, "conditioning_config"):
-                    sampler.score_model.conditioning_config.use_clip = False
-        except Exception as exc:
+            clip_conditioning_config = _disable_clip_conditioning(
+                profile=profile,
+                conditioning_config=clip_conditioning_config,
+                sampler=sampler,
+            )
+        except (RuntimeError, OSError) as exc:
             warnings.warn(
                 f"Failed to initialize CLIP conditioning ({exc}). "
                 "Continuing without text guidance."
             )
-            profile.enable_clip = False
-            if hasattr(sampler, "score_model"):
-                setattr(sampler.score_model, "use_context", False)
-                if hasattr(sampler.score_model, "conditioning_config"):
-                    sampler.score_model.conditioning_config.use_clip = False
+            clip_conditioning_config = _disable_clip_conditioning(
+                profile=profile,
+                conditioning_config=clip_conditioning_config,
+                sampler=sampler,
+            )
 
     print(f"[ATLAS] Sampler ready! Configuration summary:")
     print(f"  - Resolution: {profile.resolution}x{profile.resolution}")
