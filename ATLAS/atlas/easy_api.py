@@ -295,9 +295,11 @@ def validate_configs(
             # Default to CLIP-L like dimensions if we cannot infer
             expected_context_dim = 768
             warnings_list.append(
-                "Could not infer CLIP context dimension from"
-                f" clip_model='{conditioning_config.clip_model}'."
-                " Assuming 768."
+                (
+                    "Could not infer CLIP context dimension from "
+                    f"clip_model='{conditioning_config.clip_model}'. "
+                    "Assuming 768."
+                )
             )
         if model_config.context_dim != expected_context_dim:
             errors.append(
