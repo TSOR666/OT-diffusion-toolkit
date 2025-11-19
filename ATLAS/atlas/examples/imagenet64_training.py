@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from .training_pipeline import run_training
 
@@ -25,13 +26,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    run_training(
-        "experiment:imagenet64",
-        dataset_root=args.data_root,
-        checkpoint_dir=args.checkpoints,
-        device=args.device,
-        max_steps=args.max_steps,
-    )
+    try:
+        run_training(
+            "experiment:imagenet64",
+            dataset_root=args.data_root,
+            checkpoint_dir=args.checkpoints,
+            device=args.device,
+            max_steps=args.max_steps,
+        )
+    except KeyError as exc:
+        print(f"Error: preset load failed ({exc}). Verify the preset name.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

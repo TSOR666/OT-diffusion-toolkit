@@ -6,7 +6,9 @@ import torch
 def safe_expand_tensor(tensor: torch.Tensor, target_batch: int, base_batch: int) -> torch.Tensor:
     """Broadcast a tensor to the desired batch size while keeping semantics intact."""
 
-    if tensor.dim() == 0 or tensor.size(0) == target_batch:
+    if tensor.dim() == 0:
+        return tensor.expand(target_batch)
+    if tensor.size(0) == target_batch:
         return tensor
     if tensor.size(0) == 1:
         return tensor.expand(target_batch, *tensor.shape[1:])

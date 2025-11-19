@@ -19,17 +19,28 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
-from PIL import Image
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+try:
+    from PIL import Image
+except ImportError as exc:  # pragma: no cover - user environment guard
+    print("Error: Pillow is required. Install with `pip install Pillow`.")
+    raise SystemExit(1) from exc
 
-import easy_api as atlas
+# Add parent directory to path (append to avoid shadowing stdlib)
+parent_dir = Path(__file__).parent.parent
+sys.path.append(str(parent_dir))
+
+try:
+    import easy_api as atlas
+except ImportError as exc:  # pragma: no cover - user environment guard
+    print("Error: Could not import ATLAS easy_api. Make sure you've installed the package or run the example from the repo root.")
+    raise SystemExit(1) from exc
 
 
-def save_images(samples: torch.Tensor, output_dir: Path, prefix: str = "sample"):
+def save_images(samples: torch.Tensor, output_dir: Path, prefix: str = "sample") -> None:
     """
     Save generated samples as PNG images.
 
@@ -41,15 +52,24 @@ def save_images(samples: torch.Tensor, output_dir: Path, prefix: str = "sample")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for i, sample in enumerate(samples):
-        # Convert from [-1, 1] to [0, 255]
-        img = (sample.clamp(-1, 1) + 1) * 127.5
-        img = img.permute(1, 2, 0).cpu().numpy().astype("uint8")
+        if torch.any(torch.isnan(sample)) or torch.any(torch.isinf(sample)):
+            raise ValueError(f"Sample {i} contains NaN or Inf values.")
+
+        img = sample.clamp(-1, 1)
+        img = ((img + 1.0) * 127.5).permute(1, 2, 0).detach().cpu().numpy()
+        img = img.astype("uint8")
 
         # Handle different channel counts
         if img.shape[2] == 1:
             img = img.squeeze(2)  # Grayscale
+        elif img.shape[2] == 2:
+            img = img[:, :, 0]
+        elif img.shape[2] == 3:
+            pass  # RGB
         elif img.shape[2] == 4:
             img = img[:, :, :3]  # Remove alpha channel
+        else:
+            raise ValueError(f"Unsupported channel count: {img.shape[2]}")
 
         # Save
         save_path = output_dir / f"{prefix}_{i:04d}.png"
@@ -57,7 +77,18 @@ def save_images(samples: torch.Tensor, output_dir: Path, prefix: str = "sample")
         print(f"  Saved: {save_path}")
 
 
-def main():
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.num_samples <= 0:
+        parser.error("--num_samples must be positive.")
+    if args.timesteps <= 0:
+        parser.error("--timesteps must be positive.")
+    if args.guidance_scale <= 0:
+        parser.error("--guidance_scale must be positive.")
+    if args.prompts is not None and not isinstance(args.prompts, list):
+        parser.error("--prompts must be a list of strings.")
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="ATLAS Easy Start - Simple image generation"
     )
@@ -117,6 +148,7 @@ def main():
         help="List all available GPU profiles and exit",
     )
     args = parser.parse_args()
+    _validate_args(args, parser)
 
     # List profiles if requested
     if args.list_profiles:
@@ -152,10 +184,10 @@ def main():
         print(f"  Model parameters: {mem_estimate['model_params_mb']:.1f} MB")
         print(f"  Activations: {mem_estimate['activations_mb']:.1f} MB")
         print(f"  Kernel cache: {mem_estimate['kernel_cache_mb']:.1f} MB")
-        if mem_estimate['clip_mb'] > 0:
+        if mem_estimate["clip_mb"] > 0:
             print(f"  CLIP: {mem_estimate['clip_mb']:.1f} MB")
         print(f"  Total estimated: {mem_estimate['total_mb']:.1f} MB")
-    except Exception as e:
+    except (AttributeError, RuntimeError, KeyError) as e:
         print(f"  Warning: Could not estimate memory: {e}")
 
     # Step 3: Generate samples

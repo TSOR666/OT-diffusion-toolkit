@@ -23,7 +23,8 @@ class CLIPConditioningInterface:
         self.model = None
         self.tokenizer = None
         self.pad_id: Optional[int] = None
-        self.cache: "OrderedDict[Tuple[str, ...], Dict[str, torch.Tensor]]" = OrderedDict()
+        self.eot_id: Optional[int] = None
+        self.cache: "OrderedDict[Tuple[str, ...], Dict[str, Any]]" = OrderedDict()
         if self.config.use_clip:
             self._setup_clip()
 
@@ -51,7 +52,7 @@ class CLIPConditioningInterface:
             self.config.use_clip = False
             return
 
-        self.model = model.eval()
+        self.model = model.eval().to(self.device)
         if self.config.use_fp16:
             self.model = self.model.half()
         self.tokenizer = tokenizer
@@ -68,6 +69,20 @@ class CLIPConditioningInterface:
             else:
                 pad_id = int(pad_id)
         self.pad_id = pad_id
+
+        eot_id = getattr(tokenizer, "eot_token_id", None)
+        if eot_id is None:
+            eot_id = getattr(tokenizer, "eot_token", None)
+        if eot_id is None and hasattr(tokenizer, "tokenizer"):
+            inner = getattr(tokenizer, "tokenizer")
+            eot_id = getattr(inner, "eot_token_id", None)
+        if eot_id is not None and hasattr(eot_id, "item"):
+            eot_id = int(eot_id.item())
+        elif isinstance(eot_id, int):
+            eot_id = int(eot_id)
+        else:
+            eot_id = None
+        self.eot_id = eot_id
 
     def _tokenize(self, prompts: List[str]) -> torch.Tensor:
         if self.tokenizer is None:
@@ -87,9 +102,9 @@ class CLIPConditioningInterface:
         if self.model is None:
             raise RuntimeError("CLIP model not initialized.")
 
-        x = self.model.token_embedding(tokens).to(self.device)
+        x = self.model.token_embedding(tokens)
         if hasattr(self.model, "positional_embedding"):
-            pos_emb = self.model.positional_embedding.to(self.device)
+            pos_emb = self.model.positional_embedding
             if pos_emb.dim() == 1:
                 x = x + pos_emb.unsqueeze(0)
             else:
@@ -102,8 +117,15 @@ class CLIPConditioningInterface:
         if hasattr(self.model, "ln_final"):
             x = self.model.ln_final(x)
 
-        cls_indices = tokens.argmax(dim=-1)
-        pooled = x[torch.arange(x.size(0)), cls_indices]
+        if self.eot_id is not None:
+            eot_mask = tokens.eq(self.eot_id)
+            if eot_mask.any(dim=-1):
+                cls_indices = eot_mask.float().argmax(dim=-1)
+            else:
+                cls_indices = tokens.argmax(dim=-1)
+        else:
+            cls_indices = tokens.argmax(dim=-1)
+        pooled = x[torch.arange(x.size(0), device=x.device), cls_indices]
         if (
             hasattr(self.model, "text_projection")
             and self.model.text_projection is not None
@@ -142,7 +164,7 @@ class CLIPConditioningInterface:
 
         attention_mask = None
         if self.pad_id is not None:
-            attention_mask = tokens.eq(self.pad_id)
+            attention_mask = tokens.ne(self.pad_id)
 
 
         payload = {

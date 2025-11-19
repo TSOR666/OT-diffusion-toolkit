@@ -41,9 +41,16 @@ def _prepare_images(batch: torch.Tensor | Iterable[torch.Tensor]) -> torch.Tenso
         images = batch
     else:
         images = batch[0]
-    if images.dtype != torch.float32:
-        images = images.float()
-    return images
+    images = images.float()
+    max_val = images.max().item()
+    min_val = images.min().item()
+    if max_val > 1.5:
+        images = images / 255.0
+        max_val = images.max().item()
+        min_val = images.min().item()
+    if 0.0 <= min_val and max_val <= 1.0:
+        images = images * 2.0 - 1.0
+    return images.clamp(-1.0, 1.0)
 
 
 def _update_ema(model: torch.nn.Module, ema_model: torch.nn.Module, decay: float) -> None:
@@ -115,6 +122,8 @@ def run_training(
 
     dataset_cfg = dataset_cfg.with_overrides(batch_size=micro_batch)
     dataloader = create_dataloader(dataset_cfg)
+    if len(dataloader) == 0:
+        raise ValueError("Dataloader returned zero batches. Check dataset configuration.")
 
     score_model = HighResLatentScoreModel(model_cfg).to(actual_device)
     ema_model = copy.deepcopy(score_model).to(actual_device)
@@ -149,70 +158,96 @@ def run_training(
     autocast_ctx = autocast if use_amp else nullcontext
 
     global_step = 0
-    for epoch in range(train_cfg.epochs):
+
+    def _apply_optimizer_step(effective_steps: int, epoch_index: int, last_loss: float) -> bool:
+        nonlocal global_step
+        if effective_steps == 0:
+            return False
+        if use_amp:
+            scaler.unscale_(optimizer)
+        if effective_steps > 1:
+            for param in score_model.parameters():
+                if param.grad is not None:
+                    param.grad.div_(effective_steps)
+        if train_cfg.gradient_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(
+                score_model.parameters(), train_cfg.gradient_clip_norm
+            )
+        if use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-        for micro_idx, batch in enumerate(dataloader):
-            images = _prepare_images(batch).to(actual_device)
+
+        effective_decay = train_cfg.ema_decay ** effective_steps
+        _update_ema(score_model, ema_model, effective_decay)
+        global_step += 1
+
+        if global_step % train_cfg.log_interval == 0:
+            logger.info(f"[Epoch {epoch_index+1}] step={global_step} loss={last_loss:.4f}")
+
+        if global_step % train_cfg.checkpoint_interval == 0:
+            ckpt_path = Path(train_cfg.checkpoint_dir) / f"step_{global_step:07d}.pt"
+            _save_checkpoint(
+                ckpt_path,
+                model=score_model,
+                ema_model=ema_model,
+                optimizer=optimizer,
+                step=global_step,
+                epoch=epoch_index,
+                bundle={
+                    "model": model_cfg,
+                    "dataset": dataset_cfg,
+                    "training": train_cfg,
+                },
+            )
+
+        if train_cfg.max_steps is not None and global_step >= train_cfg.max_steps:
+            return True
+        return False
+
+    for epoch in range(train_cfg.epochs):
+        if train_cfg.max_steps is not None and global_step >= train_cfg.max_steps:
+            break
+
+        optimizer.zero_grad(set_to_none=True)
+        steps_since_update = 0
+
+        for batch in dataloader:
+            images = _prepare_images(batch).to(actual_device, non_blocking=True)
             batch_size = images.shape[0]
+
             t = torch.rand(batch_size, device=actual_device)
-            alpha = karras_noise_schedule(t)
-            sigma = torch.sqrt(torch.clamp((1.0 - alpha) / alpha, min=1e-8))
+            alpha = torch.clamp(karras_noise_schedule(t), min=1e-8)
             noise = torch.randn_like(images)
-            noisy = _expand_alpha(alpha.sqrt()) * images + _expand_alpha(sigma) * noise
+            noisy = _expand_alpha(alpha.sqrt()) * images
+            noisy = noisy + _expand_alpha(torch.sqrt(torch.clamp(1.0 - alpha, min=1e-8))) * noise
 
             with autocast_ctx():
                 pred_noise = score_model(noisy, t)
                 loss = F.mse_loss(pred_noise, noise)
-                loss = loss / accum_steps
+
+            last_loss = float(loss.detach().item())
 
             if use_amp:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            if (micro_idx + 1) % accum_steps == 0:
-                if train_cfg.gradient_clip_norm is not None:
-                    if use_amp:
-                        scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        score_model.parameters(), train_cfg.gradient_clip_norm
-                    )
-                if use_amp:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                _update_ema(score_model, ema_model, train_cfg.ema_decay)
-                global_step += 1
+            steps_since_update += 1
 
-                if global_step % train_cfg.log_interval == 0:
-                    print(
-                        f"[Epoch {epoch+1}] step={global_step} loss={loss.item():.4f}"
-                    )
+            if steps_since_update >= accum_steps:
+                should_stop = _apply_optimizer_step(steps_since_update, epoch, last_loss)
+                steps_since_update = 0
+                if should_stop:
+                    break
 
-                if global_step % train_cfg.checkpoint_interval == 0:
-                    ckpt_path = Path(train_cfg.checkpoint_dir) / f"step_{global_step:07d}.pt"
-                    _save_checkpoint(
-                        ckpt_path,
-                        model=score_model,
-                        ema_model=ema_model,
-                        optimizer=optimizer,
-                        step=global_step,
-                        epoch=epoch,
-                        bundle={
-                            "model": model_cfg,
-                            "dataset": dataset_cfg,
-                            "training": train_cfg,
-                        },
-                    )
-
-                if train_cfg.max_steps is not None and global_step >= train_cfg.max_steps:
-                    return
-
-                optimizer.zero_grad(set_to_none=True)
-
-        if train_cfg.max_steps is not None and global_step >= train_cfg.max_steps:
-            break
+        if steps_since_update > 0:
+            should_stop = _apply_optimizer_step(steps_since_update, epoch, last_loss)
+            steps_since_update = 0
+            if should_stop:
+                break
 
     final_path = Path(train_cfg.checkpoint_dir) / "latest.pt"
     _save_checkpoint(
@@ -264,6 +299,10 @@ def run_inference(
     score_model = HighResLatentScoreModel(model_cfg).to(actual_device)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    required_keys = {"model", "ema"}
+    missing = required_keys - checkpoint.keys()
+    if missing:
+        raise ValueError(f"Checkpoint '{checkpoint_path}' is missing keys: {missing}")
     _apply_model_state(score_model, checkpoint, use_ema=infer_cfg.use_ema)
     score_model.eval()
 

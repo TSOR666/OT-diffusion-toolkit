@@ -23,10 +23,34 @@ class HighResModelConfig:
     dropout: float = 0.0
     time_emb_dim: int = 768
     conditional: bool = True
-    conditioning_dim: int = 0
+    conditioning_dim: int = 768
     model_variant: str = "large"
     use_clip_conditioning: bool = True
     context_dim: int = 768
     cross_attention_levels: Tuple[int, ...] = (1, 2)
     lora: LoRAConfig = field(default_factory=LoRAConfig)
     conditioning: ConditioningConfig = field(default_factory=ConditioningConfig)
+
+    def __post_init__(self) -> None:
+        if self.in_channels <= 0 or self.out_channels <= 0:
+            raise ValueError("in_channels and out_channels must be positive.")
+        if not (0.0 <= self.dropout <= 1.0):
+            raise ValueError(f"dropout must be in [0, 1], got {self.dropout}.")
+        if self.conditional and self.conditioning_dim <= 0:
+            raise ValueError(
+                "conditioning_dim must be positive when conditional=True."
+            )
+        depth = len(self.channel_mult)
+        max_level = depth - 1
+        invalid_attn = [lvl for lvl in self.attention_levels if lvl > max_level or lvl < 0]
+        if invalid_attn:
+            raise ValueError(
+                f"attention_levels {invalid_attn} exceed available depth {max_level}."
+            )
+        invalid_cross = [
+            lvl for lvl in self.cross_attention_levels if lvl > max_level or lvl < 0
+        ]
+        if invalid_cross:
+            raise ValueError(
+                f"cross_attention_levels {invalid_cross} exceed available depth {max_level}."
+            )

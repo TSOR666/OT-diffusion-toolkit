@@ -10,6 +10,8 @@ from atlas.solvers import AdvancedHierarchicalDiffusionSampler
 
 
 def main(prompt: str = "a serene mountain landscape") -> None:
+    if not prompt:
+        raise ValueError("Prompt must be a non-empty string.")
     conditioning_cfg = ConditioningConfig(use_clip=True)
     clip_interface = CLIPConditioningInterface(conditioning_cfg)
 
@@ -27,8 +29,10 @@ def main(prompt: str = "a serene mountain landscape") -> None:
         sampler_config=sampler_config,
     )
     sampler.set_conditioner(clip_interface)
+    if sampler.conditioner is None:
+        raise RuntimeError("Failed to attach CLIP conditioner to sampler.")
 
-    timesteps = torch.linspace(1.0, 0.02, 12).tolist()
+    timesteps = torch.linspace(1.0, 0.01, 12).tolist()
     samples = sampler.sample((1, model_config.in_channels, 64, 64), timesteps, verbose=False, prompts=[prompt])
 
     print(f"Generated conditioned sample for prompt '{prompt}' with shape {samples.shape}")

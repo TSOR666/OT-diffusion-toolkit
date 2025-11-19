@@ -31,6 +31,12 @@ def main(resolution: int = 256, steps: int = 16) -> None:
         sampler_config=sampler_config,
     )
 
+    min_resolution = 2 ** len(model_config.channel_mult)
+    if resolution < min_resolution or resolution % min_resolution != 0:
+        raise ValueError(
+            f"Resolution must be divisible by {min_resolution} (got {resolution})."
+        )
+
     timesteps = torch.linspace(1.0, 0.01, steps).tolist()
     samples = sampler.sample((1, model_config.in_channels, resolution, resolution), timesteps, verbose=True)
 

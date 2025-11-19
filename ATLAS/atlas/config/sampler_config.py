@@ -67,6 +67,8 @@ class SamplerConfig:
             raise ValueError(f"dynamic_weighting must be 'uniform', 'adaptive', or 'exponential', got {self.dynamic_weighting}")
         if not all(0 <= t <= 1 for t in self.critical_thresholds):
             raise ValueError(f"All critical_thresholds must be in [0, 1], got {self.critical_thresholds}")
+        if self.critical_thresholds and self.critical_thresholds != sorted(self.critical_thresholds, reverse=True):
+            raise ValueError("critical_thresholds must be in descending order.")
         if self.cuda_graph_warmup_iters < 0:
             raise ValueError("cuda_graph_warmup_iters must be non-negative")
         if self.tile_size is not None and self.tile_size <= 0:
@@ -75,6 +77,10 @@ class SamplerConfig:
             raise ValueError("tile_stride must be positive when set")
         if not (0.0 <= self.tile_overlap < 1.0):
             raise ValueError("tile_overlap must be in [0, 1)")
+        if self.tile_blending != "none" and self.tile_overlap <= 0:
+            raise ValueError(
+                "tile_overlap must be positive when tile_blending is enabled."
+            )
         if self.tile_blending not in {"hann", "linear", "none"}:
             raise ValueError("tile_blending must be 'hann', 'linear', or 'none'")
         if self.cg_relative_tolerance <= 0:

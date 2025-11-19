@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class DatasetConfig:
     persistent_workers: bool = True
     batch_size: Optional[int] = None
     fake_size: Optional[int] = None
-    extra: Dict[str, object] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def with_overrides(self, **kwargs: object) -> "DatasetConfig":
         """Return a copy with the provided attribute overrides."""
@@ -56,6 +56,27 @@ class TrainingConfig:
         """Return a copy with the provided attribute overrides."""
 
         return replace(self, **kwargs)
+
+    def __post_init__(self) -> None:
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+        if self.micro_batch_size is not None:
+            if self.micro_batch_size <= 0:
+                raise ValueError("micro_batch_size must be positive when set.")
+            if self.micro_batch_size > self.batch_size:
+                raise ValueError(
+                    "micro_batch_size cannot exceed batch_size."
+                )
+            if self.batch_size % self.micro_batch_size != 0:
+                raise ValueError(
+                    "batch_size must be divisible by micro_batch_size for accumulation."
+                )
+        if not (0 < self.ema_decay < 1):
+            raise ValueError(
+                f"ema_decay must be in (0, 1), got {self.ema_decay}."
+            )
+        if not (0 < self.betas[0] < 1 and 0 < self.betas[1] < 1):
+            raise ValueError(f"betas must be in (0, 1), got {self.betas}.")
 
 
 @dataclass(frozen=True)
