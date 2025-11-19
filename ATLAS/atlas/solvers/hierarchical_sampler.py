@@ -329,6 +329,7 @@ class AdvancedHierarchicalDiffusionSampler:
 
         if self.sampler_config.memory_efficient:
             reset_peak_memory()
+            self.sb_solver.kernel_operators.clear()
 
         # Store intermediates if requested
         intermediates = [] if return_intermediates else None
