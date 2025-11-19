@@ -949,32 +949,17 @@ class SchroedingerBridgeSolver:
             validated.append(value)
 
         schedule = sorted(validated, reverse=True)
-        spacing_tol = 1e-8
-        deduped: List[float] = []
-        for value in schedule:
-            if not deduped:
-                deduped.append(value)
-                continue
-            prev = deduped[-1]
-            delta = prev - value
-            if delta <= spacing_tol:
-                continue
-            deduped.append(value)
+        spacing_tol = 1e-6
 
-        if len(deduped) < 2:
-            raise ValueError(
-                "Timesteps collapse to a single value after enforcing minimum spacing."
-            )
-
-        # Final check to ensure strictly decreasing with tolerance applied
-        for prev, curr in zip(deduped, deduped[1:]):
+        # Ensure strictly decreasing order with minimum spacing
+        for prev, curr in zip(schedule, schedule[1:]):
             min_delta = spacing_tol * max(1.0, abs(prev))
             if prev - curr <= min_delta:
                 raise ValueError(
                     "Timesteps must be strictly decreasing with spacing larger than 1e-6."
                 )
 
-        return deduped
+        return schedule
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """

@@ -220,6 +220,7 @@ class AdvancedHierarchicalDiffusionSampler:
         shape: Sequence[int],
         timesteps: Union[int, Sequence[float]],
         show_progress: bool = True,
+        verbose: Optional[bool] = None,
         callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
         conditioning: Optional[Dict[str, Any]] = None,
         prompts: Optional[List[str]] = None,
@@ -233,7 +234,8 @@ class AdvancedHierarchicalDiffusionSampler:
         Args:
             shape: Output shape (batch, channels, height, width)
             timesteps: Diffusion timesteps or number of steps
-            verbose: Show progress bar
+            show_progress: Show progress bar (useful when calling positionally)
+            verbose: Deprecated alias for show_progress
             callback: Optional callback(x_t, t_curr, t_next) called each step
             conditioning: Pre-computed conditioning dict
             prompts: Text prompts for CLIP conditioning
@@ -310,6 +312,8 @@ class AdvancedHierarchicalDiffusionSampler:
                 )
             x_t = initial_state.to(self.device)
 
+        progress_flag = show_progress if verbose is None else bool(verbose)
+
         # Prepare conditioning
         try:
             active_conditioning = self._prepare_conditioning(
@@ -324,7 +328,7 @@ class AdvancedHierarchicalDiffusionSampler:
         # Setup iteration
         iterator: Iterable[int]
         iterator = range(len(schedule) - 1)
-        if show_progress:
+        if progress_flag:
             iterator = tqdm(iterator, desc="Sampling", leave=False)
 
         if self.sampler_config.memory_efficient:
