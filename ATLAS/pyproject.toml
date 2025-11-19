@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atlas-diffusion-toolkit"
-dynamic = ["version"]
-description = "High-resolution diffusion research toolkit built around score-based models and Schrödinger bridge solvers."
+version = "0.1.0"
+description = "High-resolution diffusion research toolkit built around score-based models and Schrodinger bridge solvers."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -49,9 +49,6 @@ atlas-basic-sampling = "atlas.examples.basic_sampling:main"
 
 [tool.setuptools.packages.find]
 include = ["atlas", "atlas.*"]
-
-[tool.setuptools.dynamic]
-version = {attr = "atlas.__version__"}
 
 [tool.pytest.ini_options]
 addopts = "-ra"
