@@ -38,24 +38,56 @@ class SlicedOptimalTransport:
         self.generator = generator
 
     def should_use_sliced(self, x_batch: torch.Tensor) -> bool:
-        """Determine if we should use sliced OT based on memory"""
-        B = x_batch.shape[0]
-        N = x_batch.shape[1]
+        """Determine if we should use sliced OT based on memory.
+
+        Expects ``x_batch`` shaped (B, N, d).
+        """
+        if x_batch.dim() != 3:
+            raise ValueError(f"Expected (B, N, d) tensor, got shape {tuple(x_batch.shape)}")
+
+        B, N, _ = x_batch.shape
         element_size = x_batch.element_size()
         cost_matrix_memory = B * N * N * element_size
 
         return cost_matrix_memory > self.memory_limit_bytes
 
+    def _reshape_to_points(self, tensor: torch.Tensor):
+        """Flatten arbitrary inputs to (B, N, d) and return a restore hook."""
+        if tensor.dim() == 2:
+            # Treat feature dimension as points with scalar features
+            points = tensor.unsqueeze(-1)
+            def restore(out: torch.Tensor) -> torch.Tensor:
+                return out.squeeze(-1)
+            return points, restore
+
+        if tensor.dim() == 3:
+            return tensor, lambda out: out
+
+        if tensor.dim() < 2:
+            raise ValueError(f"Input must have batch dimension, got shape {tuple(tensor.shape)}")
+
+        batch = tensor.shape[0]
+        channel = tensor.shape[1]
+        spatial = tensor.shape[2:]
+        if len(spatial) == 0:
+            raise ValueError(f"Input with shape {tuple(tensor.shape)} is not compatible with OT flattening.")
+
+        # Move channel to the last axis then flatten spatial dims into point dimension
+        points = tensor.movedim(1, -1).reshape(batch, -1, channel)
+
+        def restore(out: torch.Tensor) -> torch.Tensor:
+            return out.reshape(batch, *spatial, channel).movedim(-1, 1)
+
+        return points, restore
+
     def transport(self, x_batch: torch.Tensor, y_batch: torch.Tensor,
                   eps: Union[float, torch.Tensor], n_projections: int = 100) -> torch.Tensor:
         """Choose between full and sliced OT based on memory"""
-        # Handle flat (B, D) case by treating as (B, D, 1)
-        if x_batch.dim() == 2:
-            x_batch = x_batch.view(x_batch.shape[0], -1, 1)
-            y_batch = y_batch.view(y_batch.shape[0], -1, 1)
-            was_flat = True
-        else:
-            was_flat = False
+        x_points, restore = self._reshape_to_points(x_batch)
+        y_points, _ = self._reshape_to_points(y_batch)
+
+        if x_points.shape != y_points.shape:
+            raise ValueError(f"Shape mismatch: x={tuple(x_batch.shape)}, y={tuple(y_batch.shape)}")
 
         # Convert eps to float if tensor
         if torch.is_tensor(eps):
@@ -63,22 +95,19 @@ class SlicedOptimalTransport:
         else:
             eps_val = eps
 
-        if self.should_use_sliced(x_batch):
-            N = x_batch.shape[1]
+        if self.should_use_sliced(x_points):
+            N = x_points.shape[1]
             if self.projection_fn:
                 n_proj = self.projection_fn(N, n_projections)
             elif N > 256 * 256:
                 n_proj = min(n_projections, max(16, int(256**2 / N)))
             else:
                 n_proj = n_projections
-            result = self._sliced_ot_fixed(x_batch, y_batch, n_proj)
+            result = self._sliced_ot_fixed(x_points, y_points, n_proj)
         else:
-            result = self._full_ot(x_batch, y_batch, eps_val)
+            result = self._full_ot(x_points, y_points, eps_val)
 
-        if was_flat:
-            result = result.squeeze(-1)
-
-        return result
+        return restore(result)
 
     def _sliced_ot_fixed(self, x: torch.Tensor, y: torch.Tensor,
                         n_projections: int) -> torch.Tensor:

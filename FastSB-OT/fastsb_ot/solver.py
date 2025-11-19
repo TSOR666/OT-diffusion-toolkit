@@ -1424,8 +1424,6 @@ class FastSBOTSolver(nn.Module):
         if len(deduped) < 2:
             raise ValueError("After processing, timesteps must still contain at least two unique entries.")
 
-        sampling_timesteps = deduped[1:]
-
         # Apply adaptive eps based on the most-noisy timestep
         alpha_bar_init = self._get_cached_noise_schedule(deduped[0])
         eps = self.config.ot_eps_min * (1.0 + 9.0 * (1.0 - alpha_bar_init))
@@ -1461,7 +1459,7 @@ class FastSBOTSolver(nn.Module):
         # Continue regular sampling
         return self.sample(
             tuple(x_t.shape),
-            sampling_timesteps,
+            deduped,
             verbose=verbose,
             init_samples=x_t
         )
@@ -1616,11 +1614,12 @@ def make_schedule(schedule_type: str = "linear",
 
     def linear_schedule(t: float) -> float:
         """Linear beta schedule  exponential _bar"""
-        # Continuous integral form: _bar(t) = exp(-(s)ds)
-        beta_t = beta_start + t * (beta_end - beta_start)
-        # Integral of linear: (a + bs)ds = as + bs2/2
-        integral = beta_start * t + 0.5 * (beta_end - beta_start) * t**2
-        return math.exp(-integral)
+        # Match the discrete DDPM scaling by integrating over the full horizon
+        # with ``num_timesteps`` steps (otherwise _bar(1) stays ~1.0).
+        # Integral of linear: ∫ (a + bs) ds = a t + (b/2) t^2
+        integral = num_timesteps * (beta_start * t + 0.5 * (beta_end - beta_start) * t**2)
+        alpha_bar = math.exp(-max(0.0, integral))
+        return max(0.0, min(1.0, alpha_bar))
 
     def cosine_schedule(t: float) -> float:
         """Cosine schedule from improved DDPM"""
@@ -1631,10 +1630,11 @@ def make_schedule(schedule_type: str = "linear",
 
     def quadratic_schedule(t: float) -> float:
         """Quadratic beta schedule"""
-        beta_t = beta_start + (beta_end - beta_start) * t**2
-        # Integral: (a + bs2)ds = as + bs3/3
-        integral = beta_start * t + (beta_end - beta_start) * t**3 / 3
-        return math.exp(-integral)
+        # Same scaling correction as linear: integrate over num_timesteps steps.
+        # Integral: ∫ (a + b s^2) ds = a t + (b/3) t^3
+        integral = num_timesteps * (beta_start * t + (beta_end - beta_start) * t**3 / 3.0)
+        alpha_bar = math.exp(-max(0.0, integral))
+        return max(0.0, min(1.0, alpha_bar))
 
     def sigmoid_schedule(t: float) -> float:
         """Sigmoid-based schedule"""

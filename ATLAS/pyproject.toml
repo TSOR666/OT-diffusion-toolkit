@@ -43,8 +43,12 @@ Homepage = "https://github.com/tsoreze/OT-diffusion-toolkit"
 Documentation = "https://github.com/tsoreze/OT-diffusion-toolkit/tree/main/ATLAS"
 Source = "https://github.com/tsoreze/OT-diffusion-toolkit"
 
-[tool.setuptools]
-packages = ["atlas"]
+[project.scripts]
+atlas-check-hardware = "atlas.check_hardware:main"
+atlas-basic-sampling = "atlas.examples.basic_sampling:main"
+
+[tool.setuptools.packages.find]
+include = ["atlas", "atlas.*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "atlas.__version__"}
