@@ -1,8 +1,8 @@
 # FastSB-OT Solver Toolkit
 
-FastSB-OT is a SOLVER that couples your trained score network with fast, entropyâ€‘
-### Schrödinger Bridge Formulation
-accelerated kernels, and deploymentâ€‘friendly presets.
+FastSB-OT is a SOLVER that couples your trained score network with fast, entropy-
+### Schrodinger Bridge Formulation
+accelerated kernels, and deployment-friendly presets.
 
 ---
 
@@ -19,15 +19,15 @@ Optional extras:
 
 ## What It Is
 
-- Category: SOLVER â€” requires a trained score network (`s_Î¸(x,t)`) or an
-  epsilonâ€‘predicting model wrapped as a score model (see below).
+- Category: SOLVER - requires a trained score network (`s_theta(x,t)`) or an
+  epsilon-predicting model wrapped as a score model (see below).
 - Strengths: fast OT updates, Fisher momentum, Triton acceleration.
-- Use cases: highâ€‘throughput transportâ€‘aware sampling with your existing models.
+- Use cases: high-throughput transport-aware sampling with your existing models.
 
 ## Mathematical Foundations
 
 ### Schrodinger Bridge Formulation
-FastSB-OT solves the dynamic SchrÃ¶dinger bridge problem: given forward SDE
+FastSB-OT solves the dynamic Schrodinger bridge problem: given forward SDE
 ```
 dx = f(x, t) dt + g(t) dW_t,
 ```
@@ -38,10 +38,10 @@ an entropic constraint. The bridge dynamics are expressed via a pair of dual pot
 ### Entropy-Regularised Optimal Transport
 Each iteration solves the regularised OT problem
 ```
-Î³* = argmin_Î³ âŸ¨C, Î³âŸ© + Îµ KL(Î³ || a âŠ— b),
+gamma* = argmin_gamma <C, gamma> + epsilon KL(gamma || a x b),
 ```
 where `C` is the cost matrix (squared Euclidean distance by default) and `a`, `b`
-are marginal weights. Sinkhorn iterations with adaptive `Îµ` provide the transport plan.
+are marginal weights. Sinkhorn iterations with adaptive `epsilon` provide the transport plan.
 
 ### Fisher-Aware Momentum
 FastSB-OT augments the bridge update with a momentum term driven by diagonal Fisher
@@ -88,7 +88,7 @@ config = FastSBOTConfig(
 )
 schedule = make_schedule("cosine", num_timesteps=config.num_timesteps)
 
-# 2b. (Optional) Wrap epsilonâ€‘predicting models so they return scores
+# 2b. (Optional) Wrap epsilon-predicting models so they return scores
 # noise_model = MyEpsilonModel().to("cuda").eval()
 # score_model = NoisePredictorToScoreWrapper(noise_model, schedule)
 
@@ -102,7 +102,7 @@ samples = solver.sample((8, 4, 256, 256), verbose=True)
 - `quality="balanced"`: default trade-off for high-res synthesis.
 - `quality="ultra"`: full bridge with maximal accuracy (requires high-end GPUs).
 
-### Using noiseâ€‘predicting models
+### Using noise-predicting models
 
 If your trained network outputs the added noise (``epsilon``) rather than the score,
 wrap it before constructing the solver:
@@ -175,21 +175,21 @@ FastSB-OT is distributed under the Apache License 2.0. Retain attribution to Thi
 
 Indicative limits assuming typical latent-space UNets and mixed precision on CUDA. Effective resolution depends on channels, steps, and preset.
 
-- 6–8 GB (RTX 2060/3060/4060):
-  - Up to 512x512, batch 1–2
+- 6-8 GB (RTX 2060/3060/4060):
+  - Up to 512x512, batch 1-2
   - Use quality="fast", fewer OT iterations, smaller momentum buffers
-- 10–12 GB (RTX 3080/4070):
-  - Up to 1024x1024, batch 1–2
-  - quality="balanced", 25–50 steps; Triton kernels recommended
+- 10-12 GB (RTX 3080/4070):
+  - Up to 1024x1024, batch 1-2
+  - quality="balanced", 25-50 steps; Triton kernels recommended
 - 16 GB (RTX 4080/4090/A4000):
-  - 1024x1024, batch 4–8 (or 1536x1536, batch 1)
+  - 1024x1024, batch 4-8 (or 1536x1536, batch 1)
   - Enable TF32; Fisher momentum on for stability
 - 24 GB (RTX 3090/4090/A5000):
-  - 1024x1024, batch 8–16; 1536x1536, batch 1–2
+  - 1024x1024, batch 8-16; 1536x1536, batch 1-2
 - 32 GB+ (A6000/flagship):
-  - 1536x1536, batch 4–8; higher OT ranks and iterations feasible
+  - 1536x1536, batch 4-8; higher OT ranks and iterations feasible
 
-CPU: use small images (≤256×512) and modest OT settings; expect longer runtime.
+CPU: use small images (<=256x512) and modest OT settings; expect longer runtime.
 
 Memory tips:
 - Reduce num_timesteps, sinkhorn_iterations, or switch to sliced/FFT transports.

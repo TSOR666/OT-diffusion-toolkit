@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastSB-OT: Production Solver - FINAL POLISHED+
 Core solver implementation with all critical patches, production hardening, and final polish.
 

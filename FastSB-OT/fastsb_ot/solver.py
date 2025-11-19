@@ -1,4 +1,4 @@
-﻿"""Solver entry points for FastSB-OT."""
+"""Solver entry points for FastSB-OT."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ import random
 import tempfile
 import time
 from collections import OrderedDict
-from typing import Callable, Dict, Optional, Tuple
+from contextlib import nullcontext
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,15 @@ compile_function_fixed = common.compile_function_fixed
 TRITON_AVAILABLE = common.TRITON_AVAILABLE
 check_triton_availability = common.check_triton_availability
 log_sum_exp_stabilized = common.log_sum_exp_stabilized
+autocast = common.autocast
+AUTOCAST_AVAILABLE = common.AUTOCAST_AVAILABLE
+Version = common.Version
+NUMPY_AVAILABLE = common.NUMPY_AVAILABLE
+np = getattr(common, "np", None)
+TQDM_AVAILABLE = common.TQDM_AVAILABLE
+tqdm = common.tqdm
+launch_triton_kernel_safe = getattr(common, "launch_triton_kernel_safe", None)
+fused_drift_transport_kernel_fixed = getattr(common, "fused_drift_transport_kernel_fixed", None)
 
 __all__ = ["FastSBOTSolver", "make_schedule", "example_usage"]
 
@@ -1204,16 +1214,18 @@ class FastSBOTSolver(nn.Module):
             drift = self.compute_controlled_drift(x, score, alpha_bar_val, dt)
             x_new = self.compute_drift_and_transport_inline(x, drift, alpha_bar_val)
 
+        def _aux_drift(base: torch.Tensor) -> torch.Tensor:
+            drift_aux = -0.5 * (1 - alpha_bar_val) * score * dt
+            return drift_aux.to(base.dtype)
+
         # Hierarchical bridge transport
-        if self.config.use_hierarchical_bridge and x.dim() == 4:
-            drift = -0.5 * (1 - alpha_bar_val) * score * dt
-            drift = drift.to(x.dtype)
-            x_new = self.hierarchical_bridge.compute_multiscale_transport(x, drift, alpha_bar_val)
+        if self.config.use_hierarchical_bridge and x_new.dim() == 4:
+            drift = _aux_drift(x_new)
+            x_new = self.hierarchical_bridge.compute_multiscale_transport(x_new, drift, alpha_bar_val)
 
         # Momentum transport
         if self.config.use_momentum_transport:
-            drift = -0.5 * (1 - alpha_bar_val) * score * dt
-            drift = drift.to(x.dtype)
+            drift = _aux_drift(x_new)
             x_new = self.momentum_transport.apply_transport(x_new, drift, alpha_bar_val)
 
         return x_new
@@ -1225,7 +1237,8 @@ class FastSBOTSolver(nn.Module):
         timesteps: List[float],
         verbose: bool = True,
         run_uid: Optional[int] = None,
-        return_trajectory: bool = False
+        return_trajectory: bool = False,
+        init_samples: Optional[torch.Tensor] = None
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         """Main sampling method with enhanced transport and improved timestep handling
 
@@ -1268,8 +1281,15 @@ class FastSBOTSolver(nn.Module):
                 _ = self._get_cached_noise_schedule(t)
 
             # Initialize
-            gen = getattr(self.config, 'generator', None)
-            x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)
+            if init_samples is not None:
+                if tuple(init_samples.shape) != tuple(shape):
+                    raise ValueError(
+                        f"init_samples shape {tuple(init_samples.shape)} does not match requested shape {shape}"
+                    )
+                x_t = init_samples.to(self.device, dtype=self.amp_dtype, non_blocking=True)
+            else:
+                gen = getattr(self.config, 'generator', None)
+                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)
 
             if x_t.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
                 try:
@@ -1373,8 +1393,41 @@ class FastSBOTSolver(nn.Module):
         if source_batch.shape != target_batch.shape:
             raise ValueError(f"Shape mismatch: source {source_batch.shape} != target {target_batch.shape}")
 
-        # Apply adaptive eps based on timestep
-        alpha_bar_init = self._get_cached_noise_schedule(timesteps[0])
+        if len(timesteps) < 2:
+            raise ValueError("timesteps must contain at least 2 values for batch OT sampling")
+
+        # Normalize and validate timesteps similar to main sampling APIs
+        processed = []
+        if self.config.discrete_timesteps:
+            N = self.config.num_timesteps
+            for t in timesteps:
+                if isinstance(t, int):
+                    i = max(0, min(N - 1, t))
+                else:
+                    i = int(round(float(t) * (N - 1)))
+                    i = max(0, min(N - 1, i))
+                processed.append(i / (N - 1))
+        else:
+            for t in timesteps:
+                processed.append(float(t))
+
+        processed = sorted(processed, reverse=True)
+        if processed[0] > 1.0 or processed[-1] < 0.0:
+            raise ValueError(f"Timesteps must be within [0,1]. Got range [{processed[-1]}, {processed[0]}]")
+
+        deduped: List[float] = []
+        prev = None
+        for t in processed:
+            if prev is None or abs(t - prev) > 1e-10:
+                deduped.append(t)
+                prev = t
+        if len(deduped) < 2:
+            raise ValueError("After processing, timesteps must still contain at least two unique entries.")
+
+        sampling_timesteps = deduped[1:]
+
+        # Apply adaptive eps based on the most-noisy timestep
+        alpha_bar_init = self._get_cached_noise_schedule(deduped[0])
         eps = self.config.ot_eps_min * (1.0 + 9.0 * (1.0 - alpha_bar_init))
 
         # Choose transport method based on memory
@@ -1386,18 +1439,31 @@ class FastSBOTSolver(nn.Module):
                 source_batch, target_batch, eps, n_proj
             )
         else:
-            # Full OT
+            def _prepare_full_ot_tensor(tensor: torch.Tensor) -> Tuple[torch.Tensor, Optional[Tuple[int, ...]]]:
+                if tensor.dim() == 3:
+                    return tensor, None
+                view_shape = tensor.shape
+                tensor_flat = tensor.reshape(tensor.shape[0], -1, 1)
+                return tensor_flat, view_shape
+
+            src_prepped, src_shape = _prepare_full_ot_tensor(source_batch)
+            tgt_prepped, _ = _prepare_full_ot_tensor(target_batch)
+
             x_t = self.transport_module.sliced_ot._full_ot(
-                source_batch.unsqueeze(2),
-                target_batch.unsqueeze(2),
+                src_prepped,
+                tgt_prepped,
                 eps
-            ).squeeze(2)
+            )
+
+            if src_shape is not None:
+                x_t = x_t.reshape(src_shape)
 
         # Continue regular sampling
         return self.sample(
-            x_t.shape,
-            timesteps[1:],
-            verbose=verbose
+            tuple(x_t.shape),
+            sampling_timesteps,
+            verbose=verbose,
+            init_samples=x_t
         )
 
     def create_optimal_timesteps(

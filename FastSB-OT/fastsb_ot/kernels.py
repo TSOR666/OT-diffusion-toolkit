@@ -1,4 +1,4 @@
-﻿"""Kernel utilities for FastSB-OT."""
+"""Kernel utilities for FastSB-OT."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""Transport modules for FastSB-OT."""
+"""Transport modules for FastSB-OT."""
 
 from __future__ import annotations
 

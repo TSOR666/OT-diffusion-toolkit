@@ -1,4 +1,4 @@
-﻿"""Utility helpers for adapting models to FastSB-OT."""
+"""Utility helpers for adapting models to FastSB-OT."""
 
 from __future__ import annotations
 
