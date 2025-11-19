@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
+import warnings
 
 import torch
 import torch.nn as nn
@@ -15,8 +16,8 @@ def _build_window(height: int, width: int, device: torch.device, dtype: torch.dt
     if mode == "linear":
         y = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=dtype)
         x = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=dtype)
-        win_y = torch.minimum(y, 1 - y).clamp_(min=1e-3)
-        win_x = torch.minimum(x, 1 - x).clamp_(min=1e-3)
+        win_y = torch.minimum(y, 1 - y) * 2.0
+        win_x = torch.minimum(x, 1 - x) * 2.0
         window = torch.outer(win_y, win_x)
     else:  # default hann
         win_y = torch.hann_window(height, periodic=False, dtype=dtype, device=device)
@@ -44,8 +45,16 @@ class TiledModelWrapper(nn.Module):
         self.tile_size = tile_size
         self.explicit_stride = stride
         self.overlap = float(overlap)
+        if not (0.0 <= self.overlap < 1.0):
+            raise ValueError(f"overlap must be in [0,1); got {self.overlap}")
+        if self.overlap > 0.5:
+            warnings.warn(
+                f"Large overlap ({self.overlap:.2f}) may cause excessive memory usage.",
+                ResourceWarning,
+                stacklevel=2,
+            )
         self.blending = blending
-        self._window_cache: Dict[Tuple[int, int], torch.Tensor] = {}
+        self._window_cache: Dict[Tuple[int, int, str, Optional[int], torch.dtype], torch.Tensor] = {}
         self.predicts_score = getattr(model, "predicts_score", True)
         self.predicts_noise = getattr(model, "predicts_noise", False)
 
@@ -84,9 +93,15 @@ class TiledModelWrapper(nn.Module):
         return out
 
     def _get_window(self, height: int, width: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        key = (height, width)
+        key = (
+            height,
+            width,
+            device.type,
+            device.index if device.type == "cuda" else None,
+            dtype,
+        )
         window = self._window_cache.get(key)
-        if window is None or window.device != device or window.dtype != dtype:
+        if window is None:
             window = _build_window(height, width, device, dtype, self.blending)
             self._window_cache[key] = window
         return window

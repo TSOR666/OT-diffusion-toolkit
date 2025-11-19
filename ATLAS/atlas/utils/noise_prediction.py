@@ -149,8 +149,11 @@ class NoisePredictionAdapter:
             return None
         try:
             return self._forward_fn(x, t_tensor, **kwargs)
-        except TypeError:
-            return None
+        except TypeError as exc:
+            message = str(exc)
+            if "unexpected keyword argument" in message or "positional arguments" in message:
+                return None
+            raise
 
     def _ensure_valid_noise(
         self, noise_pred: torch.Tensor, reference: torch.Tensor

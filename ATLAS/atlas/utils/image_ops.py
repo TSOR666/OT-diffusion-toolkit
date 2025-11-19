@@ -37,17 +37,13 @@ def separable_gaussian_blur(
     kernel_size_x, kernel_size_y = kernel_size
     sigma_x, sigma_y = sigma
 
-    kernel_x = torch.exp(
-        -torch.arange(-(kernel_size_x // 2), kernel_size_x // 2 + 1, device=device, dtype=x.dtype) ** 2
-        / (2 * sigma_x ** 2)
-    )
-    kernel_x = kernel_x / kernel_x.sum()
+    def _gaussian_kernel(size: int, sigma: float) -> torch.Tensor:
+        coords = torch.linspace(-(size - 1) / 2.0, (size - 1) / 2.0, steps=size, device=device, dtype=x.dtype)
+        kernel = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        return kernel / kernel.sum()
 
-    kernel_y = torch.exp(
-        -torch.arange(-(kernel_size_y // 2), kernel_size_y // 2 + 1, device=device, dtype=x.dtype) ** 2
-        / (2 * sigma_y ** 2)
-    )
-    kernel_y = kernel_y / kernel_y.sum()
+    kernel_x = _gaussian_kernel(kernel_size_x, sigma_x)
+    kernel_y = _gaussian_kernel(kernel_size_y, sigma_y)
 
     padding_x = kernel_size_x // 2
     padding_y = kernel_size_y // 2
@@ -63,21 +59,13 @@ def separable_gaussian_blur(
         )
 
     channels = x.shape[1]
-
-    if channels > 1:
-        out = x.clone()
-        for c in range(channels):
-            channel = x[:, c:c + 1]
-            padded = F.pad(channel, (padding_x, padding_x, 0, 0), mode='reflect')
-            out_h = F.conv2d(padded, kernel_x.view(1, 1, 1, -1), padding=0)
-            padded = F.pad(out_h, (0, 0, padding_y, padding_y), mode='reflect')
-            out[:, c:c + 1] = F.conv2d(padded, kernel_y.view(1, 1, -1, 1), padding=0)
-        return out
+    window_x = kernel_x.view(1, 1, 1, -1).expand(channels, 1, 1, -1)
+    window_y = kernel_y.view(1, 1, -1, 1).expand(channels, 1, -1, 1)
 
     padded = F.pad(x, (padding_x, padding_x, 0, 0), mode='reflect')
-    out_h = F.conv2d(padded, kernel_x.view(1, 1, 1, -1), padding=0)
+    out_h = F.conv2d(padded, window_x, padding=0, groups=channels)
     padded = F.pad(out_h, (0, 0, padding_y, padding_y), mode='reflect')
-    out = F.conv2d(padded, kernel_y.view(1, 1, -1, 1), padding=0)
+    out = F.conv2d(padded, window_y, padding=0, groups=channels)
 
     if added_batch_dim:
         out = out.squeeze(0)

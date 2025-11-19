@@ -1,4 +1,6 @@
 from typing import Optional
+import os
+import warnings
 
 import torch
 
@@ -25,8 +27,6 @@ def warn_on_high_memory(peak_mb: float, threshold_mb: float = 4096.0) -> None:
         peak_mb: Current peak memory usage in megabytes
         threshold_mb: Memory threshold in megabytes (default: 4096 MB)
     """
-    import os
-    import warnings
 
     # Allow disabling warnings via environment variable
     if os.environ.get('ATLAS_DISABLE_MEMORY_WARNINGS') == '1':
@@ -36,5 +36,5 @@ def warn_on_high_memory(peak_mb: float, threshold_mb: float = 4096.0) -> None:
         warnings.warn(
             f"High memory usage detected: {peak_mb:.2f} MB exceeds threshold of {threshold_mb:.2f} MB",
             ResourceWarning,
-            stacklevel=2
+            stacklevel=2,
         )
