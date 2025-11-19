@@ -117,10 +117,13 @@ def _detect_cuda_capabilities() -> HardwareCapabilities:
 
     # CUDA graphs (CUDA 11.0+)
     cuda_version = torch.version.cuda
-    cuda_graphs_supported = (
-        cuda_version is not None
-        and int(cuda_version.split(".")[0]) >= 11
-    )
+    cuda_graphs_supported = False
+    if cuda_version is not None:
+        try:
+            major = int(str(cuda_version).split(".")[0])
+            cuda_graphs_supported = major >= 11
+        except (ValueError, IndexError, AttributeError):
+            cuda_graphs_supported = False
 
     # Recommended precision
     if bf16_supported and tf32_available:
@@ -134,11 +137,14 @@ def _detect_cuda_capabilities() -> HardwareCapabilities:
         use_mixed_precision = False
 
     # Batch size recommendation based on memory
-    if free_memory_gb >= 20:
+    # Conservative batch size recommendation (documented as baseline)
+    if free_memory_gb >= 24:
+        max_batch_size = 16
+    elif free_memory_gb >= 16:
         max_batch_size = 8
-    elif free_memory_gb >= 14:
+    elif free_memory_gb >= 12:
         max_batch_size = 4
-    elif free_memory_gb >= 10:
+    elif free_memory_gb >= 8:
         max_batch_size = 2
     else:
         max_batch_size = 1
@@ -323,7 +329,7 @@ def enable_optimal_precision() -> str:
             torch.backends.cudnn.allow_tf32 = True
 
     # Set matmul precision for BF16
-    if caps.bf16_supported:
+    if caps.bf16_supported and hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision("high")
         return "bf16 + tf32"
 

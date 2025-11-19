@@ -37,7 +37,15 @@ def _build_transform(config: DatasetConfig) -> transforms.Compose:
         ops.append(transforms.RandomCrop(config.resolution))
     if config.random_flip:
         ops.append(transforms.RandomHorizontalFlip())
-    ops.extend([transforms.ToTensor(), transforms.Normalize(mean=[0.5] * config.channels, std=[0.5] * config.channels)])
+    ops.append(transforms.ToTensor())
+
+    if config.channels in (1, 3):
+        ops.append(
+            transforms.Normalize(
+                mean=[0.5] * config.channels,
+                std=[0.5] * config.channels,
+            )
+        )
     return transforms.Compose(ops)
 
 

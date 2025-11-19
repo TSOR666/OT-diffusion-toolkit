@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import inspect
 import logging
 from typing import Dict, Tuple
 
@@ -46,6 +47,19 @@ class CUDAGraphModelWrapper(nn.Module):
         self._graphs_disabled = False
         self.predicts_score = getattr(model, "predicts_score", True)
         self.predicts_noise = getattr(model, "predicts_noise", False)
+
+        try:
+            signature = inspect.signature(self.model.forward)
+            params = [p for p in signature.parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            # Exclude self
+            if len(params) > 3:  # self + x + t (+ extras)
+                self._graphs_supported = False
+                logger.info(
+                    "CUDA graphs disabled because the wrapped model accepts additional positional "
+                    "arguments (likely conditioning)."
+                )
+        except (ValueError, TypeError):
+            pass
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         if (
@@ -100,8 +114,8 @@ class CUDAGraphModelWrapper(nn.Module):
         if self.warmup_iters > 0:
             for _ in range(self.warmup_iters):
                 _ = self.model(x, t)
-
-        torch.cuda.synchronize(device_index)
+            torch.cuda.synchronize(device_index)
+            torch.cuda.empty_cache()
 
         static_out = self.model(static_x, static_t).clone()
         graph = torch.cuda.CUDAGraph()
