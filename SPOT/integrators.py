@@ -18,6 +18,24 @@ from .constants import EPSILON_CLAMP
 from .logger import logger
 from .schedules import NoiseScheduleProtocol
 
+def _beta_from_schedule(schedule: NoiseScheduleProtocol, t: float, dt: float = 1e-3) -> float:
+    """Estimate beta(t) = -d/dt lambda(t) with a bounded finite difference."""
+    # Clamp t to valid range to avoid endpoint blow-ups
+    t0 = max(0.0, min(1.0, float(t)))
+    dt_eff = max(dt, 1e-4)
+    t_plus = min(1.0, t0 + dt_eff)
+    t_minus = max(0.0, t0 - dt_eff)
+
+    # Use the schedule's log SNR to approximate derivative
+    lam_plus = float(schedule.lambda_(torch.tensor([t_plus])))
+    lam_minus = float(schedule.lambda_(torch.tensor([t_minus])))
+    denom = max(t_plus - t_minus, 1e-6)
+    beta = -(lam_plus - lam_minus) / denom
+    # Guard against negative/NaN betas from numerical noise
+    if not math.isfinite(beta) or beta < 0.0:
+        beta = 0.0
+    return beta
+
 __all__ = [
     "HeunIntegrator",
     "DDIMIntegrator",
@@ -59,20 +77,25 @@ class HeunIntegrator:
         # Compute score at current time
         score_curr = score_fn(x, t_curr)
 
-        # Get noise parameters
+        # Get noise parameters and beta
         t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
         t_next_tensor = torch.full((1,), t_next, device=x.device, dtype=torch.float32)
 
         _, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)
         _, sigma_next = self.schedule.alpha_sigma(t_next_tensor)
+        beta_curr = _beta_from_schedule(self.schedule, t_curr)
+        beta_next = _beta_from_schedule(self.schedule, t_next)
 
-        # Predictor step (Euler)
-        drift_curr = 0.5 * score_curr * sigma_curr.to(x.dtype)
+        sigma_curr_sq = (sigma_curr.to(x.dtype) ** 2)
+        sigma_next_sq = (sigma_next.to(x.dtype) ** 2)
+
+        # Probability-flow ODE drift: -0.5*beta*x - beta*sigma^2*score
+        drift_curr = -0.5 * beta_curr * x - beta_curr * sigma_curr_sq * score_curr
         x_pred = x + drift_curr * dt
 
         # Corrector step (evaluate score at predicted point)
         score_next = score_fn(x_pred, t_next)
-        drift_next = 0.5 * score_next * sigma_next.to(x.dtype)
+        drift_next = -0.5 * beta_next * x_pred - beta_next * sigma_next_sq * score_next
 
         # Trapezoidal rule (average of drifts)
         x_next = x + 0.5 * (drift_curr + drift_next) * dt
@@ -301,12 +324,14 @@ class AdaptiveIntegrator:
         Returns:
             Tuple of (next state, error estimate, suggested next dt)
         """
-        # Get drift function
+        # Probability-flow drift helper
         def drift(x_val, t_val):
             t_tensor = torch.full((1,), t_val, device=x.device, dtype=torch.float32)
             _, sigma = self.schedule.alpha_sigma(t_tensor)
+            sigma_sq = (sigma.to(x.dtype) ** 2)
+            beta = _beta_from_schedule(self.schedule, float(t_val))
             score = score_fn(x_val, t_val)
-            return 0.5 * score * sigma.to(x.dtype)
+            return -0.5 * beta * x_val - beta * sigma_sq * score
 
         # Simple embedded RK method (Heun with Euler comparison)
         k1 = drift(x, t)
@@ -364,33 +389,17 @@ class ExponentialIntegrator:
         Returns:
             Next state
         """
-        # Get schedule parameters
+        # Beta and sigma^2 at current time
         t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
-        t_next_tensor = torch.full((1,), t_next, device=x.device, dtype=torch.float32)
+        _, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)
+        sigma_curr_sq = (sigma_curr.to(x.dtype) ** 2)
+        beta_curr = _beta_from_schedule(self.schedule, t_curr)
 
-        lambda_curr = self.schedule.lambda_(t_curr_tensor)
-        lambda_next = self.schedule.lambda_(t_next_tensor)
-        h = lambda_next - lambda_curr
-
-        alpha_curr, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)
-        alpha_next, sigma_next = self.schedule.alpha_sigma(t_next_tensor)
-
-        # Compute score
+        # Compute score once (explicit Euler for PF-ODE)
         score = score_fn(x, t_curr)
 
-        # Exponential integrator formula
-        # Exact integration of linear part: d/dt(alpha * x)
-        with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
-            alpha_ratio = (alpha_next / (alpha_curr + EPSILON_CLAMP)).float()
-
-            # Coefficient for nonlinear term (score)
-            # Integral of alpha(t) * sigma(t) dt using exponential approximation
-            if abs(h.item()) > EPSILON_CLAMP:
-                coeff = sigma_curr.float() * (torch.expm1(h) / h)
-            else:
-                # Taylor expansion for small h
-                coeff = sigma_curr.float()
-
-        x_next = alpha_ratio.to(x.dtype) * x + coeff.to(x.dtype) * score
+        dt = t_next - t_curr
+        drift = -0.5 * beta_curr * x - beta_curr * sigma_curr_sq * score
+        x_next = x + drift * dt
 
         return x_next
