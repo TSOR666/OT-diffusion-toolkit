@@ -151,7 +151,7 @@ class NystromKernelOperator(KernelOperator):
     def get_error_bound(self, n_samples: int) -> float:  # type: ignore[override]
         if n_samples <= 0:
             raise ValueError("n_samples must be positive")
-        return math.sqrt(self.n_landmarks / max(n_samples, 1))
+        return 1.0 / math.sqrt(self.n_landmarks)
 
     def clear_cache(self) -> None:  # type: ignore[override]
         self._cached_kernels.clear()
