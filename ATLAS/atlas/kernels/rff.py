@@ -150,7 +150,7 @@ class RFFKernelOperator(KernelOperator):
             else:  
                 raise ValueError(f"Unsupported kernel: {self.kernel_type}")
                 
-            # Normalize by THIS scale's feature count
+            # Normalize by the current scale's feature count
             scale_feature_count = weights.shape[1]  # Number of features in this scale
             scale_norm = math.sqrt(2.0 / scale_feature_count)
             projections.append(features * scale_norm
