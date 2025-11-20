@@ -15,7 +15,7 @@ from ..utils.random import set_seed
 class RFFKernelOperator(KernelOperator):
     """Approximate kernels with random Fourier features."""
 
-    _SUPPORTED_KERNELS = {"gaussian", "laplacian", "cauchy"}
+    _SUPPORTED_KERNELS = {"gaussian", "laplacian"}
 
     def __init__(
         self,
@@ -147,8 +147,8 @@ class RFFKernelOperator(KernelOperator):
                 features = torch.cos(proj)
             elif self.kernel_type == "laplacian":
                 features = torch.cos(proj) + torch.sin(proj)
-            else:  # cauchy
-                features = torch.cos(proj)
+            else:  
+                raise ValueError(f"Unsupported kernel: {self.kernel_type}")
             projections.append(features * norm_factor)
 
         phi = torch.cat(projections, dim=1)
