@@ -164,7 +164,10 @@ class SlicedOptimalTransport:
 
         P_fp32 = self._sinkhorn_batch_fixed(C.float(), eps)
         y_fp32 = y.float() if y.dtype != torch.float32 else y
-        out_fp32 = torch.bmm(P_fp32, y_fp32)
+        # Barycentric projection requires dividing by row mass (uniform = 1/N). Without
+        # this scaling the map is biased toward zero by roughly a factor of 1/N.
+        row_sums = P_fp32.sum(dim=2, keepdim=True).clamp_min(1e-12)
+        out_fp32 = torch.bmm(P_fp32, y_fp32) / row_sums
         return out_fp32.to(y.dtype)
 
     def _sinkhorn_batch_fixed(
@@ -236,7 +239,7 @@ class MomentumTransport(nn.Module):
         self.beta = beta
         self.device = device
         self.register_buffer('velocity', None, persistent=False)
-        self.register_buffer('velocity_shape', None, persistent=False)
+        self.velocity_shape = None
 
     def reset_velocity(self):
         """Reset momentum velocity"""
@@ -272,7 +275,12 @@ class MomentumTransport(nn.Module):
         else:
             smoothness = x.new_ones(x.shape[0], 1)
 
-        alpha_clamped = torch.clamp(alpha_bar_t, 0.0, 1.0)
+        alpha_tensor = torch.as_tensor(
+            alpha_bar_t,
+            device=x.device,
+            dtype=x.dtype if x.dtype.is_floating_point else torch.float32
+        )
+        alpha_clamped = torch.clamp(alpha_tensor, 0.0, 1.0)
         time_weight = 1.0 - alpha_clamped
         weight = smoothness * (0.5 + 0.5 * time_weight)
 
