@@ -11,6 +11,18 @@
 - Improved easy_api checkpoint validation, CLIP bootstrapping, prompt handling, and OOM recovery.
 - Added channel-aware dataset normalization and clarified reproducibility controls.
 
+## [2025-11-20] Solver correctness sweep
+
+### FastSB-OT
+- ensured the full OT map uses row-mass normalisation so barycentric projections honour uniform marginals and removed tensor-buffer misuse in the momentum transport module, fixing runtime errors when applying lookahead transport.
+
+### SBDS
+- resurface a `model_outputs_noise` hint and always convert scores only when the model predicts epsilon, clamp the probability-flow drift (`dx/dt = -0.5βx - βσ²score`), and bound `β(t)` near the schedule endpoints to avoid explosive values.
+- stabilized Sinkhorn/RFF/Nystrom transport paths by flooring kernels, normalising plans before barycentric mapping, tying ε to data scale, and preventing degeneracies in the blockwise transport math.
+
+### SPOT
+- rewrote the Heun/Adaptive/Exponential integrators to follow the variance-preserving ODE drift, added a guarded finite-difference β estimator, and unified the exponential integrator to explicit PF-ODE stepping for consistent continuous-time behaviour.
+
 ### Packaging
 - Added release archive 
 elease_ATLAS_update.zip containing all touched modules for contributor reference.
