@@ -74,15 +74,18 @@ class EnhancedAdaptiveNoiseSchedule:
         return float(self.alpha_bars[idx])
 
     def get_beta(self, t: float, dt: float = 1e-3) -> float:
+        # Clamp t to avoid tan(pi/2) and log(0) blow-ups near the endpoints
+        t_clamped = min(max(t, 0.0), 1.0 - 1e-4)
         if self.schedule_type == "cosine":
             s_val = 0.008
-            arg = (t + s_val) / (1 + s_val) * np.pi / 2
-            return float(2 * np.tan(arg) * np.pi / (2 * (1 + s_val)))
+            arg = (t_clamped + s_val) / (1 + s_val) * np.pi / 2
+            # tan tends to infinity as arg -> pi/2; clamp to a safe maximum
+            tan_val = np.tan(arg)
+            tan_val = np.clip(tan_val, -1e6, 1e6)
+            return float(2 * tan_val * np.pi / (2 * (1 + s_val)))
 
-        alpha_t = self(t)
-        alpha_t_dt = self(max(0.0, t - dt))
-        if alpha_t <= 0 or alpha_t_dt <= 0:
-            return self.beta_end
+        alpha_t = max(self(t_clamped), 1e-6)
+        alpha_t_dt = max(self(max(0.0, t_clamped - dt)), 1e-6)
         return float(-(np.log(alpha_t) - np.log(alpha_t_dt)) / dt)
 
     def _initialize_rff(self, dim: int) -> None:

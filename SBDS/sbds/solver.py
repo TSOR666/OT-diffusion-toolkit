@@ -89,6 +89,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         kernel_derivative_order: int = 2,  # Maximum order of kernel derivatives
         chunk_size: int = 128,  # Chunk size for pairwise distance computation
         spectral_gradient: bool = False,  # Whether to use spectral gradient computation
+        model_outputs_noise: bool = False,  # If True, model predicts epsilon; otherwise predicts score
     ):
         """
         Initialize the Enhanced Score-Based Schrodinger Bridge Diffusion Solver.
@@ -186,6 +187,11 @@ class EnhancedScoreBasedSBDiffusionSolver:
         self.kernel_derivative_order = kernel_derivative_order
         self.chunk_size = chunk_size
         self.spectral_gradient = spectral_gradient
+        # Respect model hint when available; otherwise use provided flag
+        if hasattr(score_model, "predicts_noise"):
+            self.model_outputs_noise = bool(getattr(score_model, "predicts_noise"))
+        else:
+            self.model_outputs_noise = model_outputs_noise
         
         # Initialize kernel derivative RFF
         self.rff = None
@@ -569,22 +575,24 @@ class EnhancedScoreBasedSBDiffusionSolver:
         """
         with torch.no_grad():
             t_tensor = torch.ones(x.shape[0], device=x.device) * t
-            noise_pred = self.score_model(x, t_tensor)
+            model_out = self.score_model(x, t_tensor)
 
-        # Convert noise prediction to score
-        # Clamp to prevent division by zero when alpha_t  1
+        # If the model outputs epsilon, convert to score; otherwise assume it already outputs score
         alpha_t = self.noise_schedule(t)
-        score_dtype = noise_pred.dtype
+        out_dtype = model_out.dtype
         compute_dtype = (
-            torch.float32 if score_dtype in (torch.float16, torch.bfloat16) else score_dtype
+            torch.float32 if out_dtype in (torch.float16, torch.bfloat16) else out_dtype
         )
-        variance = torch.as_tensor(1 - alpha_t, device=noise_pred.device, dtype=compute_dtype)
-        variance = torch.clamp(variance, min=MIN_ALPHA_VARIANCE)
-        denom = torch.sqrt(variance)
-        score = -noise_pred.to(dtype=compute_dtype) / denom
-        score = score.to(dtype=score_dtype)
 
-        return score
+        if self.model_outputs_noise:
+            variance = torch.as_tensor(1 - alpha_t, device=model_out.device, dtype=compute_dtype)
+            variance = torch.clamp(variance, min=MIN_ALPHA_VARIANCE)
+            denom = torch.sqrt(variance)
+            score = -model_out.to(dtype=compute_dtype) / denom
+        else:
+            score = model_out.to(dtype=compute_dtype)
+
+        return score.to(dtype=out_dtype)
     
     def _variance_reduced_score(self, x: torch.Tensor, t: float, n_samples: int = 5) -> torch.Tensor:
         """
@@ -699,9 +707,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
         Compute the drift term for the transport map using score function.
         CORRECTED VERSION: Properly implements probability flow ODE.
         
-        For variance-preserving SDE: dx = -0.5*(t)*x*dt + sqrt((t))*dW
-        The probability flow ODE is: dx/dt = -(t)/2 * x - (t)*(t)^2 * s_(x,t)
-        where (t)^2 = 1 - _bar(t)
+        For variance-preserving SDE: dx = -0.5*beta(t)*x*dt + sqrt(beta(t))*dW
+        The probability flow ODE drift is: dx/dt = -0.5*beta(t)*x - 0.5*beta(t)*s_theta(x,t)
         
         Args:
             x: Input tensor
@@ -726,9 +733,11 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 beta_t = -(np.log(alpha_t) - np.log(alpha_t_dt)) / dt
             else:
                 beta_t = 0.02  # Default value
+        # Clamp beta to a reasonable range to avoid numerical blow-ups near endpoints
+        beta_t = float(np.clip(beta_t, 0.0, 50.0))
         
         # Probability flow ODE drift for variance-preserving SDEs: dx/dt = -(t)/2 * x - (t) * s_(x,t)
-        drift = -0.5 * beta_t * x - beta_t * score
+        drift = -0.5 * beta_t * x - 0.5 * beta_t * score
         
         return drift * dt
     
@@ -833,7 +842,11 @@ class EnhancedScoreBasedSBDiffusionSolver:
                     if self.adaptive_eps
                     else self.eps
                 )
-                K = torch.exp(-C / eps)
+                # Prevent degenerate kernels: set a floor tied to data scale
+                median_cost = torch.median(C).item()
+                mean_cost = torch.mean(C).item()
+                eps = max(float(eps), 1e-3, 0.1 * median_cost, 0.5 * mean_cost)
+                K = torch.exp(-C / eps).clamp_min(LOG_STABILITY_EPS)
                 
                 # Initialize dual potentials
                 u = torch.zeros(batch_size, device=self.device)
@@ -846,6 +859,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 
                 # Compute transport plan
                 P = torch.diag(torch.exp(u)) @ K @ torch.diag(torch.exp(v))
+                P = P / P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
                 transport_cost = torch.sum(P * C).item()
                 
                 # Apply transport
@@ -930,7 +944,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
             transport_cost = torch.sum(P * C_approx).item()
             
             # Apply transport
-            x_transported = P @ x_ref_flat
+            row_sums = P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
+            x_transported = (P @ x_ref_flat) / row_sums
             x_transported = x_transported.reshape(x_t.shape)
             
             # Update with relaxation
@@ -1163,7 +1178,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
             transport_cost = torch.sum(P * C_approx).item()
             
             # Apply transport
-            x_transported = P @ x_ref_flat
+            row_sums = P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
+            x_transported = (P @ x_ref_flat) / row_sums
             x_transported = x_transported.reshape(x_t.shape)
             
             # Update with relaxation
