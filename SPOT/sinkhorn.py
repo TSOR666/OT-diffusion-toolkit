@@ -119,7 +119,7 @@ class OptimizedSinkhornKernel:
 
             for _ in range(n_iter):
                 lu = log_a - torch.logsumexp(log_K + lv[None, :], dim=1)
-                lv = log_b - torch.logsumexp(log_K.t() + lu[:, None], dim=0)
+                lv = log_b - torch.logsumexp(log_K.T + lu[None, :], dim=1)
 
         if not (torch.isfinite(lu).all() and torch.isfinite(lv).all()):
             logger.warning(
