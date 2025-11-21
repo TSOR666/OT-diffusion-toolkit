@@ -2,7 +2,7 @@
 
 All notable changes to SBDS will be documented in this file.
 
-## [Unreleased] - 2025-01-21
+## [Unreleased] - 2025-11-21
 
 ### Fixed
 
@@ -128,12 +128,6 @@ You can now remove those workarounds. The function handles all cases correctly.
 
 No performance impact - fixes are purely correctness improvements.
 
-### Contributors
-
-- Code review and fixes by Claude (Anthropic)
-- Original SBDS implementation by Thierry Silvio Claude Soreze
-
----
 
 ## Impact Summary
 
