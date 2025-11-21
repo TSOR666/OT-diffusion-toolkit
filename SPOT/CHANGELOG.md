@@ -2,7 +2,7 @@
 
 All notable changes to SPOT will be documented in this file.
 
-## [Unreleased] - 2025-01-21
+## [Unreleased] - 2025-11-21
 
 ### Fixed
 
@@ -141,13 +141,6 @@ No performance impact - same complexity, just correct broadcasting.
 ### Security
 
 No security implications - purely a correctness fix.
-
-### Contributors
-
-- Code review and fix by Claude (Anthropic)
-- Original SPOT implementation by Thierry Silvio Claude Soreze
-
----
 
 ## Impact Summary
 
