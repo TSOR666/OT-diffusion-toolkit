@@ -2,7 +2,7 @@
 
 All notable changes to FastSB-OT will be documented in this file.
 
-## [Unreleased] - 2025-01-21
+## [Unreleased] - 2025-11-21
 
 ### Fixed
 
@@ -92,7 +92,4 @@ If you've subclassed `FastSBOTSolver` and overridden `ddpm_step_improved()` or `
 - `alpha_bar_t` → `alpha_bar_curr`
 - `alpha_bar_next` → `alpha_bar_prev` (when it refers to the less noisy timestep)
 
-### Contributors
 
-- Code review and fixes by Claude (Anthropic)
-- Original implementation by Thierry Silvio Claude Soreze
