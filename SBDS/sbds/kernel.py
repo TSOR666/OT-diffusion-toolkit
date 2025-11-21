@@ -134,20 +134,34 @@ class KernelDerivativeRFF:
     ) -> torch.Tensor:
         """
         Compute kernel derivatives using Gaussian kernel derivative formulas.
-        For order=1: k(x,y)/x_i = k(x,y) * (y_i - x_i) / 2
-        For order=2: 2k(x,y)/x_ix_j = k(x,y) * (y_i - x_i)(y_j - x_j) / 4 - _ij * k(x,y) / 2
+
+        For a Gaussian kernel k(x,y) = exp(-||x-y||²/(2σ²)):
+        - Order 1: ∂k(x,y)/∂x_i = k(x,y) * (y_i - x_i) / σ²
+        - Order 2: ∂²k(x,y)/∂x_i∂x_j = k(x,y) * (y_i - x_i)(y_j - x_j) / σ⁴ - δ_ij * k(x,y) / σ²
+
+        Args:
+            x: Input tensor of shape (n, d) or higher dimensional
+            y: Optional second input of shape (m, d). If None, uses y = x.
+            order: Derivative order (1 or 2)
+            coordinate: Optional specific coordinate(s) to compute derivative for
+
+        Returns:
+            Derivative tensor with shape depending on order and coordinate specification
         """
         if order > self.derivative_order:
             raise ValueError(
                 f"Requested derivative order {order} > supported order {self.derivative_order}"
             )
 
+        # Reshape x if needed
         if x.dim() > 2:
             x = x.reshape(x.size(0), -1)
-        if y is not None and y.dim() > 2:
-            y = y.reshape(y.size(0), -1)
-        else:
+
+        # Handle y: assign x if None, otherwise reshape if needed
+        if y is None:
             y = x
+        elif y.dim() > 2:
+            y = y.reshape(y.size(0), -1)
 
         if order == 1:
             kernel = self.compute_kernel(x, y)
