@@ -680,15 +680,20 @@ class FastSBOTSolver(nn.Module):
                   t_curr: float, t_next: float, eta: float = 0.0) -> torch.Tensor:
         """DDIM sampling step with improved stability
 
-        POLISH: Using clearer variable names (alpha_bar instead of alpha)
+        Args:
+            x_t: Current sample at time t_curr
+            noise_pred: Predicted noise ε_θ(x_t, t_curr)
+            t_curr: Current timestep (denoising from 1→0)
+            t_next: Next timestep (< t_curr, less noisy)
+            eta: Stochasticity parameter (0=deterministic, 1=DDPM)
         """
-        alpha_bar_t = self._get_cached_noise_schedule(t_curr)
-        alpha_bar_next = self._get_cached_noise_schedule(t_next)
+        alpha_bar_curr = self._get_cached_noise_schedule(t_curr)
+        alpha_bar_prev = self._get_cached_noise_schedule(t_next)
 
-        # Predict x0
-        sqrt_alpha_bar_t = math.sqrt(alpha_bar_t)
-        sqrt_one_minus_alpha_bar_t = math.sqrt(1.0 - alpha_bar_t)
-        x0_pred = (x_t - sqrt_one_minus_alpha_bar_t * noise_pred) / sqrt_alpha_bar_t
+        # Predict x0 from current sample
+        sqrt_alpha_bar_curr = math.sqrt(alpha_bar_curr)
+        sqrt_one_minus_alpha_bar_curr = math.sqrt(1.0 - alpha_bar_curr)
+        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / sqrt_alpha_bar_curr
 
         # Clip predictions for stability
         if self.config.use_dynamic_thresholding:
@@ -696,24 +701,26 @@ class FastSBOTSolver(nn.Module):
         else:
             x0_pred = torch.clamp(x0_pred, -1, 1)
 
-        # Validate ratio instead of clamping - fail fast on bad schedules
-        ratio = alpha_bar_t / max(alpha_bar_next, 1e-12)
-        if not (0.0 < ratio <= 1.0):
+        # Validate monotonicity: alpha_bar should decrease as we denoise
+        alpha_t = alpha_bar_curr / max(alpha_bar_prev, 1e-12)
+        if not (0.0 < alpha_t <= 1.0):
             raise ValueError(
-                f"Invalid noise schedule: alpha_bar_t/alpha_bar_next={ratio:.6f} at t_curr={t_curr:.4f}, t_next={t_next:.4f}. "
-                f"Schedule must be monotonically decreasing (alpha_bar_t={alpha_bar_t:.6f}, alpha_bar_next={alpha_bar_next:.6f})."
+                f"Invalid noise schedule: alpha_t={alpha_t:.6f} at t_curr={t_curr:.4f}, t_next={t_next:.4f}. "
+                f"Schedule must be monotonically decreasing (alpha_bar_curr={alpha_bar_curr:.6f}, alpha_bar_prev={alpha_bar_prev:.6f})."
             )
 
-        # Compute variance
-        sigma_t = eta * math.sqrt(max(0.0, (1 - alpha_bar_next) / max(1 - alpha_bar_t, 1e-12))) * math.sqrt(1 - ratio)
+        # Compute DDIM variance with stochasticity parameter eta
+        sigma_t = eta * math.sqrt(max(0.0, (1 - alpha_bar_prev) / max(1 - alpha_bar_curr, 1e-12))) * math.sqrt(1 - alpha_t)
 
         # Compute mean (with protection against negative values under sqrt)
-        sqrt_alpha_bar_next = math.sqrt(alpha_bar_next)
-        under = max(0.0, 1.0 - alpha_bar_next - sigma_t**2)
+        sqrt_alpha_bar_prev = math.sqrt(alpha_bar_prev)
+        under = max(0.0, 1.0 - alpha_bar_prev - sigma_t**2)
         pred_sample_direction = math.sqrt(under) * noise_pred
 
-        # Add noise if eta > 0
-        x_next = sqrt_alpha_bar_next * x0_pred + pred_sample_direction
+        # Combine prediction and noise direction
+        x_next = sqrt_alpha_bar_prev * x0_pred + pred_sample_direction
+
+        # Add stochastic noise if eta > 0
         if eta > 0 and t_next > 0:
             gen = getattr(self.config, 'generator', None)
             noise = _randn_like_compat(x_t, gen)
@@ -737,14 +744,15 @@ class FastSBOTSolver(nn.Module):
                     f"Got {noise_pred.shape[1]} channels. Check your model output."
                 )
 
-        alpha_bar_t = self._get_cached_noise_schedule(t_curr)
-        alpha_bar_next = self._get_cached_noise_schedule(t_next)
+        # Get alpha_bar values
+        # Note: In denoising (t_curr -> t_next where t_next < t_curr),
+        # alpha_bar_curr is at current noisy state, alpha_bar_prev is at less-noisy state
+        alpha_bar_curr = self._get_cached_noise_schedule(t_curr)
+        alpha_bar_prev = self._get_cached_noise_schedule(t_next) if t_next > 0 else 1.0
 
-        # Use the actual next sampling time as the "previous"  to match the chosen discretization
-        alpha_bar_prev = alpha_bar_next if t_next > 0 else 1.0
-
-        # Numerically safe _t
-        beta_t = 1.0 - alpha_bar_t / max(alpha_bar_prev, 1e-12)
+        # Compute beta_t = 1 - alpha_t where alpha_t = alpha_bar_curr / alpha_bar_prev
+        # This is the per-step noise addition rate
+        beta_t = 1.0 - alpha_bar_curr / max(alpha_bar_prev, 1e-12)
         beta_t = max(beta_t, 1e-20)
 
         # Track if learned variance path is used
@@ -763,16 +771,16 @@ class FastSBOTSolver(nn.Module):
             # Interpolate between minimum and maximum variance
             min_log = math.log(max(1e-20, beta_t))
             # Guard division in variance computation
-            denominator = max(1 - alpha_bar_t, 1e-12)
+            denominator = max(1 - alpha_bar_curr, 1e-12)
             max_log = math.log(max(1e-20, beta_t * (1 - alpha_bar_prev) / denominator))
             frac = (log_variance + 1) / 2  # Assume model outputs in [-1, 1]
             model_log_variance = frac * max_log + (1 - frac) * min_log
             variance = torch.exp(model_log_variance).clamp_min(0.0)  # Explicit clamp
         else:
-            # Use fixed variance schedule
+            # Use fixed variance schedule: sigma^2_t = beta_t * (1 - alpha_bar_prev) / (1 - alpha_bar_curr)
             # Guard against tiny denominator
-            denominator = max(1 - alpha_bar_t, 1e-12)
-            variance = beta_t * (1 - alpha_bar_next) / denominator
+            denominator = max(1 - alpha_bar_curr, 1e-12)
+            variance = beta_t * (1 - alpha_bar_prev) / denominator
 
             # One-time warning if learned variance configured but not used
             if self.config.use_learned_variance and not hasattr(self, '_learned_variance_warned'):
@@ -782,22 +790,23 @@ class FastSBOTSolver(nn.Module):
                 self._learned_variance_warned = True
 
         # Compute mean with guards for tiny denominators
-        sqrt_alpha_bar_t = math.sqrt(alpha_bar_t)
-        sqrt_one_minus_alpha_bar_t = math.sqrt(max(1.0 - alpha_bar_t, 1e-12))
+        sqrt_alpha_bar_curr = math.sqrt(alpha_bar_curr)
+        sqrt_one_minus_alpha_bar_curr = math.sqrt(max(1.0 - alpha_bar_curr, 1e-12))
 
         # Predict x0 and clip
-        x0_pred = (x_t - sqrt_one_minus_alpha_bar_t * noise_pred) / max(sqrt_alpha_bar_t, 1e-12)
+        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / max(sqrt_alpha_bar_curr, 1e-12)
         if self.config.use_dynamic_thresholding:
             x0_pred = self.dynamic_threshold(x0_pred)
         else:
             x0_pred = torch.clamp(x0_pred, -1, 1)
 
-        # Correct posterior mean coefficients
-        # The posterior mean is:  = _{t-1} * _t/(1-_t) * x0 + _t * (1-_{t-1})/(1-_t) * x_t
-        denominator = max(1 - alpha_bar_t, 1e-12)
-        alpha_step = max(alpha_bar_t / max(alpha_bar_next, 1e-12), 0.0)  # per-step alpha = alpha_bar_t/alpha_bar_next ( 1)
-        mean_coef1 = math.sqrt(alpha_bar_next) * beta_t / denominator
-        mean_coef2 = math.sqrt(alpha_step) * (1 - alpha_bar_next) / denominator
+        # Compute posterior mean: μ_t = sqrt(alpha_bar_prev) * beta_t / (1 - alpha_bar_curr) * x_0
+        #                                + sqrt(alpha_t) * (1 - alpha_bar_prev) / (1 - alpha_bar_curr) * x_t
+        # where alpha_t = alpha_bar_curr / alpha_bar_prev is the per-step alpha
+        denominator = max(1 - alpha_bar_curr, 1e-12)
+        alpha_t = max(alpha_bar_curr / max(alpha_bar_prev, 1e-12), 0.0)  # per-step alpha (≤ 1)
+        mean_coef1 = math.sqrt(alpha_bar_prev) * beta_t / denominator  # coefficient for x_0
+        mean_coef2 = math.sqrt(alpha_t) * (1 - alpha_bar_prev) / denominator  # coefficient for x_t
         mean = mean_coef1 * x0_pred + mean_coef2 * x_t
 
         # Add noise
