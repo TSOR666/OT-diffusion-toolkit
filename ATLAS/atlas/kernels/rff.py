@@ -153,7 +153,7 @@ class RFFKernelOperator(KernelOperator):
             # Normalize by the current scale's feature count
             scale_feature_count = weights.shape[1]  # Number of features in this scale
             scale_norm = math.sqrt(2.0 / scale_feature_count)
-            projections.append(features * scale_norm
+            projections.append(features * scale_norm)
 
         phi = torch.cat(projections, dim=1)
 

@@ -13,7 +13,8 @@ def karras_noise_schedule(
     Continuous noise schedule from Karras et al. (2022).
 
     Args:
-        t: Continuous time value in [0, 1] where 0 corresponds to maximum noise.
+        t: Continuous time value in [0, 1] where 1 corresponds to maximum noise
+           and 0 to minimum noise.
         sigma_min: Minimum noise level (end of sampling).
         sigma_max: Maximum noise level (start of sampling).
         rho: Controls the curvature of the schedule (higher = more curved).
@@ -34,13 +35,13 @@ def karras_noise_schedule(
         t = t.to(dtype=dtype).clamp(0.0, 1.0)
         sigma_min_root = torch.tensor(sigma_min, device=device, dtype=dtype) ** (1.0 / rho)
         sigma_max_root = torch.tensor(sigma_max, device=device, dtype=dtype) ** (1.0 / rho)
-        sigma = (sigma_max_root + t * (sigma_min_root - sigma_max_root)) ** rho
+        sigma = (sigma_min_root + t * (sigma_max_root - sigma_min_root)) ** rho
         alpha = 1.0 / (1.0 + sigma ** 2)
         return alpha
     else:
         t = float(max(0.0, min(1.0, t)))
         sigma_min_root = sigma_min ** (1.0 / rho)
         sigma_max_root = sigma_max ** (1.0 / rho)
-        sigma = (sigma_max_root + t * (sigma_min_root - sigma_max_root)) ** rho
+        sigma = (sigma_min_root + t * (sigma_max_root - sigma_min_root)) ** rho
         alpha = 1.0 / (1.0 + sigma ** 2)
         return alpha

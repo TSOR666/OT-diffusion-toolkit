@@ -181,11 +181,11 @@ class SchroedingerBridgeSolver:
         return self._schedule_value_to_tensor(self.noise_schedule(t), reference)
 
     def _compute_sigma(self, alpha: torch.Tensor) -> torch.Tensor:
-        """Compute the noise scale sigma(t) from alpha(t)."""
+        """Compute the noise scale sigma(t) from alpha(t): sigma^2 = (1-alpha)/alpha."""
         info = torch.finfo(alpha.dtype)
         alpha_clamped = torch.clamp(alpha, min=info.tiny, max=1.0)
         one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=info.tiny)
-        return torch.sqrt(one_minus_alpha)
+        return torch.sqrt(one_minus_alpha / alpha_clamped)
 
     def _compute_sde_coefficients(
         self, t: float, reference: torch.Tensor
@@ -241,10 +241,8 @@ class SchroedingerBridgeSolver:
         noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
-        denom = torch.sqrt(
-            torch.clamp(1 - alpha_t, min=torch.finfo(noise_pred.dtype).tiny)
-        )
-        score = -noise_pred / denom
+        sigma_t = self._compute_sigma(alpha_t)
+        score = -noise_pred / sigma_t
         return score
 
     def _compute_drift(
