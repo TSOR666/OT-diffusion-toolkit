@@ -37,10 +37,22 @@ class HighResLatentScoreModel(nn.Module):
         self.default_guidance_scale = (
             cond_cfg.guidance_scale if cond_cfg is not None else 1.0
         )
-        self.cross_attention_levels = set(config.cross_attention_levels)
 
         base_width = config.base_channels
         channel_mult = config.channel_mult
+        num_levels = len(channel_mult)
+
+        invalid_attn = set(config.attention_levels) - set(range(num_levels))
+        if invalid_attn:
+            raise ValueError(
+                f"Invalid attention_levels {invalid_attn}; must be in [0, {num_levels - 1}]."
+            )
+        invalid_cross = set(config.cross_attention_levels) - set(range(num_levels))
+        if invalid_cross:
+            raise ValueError(
+                f"Invalid cross_attention_levels {invalid_cross}; must be in [0, {num_levels - 1}]."
+            )
+        self.cross_attention_levels = set(config.cross_attention_levels)
 
         self.time_embed = SinusoidalTimeEmbedding(config.time_emb_dim)
         self.time_mlp = nn.Sequential(
@@ -72,7 +84,6 @@ class HighResLatentScoreModel(nn.Module):
         self.skip_channels: List[int] = []
 
         in_channels = base_width
-        num_levels = len(channel_mult)
 
         for level, mult in enumerate(channel_mult):
             out_channels = base_width * mult
@@ -153,8 +164,15 @@ class HighResLatentScoreModel(nn.Module):
         if isinstance(condition, dict):
             context = condition.get("context")
             context_mask = condition.get("context_mask") or condition.get("mask")
-            if context is not None and context.dim() == 2:
-                context = context.unsqueeze(1)
+            if context is not None:
+                if context.dim() == 2:
+                    context = context.unsqueeze(1)
+                elif context.dim() != 3:
+                    raise ValueError(f"Context must be 2D or 3D, got shape {tuple(context.shape)}")
+                if context.size(0) != batch:
+                    raise ValueError(
+                        f"Context batch ({context.size(0)}) does not match input batch ({batch})."
+                    )
             emb = condition.get("embedding")
             if (
                 emb is None
@@ -164,6 +182,11 @@ class HighResLatentScoreModel(nn.Module):
                 cond_vec = condition["conditioning"]
                 if cond_vec.dim() == 1:
                     cond_vec = cond_vec.unsqueeze(0)
+                if cond_vec.shape[-1] != self.condition_encoder.in_features:
+                    raise ValueError(
+                        f"Conditioning vector dim ({cond_vec.shape[-1]}) does not match encoder input "
+                        f"({self.condition_encoder.in_features})."
+                    )
                 emb = self.condition_encoder(cond_vec.to(device))
             if emb is not None:
                 if emb.dim() == 1:
@@ -172,6 +195,10 @@ class HighResLatentScoreModel(nn.Module):
         elif isinstance(condition, torch.Tensor):
             if condition.dim() == 3:
                 context = condition
+                if context.size(0) != batch:
+                    raise ValueError(
+                        f"Context batch ({context.size(0)}) does not match input batch ({batch})."
+                    )
             elif (
                 self.condition_encoder is not None
                 and condition.dim() == 2
@@ -216,12 +243,35 @@ class HighResLatentScoreModel(nn.Module):
         timesteps: torch.Tensor,
         condition: Optional[Union[bool, torch.Tensor, Dict[str, Any]]] = None,
     ) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"Input must be 4D [B, C, H, W]; got shape {tuple(x.shape)}.")
+        if x.size(1) != self.config.in_channels:
+            raise ValueError(
+                f"Input channels ({x.size(1)}) do not match configured in_channels ({self.config.in_channels})."
+            )
+        num_downsample = len([b for b in self.down_blocks if b.downsample is not None])
+        divisor = 2 ** num_downsample if num_downsample > 0 else 1
+        h_spatial, w_spatial = x.shape[2:]
+        if h_spatial % divisor != 0 or w_spatial % divisor != 0:
+            raise ValueError(
+                f"Spatial dimensions ({h_spatial}, {w_spatial}) must be divisible by {divisor} "
+                f"for {num_downsample} downsampling layers."
+            )
+
         if timesteps.dim() == 0:
-            timesteps = timesteps[None]
-        if timesteps.dim() == 1:
-            timesteps = timesteps.to(x.device)
-        elif timesteps.dim() > 1:
+            timesteps = timesteps.unsqueeze(0).expand(x.size(0))
+        elif timesteps.dim() == 1:
+            if timesteps.size(0) != x.size(0):
+                raise ValueError(
+                    f"Timestep batch ({timesteps.size(0)}) does not match input batch ({x.size(0)})."
+                )
+        else:
             timesteps = timesteps.squeeze()
+            if timesteps.dim() != 1 or timesteps.size(0) != x.size(0):
+                raise ValueError(
+                    f"Timestep tensor must align with batch size {x.size(0)}; got shape {tuple(timesteps.shape)}."
+                )
+        timesteps = timesteps.to(x.device)
 
         batch = x.size(0)
         context, context_mask, cond_emb = self._parse_condition(
@@ -246,9 +296,18 @@ class HighResLatentScoreModel(nn.Module):
         h = self.mid_block2(h, time_emb)
 
         for block in self.up_blocks:
+            if not skips:
+                raise RuntimeError(
+                    "Not enough skip connections available for upsampling path. "
+                    "Check channel_mult and num_res_blocks configuration."
+                )
             skip = skips.pop()
             h = block(
                 h, skip, time_emb, context=context, context_mask=context_mask
+            )
+        if skips:
+            raise RuntimeError(
+                f"Unused skip connections remain ({len(skips)}). Encoder/decoder configuration may be inconsistent."
             )
 
         h = self.output_norm(h)

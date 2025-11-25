@@ -57,6 +57,13 @@ class ResnetBlock2D(nn.Module):
             self.skip = nn.Identity()
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
+        if time_emb.dim() != 2:
+            raise ValueError(f"time_emb must be 2D [batch, dim], got shape {tuple(time_emb.shape)}")
+        if time_emb.shape[0] != x.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch between x ({x.shape[0]}) and time_emb ({time_emb.shape[0]})."
+            )
+
         residual = self.skip(x)
 
         h = self.norm1(x)
@@ -90,6 +97,10 @@ class DownsampleBlock(nn.Module):
         context_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if num_res_blocks <= 0:
+            raise ValueError(f"num_res_blocks must be positive, got {num_res_blocks}")
         self.res_blocks = nn.ModuleList()
         for i in range(num_res_blocks):
             block_in = in_channels if i == 0 else out_channels
@@ -148,6 +159,11 @@ class UpsampleBlock(nn.Module):
         context_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
+        if num_heads <= 0:
+            raise ValueError(f"num_heads must be positive, got {num_heads}")
+        if num_res_blocks <= 0:
+            raise ValueError(f"num_res_blocks must be positive, got {num_res_blocks}")
+        self.skip_channels = skip_channels
         if upsample:
             self.upsample = nn.Sequential(
                 nn.Upsample(scale_factor=2, mode="nearest"),
@@ -191,6 +207,10 @@ class UpsampleBlock(nn.Module):
         if x.shape[-2:] != skip.shape[-2:]:
             x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
 
+        if skip.shape[1] != self.skip_channels:
+            raise ValueError(
+                f"Skip connection has {skip.shape[1]} channels; expected {self.skip_channels}."
+            )
         x = torch.cat([x, skip], dim=1)
         for block in self.res_blocks:
             x = block(x, time_emb)
