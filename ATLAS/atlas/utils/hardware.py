@@ -67,10 +67,15 @@ def safe_cuda_mem_get_info(device_index: Optional[int] = None) -> Tuple[int, int
 
     total = int(torch.cuda.get_device_properties(target_index).total_memory)
     try:
-        allocated = int(torch.cuda.memory_allocated(target_index))
-        free = max(total - allocated, 0)
+        reserved = int(torch.cuda.memory_reserved(target_index))
+        free = max(total - reserved, 0)
     except Exception:
-        free = total
+        try:
+            allocated = int(torch.cuda.memory_allocated(target_index))
+            estimated_reserved = int(allocated * 1.3)
+            free = max(total - estimated_reserved, 0)
+        except Exception:
+            free = total
 
     global _WARNED_MEM_INFO_FALLBACK
     if not _WARNED_MEM_INFO_FALLBACK:
@@ -92,6 +97,8 @@ def detect_hardware_capabilities() -> HardwareCapabilities:
     """
     if torch.cuda.is_available():
         return _detect_cuda_capabilities()
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return _detect_mps_capabilities()
     else:
         return _detect_cpu_capabilities()
 
@@ -109,45 +116,46 @@ def _detect_cuda_capabilities() -> HardwareCapabilities:
 
     # Precision support
     bf16_supported = hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
-    fp16_supported = compute_cap[0] >= 5  # Maxwell and later
+    fp16_storage = compute_cap[0] >= 5  # storage support
+    fp16_tensor_cores = compute_cap[0] >= 7  # fast compute on Volta+
+    fp16_supported = fp16_storage  # keep attribute for compatibility
 
     # TF32 support (Ampere and later)
     tf32_available = compute_cap[0] >= 8
-    tf32_enabled = tf32_available and torch.backends.cuda.matmul.allow_tf32
+    tf32_enabled = False
+    if tf32_available:
+        try:
+            tf32_enabled = torch.backends.cuda.matmul.allow_tf32
+        except AttributeError:
+            tf32_enabled = False
 
     # CUDA graphs (CUDA 11.0+)
     cuda_version = torch.version.cuda
     cuda_graphs_supported = False
     if cuda_version is not None:
         try:
-            major = int(str(cuda_version).split(".")[0])
-            cuda_graphs_supported = major >= 11
-        except (ValueError, IndexError, AttributeError):
+            import re
+            match = re.match(r"(\d+)\.(\d+)", str(cuda_version))
+            if match:
+                major = int(match.group(1))
+                cuda_graphs_supported = major >= 11
+        except (ValueError, AttributeError):
             cuda_graphs_supported = False
 
     # Recommended precision
     if bf16_supported and tf32_available:
         recommended_precision = "bf16"
         use_mixed_precision = True
-    elif fp16_supported:
+    elif fp16_tensor_cores:
         recommended_precision = "fp16"
         use_mixed_precision = True
     else:
         recommended_precision = "fp32"
         use_mixed_precision = False
 
-    # Batch size recommendation based on memory
-    # Conservative batch size recommendation (documented as baseline)
-    if free_memory_gb >= 24:
-        max_batch_size = 16
-    elif free_memory_gb >= 16:
-        max_batch_size = 8
-    elif free_memory_gb >= 12:
-        max_batch_size = 4
-    elif free_memory_gb >= 8:
-        max_batch_size = 2
-    else:
-        max_batch_size = 1
+    max_batch_size = _estimate_max_batch_size(
+        free_memory_gb, resolution=512, use_fp16=use_mixed_precision
+    )
 
     return HardwareCapabilities(
         device_type="cuda",
@@ -371,9 +379,11 @@ def gate_expensive_feature(
 
     # Check memory
     if memory_threshold_gb is not None:
-        if caps.free_memory_gb < memory_threshold_gb:
+        required_with_margin = memory_threshold_gb * 1.1
+        if caps.free_memory_gb < required_with_margin:
             return False, (
-                f"{feature_name} requires {memory_threshold_gb:.1f}GB free memory, "
+                f"{feature_name} requires {memory_threshold_gb:.1f}GB free memory "
+                f"(with 10% margin: {required_with_margin:.1f}GB), "
                 f"but only {caps.free_memory_gb:.1f}GB available"
             )
 

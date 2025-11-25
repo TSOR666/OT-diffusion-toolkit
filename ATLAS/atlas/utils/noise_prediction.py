@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
+
+
+logger = logging.getLogger(__name__)
 
 
 class NoisePredictionAdapter:
@@ -16,7 +20,11 @@ class NoisePredictionAdapter:
 
     def __init__(self, model: nn.Module) -> None:
         self.model = model
-        self._forward_fn = getattr(model, "forward", model)
+        self._forward_fn = getattr(model, "forward", None) or model
+        if not callable(self._forward_fn):
+            raise TypeError(
+                f"Model must be callable or implement forward(); got {type(model)}"
+            )
         self._signature = self._safe_signature()
         self._params = (
             self._signature.parameters if self._signature is not None else None
@@ -36,10 +44,25 @@ class NoisePredictionAdapter:
         if x.ndim == 0:
             raise ValueError("Input tensor must include a batch dimension.")
 
-        t_scalar = float(t)
-        t_tensor = torch.full(
-            (x.shape[0],), t_scalar, dtype=torch.float32, device=x.device
-        )
+        if isinstance(t, torch.Tensor):
+            if t.dim() == 0:
+                t_tensor = t.expand(x.shape[0]).to(x.device)
+            elif t.dim() == 1:
+                if t.shape[0] == 1:
+                    t_tensor = t.expand(x.shape[0]).to(x.device)
+                elif t.shape[0] == x.shape[0]:
+                    t_tensor = t.to(x.device)
+                else:
+                    raise ValueError(
+                        f"Timestep batch size {t.shape[0]} does not match input batch {x.shape[0]}."
+                    )
+            else:
+                raise ValueError(f"Timestep tensor must be 0D or 1D, got shape {t.shape}.")
+        else:
+            t_scalar = float(t)
+            t_tensor = torch.full(
+                (x.shape[0],), t_scalar, dtype=torch.float32, device=x.device
+            )
 
         noise_pred = self._predict_with_conditioning(x, t_tensor, conditioning)
         return self._ensure_valid_noise(noise_pred, reference=x)
@@ -60,8 +83,17 @@ class NoisePredictionAdapter:
             if has_cfg_keys:
                 guidance_value = conditioning.get("guidance_scale", 1.0)
                 if isinstance(guidance_value, torch.Tensor):
+                    if guidance_value.numel() != 1:
+                        raise ValueError(
+                            f"guidance_scale must be scalar, got tensor with {guidance_value.numel()} elements."
+                        )
                     guidance_value = guidance_value.item()
-                guidance = float(guidance_value)
+                try:
+                    guidance = float(guidance_value)
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(
+                        f"guidance_scale must be numeric, got {type(guidance_value)}"
+                    ) from exc
 
                 cond_payload = conditioning.get("cond")
                 uncond_payload = conditioning.get("uncond")
@@ -154,6 +186,11 @@ class NoisePredictionAdapter:
             if "unexpected keyword argument" in message or "positional arguments" in message:
                 return None
             raise
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.debug(
+                "Model call failed with kwargs %s: %s", list(kwargs.keys()), exc
+            )
+            return None
 
     def _ensure_valid_noise(
         self, noise_pred: torch.Tensor, reference: torch.Tensor
@@ -166,12 +203,10 @@ class NoisePredictionAdapter:
                 f"but expected {reference.shape}."
             )
 
-        noise_pred = noise_pred.to(device=reference.device, dtype=reference.dtype)
-
         if not torch.isfinite(noise_pred).all():
             raise ValueError("Noise predictor generated non-finite values.")
 
-        return noise_pred
+        return noise_pred.to(device=reference.device, dtype=reference.dtype)
 
     def _safe_signature(self) -> Optional[inspect.Signature]:
         try:
