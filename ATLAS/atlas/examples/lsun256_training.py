@@ -73,7 +73,7 @@ def _validate_args(args: argparse.Namespace) -> None:
             ckpt_path.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             errors.append(f"Cannot create checkpoint directory: {exc}")
-    if args.device and not re.match(r"^(cpu|cuda(:\\d+)?)$", args.device):
+    if args.device and not re.match(r"^(cpu|cuda(:\d+)?)$", args.device):
         errors.append(f"Invalid device format: {args.device}. Expected 'cpu', 'cuda', or 'cuda:N'.")
     if args.max_steps is not None and args.max_steps <= 0:
         errors.append(f"max_steps must be positive, got {args.max_steps}")
