@@ -89,9 +89,8 @@ class CLIPConditioningInterface:
             raise RuntimeError("CLIP tokenizer not initialized.")
         tokens = self.tokenizer(prompts)
         if isinstance(tokens, torch.Tensor):
-            if tokens.dtype != torch.long:
-                tokens = tokens.to(dtype=torch.long)
-            return tokens.to(self.device)
+            tokens = tokens.to(dtype=torch.long, device=self.device)
+            return tokens
 
         if isinstance(tokens, dict):
             tokens = tokens.get("input_ids", tokens)
@@ -105,10 +104,14 @@ class CLIPConditioningInterface:
         x = self.model.token_embedding(tokens)
         if hasattr(self.model, "positional_embedding"):
             pos_emb = self.model.positional_embedding
+            seq_len = x.size(1)
             if pos_emb.dim() == 1:
-                x = x + pos_emb.unsqueeze(0)
+                pos_slice = pos_emb[:seq_len].view(1, seq_len, 1)
             else:
-                x = x + pos_emb
+                pos_slice = pos_emb[:seq_len]
+                if pos_slice.dim() == 2:
+                    pos_slice = pos_slice.unsqueeze(0)
+            x = x + pos_slice
 
         x = x.permute(1, 0, 2)
         x = self.model.transformer(x)
@@ -119,12 +122,15 @@ class CLIPConditioningInterface:
 
         if self.eot_id is not None:
             eot_mask = tokens.eq(self.eot_id)
-            if eot_mask.any(dim=-1):
-                cls_indices = eot_mask.float().argmax(dim=-1)
+            has_eot = eot_mask.any(dim=-1)
+            if has_eot.any():
+                eot_positions = eot_mask.float().argmax(dim=-1)
+                fallback = tokens.new_full((tokens.size(0),), tokens.size(1) - 1)
+                cls_indices = torch.where(has_eot, eot_positions, fallback)
             else:
-                cls_indices = tokens.argmax(dim=-1)
+                cls_indices = tokens.new_full((tokens.size(0),), tokens.size(1) - 1)
         else:
-            cls_indices = tokens.argmax(dim=-1)
+            cls_indices = tokens.new_full((tokens.size(0),), tokens.size(1) - 1)
         pooled = x[torch.arange(x.size(0), device=x.device), cls_indices]
         if (
             hasattr(self.model, "text_projection")
@@ -164,7 +170,7 @@ class CLIPConditioningInterface:
 
         attention_mask = None
         if self.pad_id is not None:
-            attention_mask = tokens.ne(self.pad_id)
+            attention_mask = tokens.ne(self.pad_id).float()
 
 
         payload = {

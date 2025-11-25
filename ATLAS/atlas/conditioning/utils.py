@@ -6,8 +6,13 @@ import torch
 def safe_expand_tensor(tensor: torch.Tensor, target_batch: int, base_batch: int) -> torch.Tensor:
     """Broadcast a tensor to the desired batch size while keeping semantics intact."""
 
+    if target_batch <= 0:
+        raise ValueError(f"target_batch must be positive, got {target_batch}.")
+    if base_batch <= 0:
+        raise ValueError(f"base_batch must be positive, got {base_batch}.")
+
     if tensor.dim() == 0:
-        return tensor.expand(target_batch)
+        return tensor
     if tensor.size(0) == target_batch:
         return tensor
     if tensor.size(0) == 1:
@@ -15,11 +20,9 @@ def safe_expand_tensor(tensor: torch.Tensor, target_batch: int, base_batch: int)
     if tensor.size(0) == base_batch and target_batch % base_batch == 0:
         repeat = target_batch // base_batch
         return tensor.repeat_interleave(repeat, dim=0)
-    if target_batch % tensor.size(0) == 0:
-        repeat = target_batch // tensor.size(0)
-        return tensor.repeat_interleave(repeat, dim=0)
     raise ValueError(
-        f"Cannot expand conditioning batch of size {tensor.size(0)} to {target_batch}."
+        "Cannot expand conditioning batch "
+        f"of size {tensor.size(0)} to {target_batch} (base_batch={base_batch}, shape={tuple(tensor.shape)})."
     )
 
 
@@ -36,9 +39,9 @@ def expand_condition_dict(
     expanded: Dict[str, Any] = {}
     for key, value in cond_dict.items():
         if isinstance(value, torch.Tensor):
-            value = value.to(device)
             if value.dim() > 0:
                 value = safe_expand_tensor(value, target_batch, base_batch)
+            value = value.to(device)
             expanded[key] = value
         else:
             expanded[key] = value
