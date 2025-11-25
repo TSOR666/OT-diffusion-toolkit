@@ -511,8 +511,14 @@ class SchroedingerBridgeSolver:
 
             # Compute g from f with improved numerical stability
             Kf = kernel_op.apply(x, f)
-            # Use larger epsilon to prevent numerical instability
-            g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8)
+        # Use clamping to prevent numerical instability
+        if (Kf < 1e-10).any() or (Kf > 1e8).any():
+            self.logger.warning(
+                "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
+                float(Kf.min()),
+                float(Kf.max()),
+            )
+        g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
         else:
             # Traditional iterative approach
             # Initialize potentials
@@ -525,11 +531,25 @@ class SchroedingerBridgeSolver:
 
                 # Update f: f = 1 / (K @ g) with numerical stability
                 Kg = kernel_op.apply(x, g)
-                f = 1.0 / torch.clamp(Kg, min=1e-8)
+                if (Kg < 1e-10).any() or (Kg > 1e8).any():
+                    self.logger.warning(
+                        "Schrodinger bridge iteration %d: Kg out of range [%.2e, %.2e]",
+                        i,
+                        float(Kg.min()),
+                        float(Kg.max()),
+                    )
+                f = 1.0 / torch.clamp(Kg, min=1e-8, max=1e8)
 
                 # Update g: g = 1 / (K^T @ f) with numerical stability
                 KTf = kernel_op.apply_transpose(x, f)
-                g = 1.0 / torch.clamp(KTf, min=1e-8)
+                if (KTf < 1e-10).any() or (KTf > 1e8).any():
+                    self.logger.warning(
+                        "Schrodinger bridge iteration %d: KTf out of range [%.2e, %.2e]",
+                        i,
+                        float(KTf.min()),
+                        float(KTf.max()),
+                    )
+                g = 1.0 / torch.clamp(KTf, min=1e-8, max=1e8)
                 
                 # Check convergence
                 if torch.max(torch.abs(f - f_prev)) < self.error_tolerance:
@@ -598,10 +618,10 @@ class SchroedingerBridgeSolver:
             denom = torch.sum(p * Ap)
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
-            dtype_eps = torch.finfo(denom.dtype).eps * self._min_curvature_multiplier
-            min_denom = max(dtype_eps, torch.finfo(denom.dtype).tiny)
+            dtype_info = torch.finfo(denom.dtype)
+            min_denom = torch.sqrt(torch.tensor(dtype_info.eps, dtype=denom.dtype))
 
-            if (not denom_is_finite) or denom_abs <= min_denom:
+            if (not denom_is_finite) or denom_abs < min_denom:
                 denom_value = float(denom.detach().cpu().item()) if denom_is_finite else float("nan")
                 self.logger.warning(
                     "Conjugate gradient restart at iteration %d due to unstable curvature (denominator %.3e).",
@@ -710,10 +730,11 @@ class SchroedingerBridgeSolver:
                     int(self.rff_features),
                     bool(self.use_multiscale),
                     tuple(float(s) for s in self.scale_factors) if self.use_multiscale else None,
+                    self.seed,
                 ]
             )
         elif method == 'nystrom':
-            key_components.append(int(self.n_landmarks))
+            key_components.extend([int(self.n_landmarks), self.seed])
         elif method == 'fft':
             key_components.append(bool(self.use_multiscale))
 
@@ -835,7 +856,8 @@ class SchroedingerBridgeSolver:
             else:
                 alpha_value = float(alpha_t)
             alpha_value = max(0.0, min(1.0, alpha_value))
-            eps = self.epsilon * math.sqrt(max(1e-12, 1.0 - alpha_value))
+            scale_factor = math.sqrt(max(1e-3, 1.0 - alpha_value))
+            eps = max(self.epsilon / 100.0, self.epsilon * scale_factor)
         
         # Select optimal kernel operator
         kernel_op = self._select_optimal_kernel_operator(x, eps)

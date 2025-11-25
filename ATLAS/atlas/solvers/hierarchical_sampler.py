@@ -47,14 +47,14 @@ class AdvancedHierarchicalDiffusionSampler:
             set_seed(self.sampler_config.seed)
 
         self.logger = logging.getLogger(self.__class__.__name__)
-        level = logging.INFO if self.sampler_config.verbose_logging else logging.WARNING
-        self.logger.setLevel(level)
-        self.logger.propagate = False
         if not self.logger.handlers:
+            level = logging.INFO if self.sampler_config.verbose_logging else logging.WARNING
+            self.logger.setLevel(level)
             handler = logging.StreamHandler()
             handler.setLevel(level)
             handler.setFormatter(logging.Formatter("%(name)s - %(levelname)s - %(message)s"))
             self.logger.addHandler(handler)
+        self.logger.propagate = False
 
         self.sb_solver = SchroedingerBridgeSolver(
             score_model=self.score_model,
@@ -195,7 +195,6 @@ class AdvancedHierarchicalDiffusionSampler:
                     "CUDA graphs unavailable (%s); continuing without graph capture",
                     exc,
                 )
-                self.sampler_config.enable_cuda_graphs = False
 
         if config.tile_size is not None:
             from ..utils.tiling import TiledModelWrapper
@@ -252,11 +251,15 @@ class AdvancedHierarchicalDiffusionSampler:
             RuntimeError: If sampling fails (e.g., OOM, numerical issues)
         """
         # Validate inputs
+        if not isinstance(shape, (list, tuple)):
+            raise TypeError(f"shape must be a sequence of integers, got {type(shape)}")
         if len(shape) < 2:
             raise ValueError(
                 f"Shape must include batch and channel dimensions, got shape={shape}.\n"
                 f"Expected format: (batch_size, channels, height, width)"
             )
+        if not all(isinstance(s, int) and s > 0 for s in shape):
+            raise ValueError(f"All shape entries must be positive integers, got shape={shape}.")
 
         self._prepare_score_wrappers()
 
@@ -291,20 +294,36 @@ class AdvancedHierarchicalDiffusionSampler:
 
         # Check for potential OOM before starting
         if self.device.type == "cuda" and torch.cuda.is_available():
-            available_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
-            # Rough estimate: ~500 MB per sample for 1024x1024
-            estimated_memory = batch_size * 500
-            if estimated_memory > available_memory * 0.9:
+            try:
+                free_mem, total_mem = torch.cuda.mem_get_info(self.device.index or 0)
+                free_mb = free_mem / (1024 ** 2)
+                total_mb = total_mem / (1024 ** 2)
+            except Exception:
+                free_mb = total_mb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
+            if len(shape) >= 4:
+                pixels = shape[2] * shape[3]
+            else:
+                pixels = 1024 * 1024
+            base_mb_per_mp = 100  # heuristic MB per megapixel
+            estimated_memory = batch_size * (pixels / 1e6) * base_mb_per_mp
+            if estimated_memory > free_mb * 0.8:
                 self.logger.warning(
                     f"Potential OOM risk: batch_size={batch_size} may need ~{estimated_memory:.0f} MB, "
-                    f"but only {available_memory:.0f} MB available.\n"
-                    f"Consider reducing batch_size to {int(batch_size * 0.5)} or lower."
+                    f"but only {free_mb:.0f} MB free (total {total_mb:.0f} MB).\n"
+                    f"Consider reducing batch_size to {max(1, int(batch_size * free_mb / max(estimated_memory, 1)))} "
+                    f"or lowering resolution."
                 )
 
         # Initialize state
         if initial_state is None:
             x_t = torch.randn(tuple(shape), device=self.device)
         else:
+            if not isinstance(initial_state, torch.Tensor):
+                raise TypeError(f"initial_state must be a torch.Tensor, got {type(initial_state)}")
+            if not initial_state.is_floating_point():
+                raise TypeError(f"initial_state must be floating point, got {initial_state.dtype}")
+            if not torch.isfinite(initial_state).all():
+                raise ValueError("initial_state contains NaN or Inf.")
             if initial_state.shape != tuple(shape):
                 raise ValueError(
                     f"initial_state.shape={initial_state.shape} doesn't match "
@@ -312,7 +331,26 @@ class AdvancedHierarchicalDiffusionSampler:
                 )
             x_t = initial_state.to(self.device)
 
-        progress_flag = show_progress if verbose is None else bool(verbose)
+        if verbose is not None:
+            import warnings
+            warnings.warn(
+                "'verbose' is deprecated; use 'show_progress' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            show_progress = bool(verbose)
+        progress_flag = show_progress
+
+        if callback is not None:
+            import inspect
+            try:
+                sig = inspect.signature(callback)
+                if len(sig.parameters) != 3:
+                    raise TypeError(
+                        f"callback must accept 3 arguments (x_t, t_curr, t_next); got {len(sig.parameters)}."
+                    )
+            except (TypeError, ValueError) as exc:
+                raise TypeError(f"Invalid callback signature: {exc}") from exc
 
         # Prepare conditioning
         try:
@@ -337,6 +375,11 @@ class AdvancedHierarchicalDiffusionSampler:
 
         # Store intermediates if requested
         intermediates = [] if return_intermediates else None
+        if return_intermediates and len(schedule) > 50:
+            est_mem = len(schedule) * batch_size * 50  # rough heuristic MB
+            self.logger.warning(
+                f"Storing {len(schedule)} intermediates may consume significant CPU memory (~{est_mem} MB)."
+            )
 
         # Main sampling loop with error handling
         try:
