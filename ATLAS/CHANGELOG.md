@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- FFHQ 128x128 inference script (`atlas/examples/ffhq128_inference.py`)
+- ImageNet 64x64 inference script (`atlas/examples/imagenet64_inference.py`)
+- Examples README summarizing scripts and usage (`atlas/examples/README.md`)
 - Comprehensive documentation suite with 6 guides (QUICKSTART, DEPENDENCIES, GPU_CPU_BEHAVIOR, CUDA_GRAPHS_TILING, EXTENDING, docs index)
 - Hardware capability detection module (`atlas/utils/hardware.py`)
 - CLI hardware check tool (`python -m atlas.check_hardware`)
@@ -47,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - YYYY-MM-DD (Template)
 
 ### Added
+- FFHQ 128x128 inference script (`atlas/examples/ffhq128_inference.py`)
+- ImageNet 64x64 inference script (`atlas/examples/imagenet64_inference.py`)
+- Examples README summarizing scripts and usage (`atlas/examples/README.md`)
 - Initial release
 - Score-based diffusion models
 - Schrödinger bridge transport
@@ -79,6 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.2.0] - 2025-01-15
 
 ### Added
+- FFHQ 128x128 inference script (`atlas/examples/ffhq128_inference.py`)
+- ImageNet 64x64 inference script (`atlas/examples/imagenet64_inference.py`)
+- Examples README summarizing scripts and usage (`atlas/examples/README.md`)
 - Support for ControlNet conditioning (#123) @contributor
 - New `adaptive_timesteps` sampling mode (#145)
 
