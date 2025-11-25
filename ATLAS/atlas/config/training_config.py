@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional, Tuple
+import warnings
 
 
 @dataclass(frozen=True)
@@ -24,10 +25,29 @@ class DatasetConfig:
     fake_size: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("name cannot be empty.")
+        if not self.root:
+            raise ValueError("root path cannot be empty.")
+        if self.resolution <= 0:
+            raise ValueError(f"resolution must be positive, got {self.resolution}.")
+        if self.channels <= 0:
+            raise ValueError(f"channels must be positive, got {self.channels}.")
+        if self.batch_size is not None and self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive when set, got {self.batch_size}.")
+        if self.num_workers < 0:
+            raise ValueError(f"num_workers must be non-negative, got {self.num_workers}.")
+        if self.persistent_workers and self.num_workers == 0:
+            raise ValueError("persistent_workers=True requires num_workers > 0.")
+        if self.fake_size is not None and self.fake_size <= 0:
+            raise ValueError(f"fake_size must be positive when set, got {self.fake_size}.")
+
     def with_overrides(self, **kwargs: object) -> "DatasetConfig":
         """Return a copy with the provided attribute overrides."""
 
-        return replace(self, **kwargs)
+        new_dict = {**vars(self), **kwargs}
+        return DatasetConfig(**new_dict)
 
 
 @dataclass(frozen=True)
@@ -55,7 +75,8 @@ class TrainingConfig:
     def with_overrides(self, **kwargs: object) -> "TrainingConfig":
         """Return a copy with the provided attribute overrides."""
 
-        return replace(self, **kwargs)
+        new_dict = {**vars(self), **kwargs}
+        return TrainingConfig(**new_dict)
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:
@@ -77,6 +98,34 @@ class TrainingConfig:
             )
         if not (0 < self.betas[0] < 1 and 0 < self.betas[1] < 1):
             raise ValueError(f"betas must be in (0, 1), got {self.betas}.")
+        if self.learning_rate <= 0:
+            raise ValueError(f"learning_rate must be positive, got {self.learning_rate}.")
+        if self.weight_decay < 0:
+            raise ValueError(f"weight_decay must be non-negative, got {self.weight_decay}.")
+        if self.epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {self.epochs}.")
+        if self.max_steps is not None and self.max_steps <= 0:
+            raise ValueError(f"max_steps must be positive when set, got {self.max_steps}.")
+        if self.max_steps is not None and self.epochs > 1:
+            warnings.warn(
+                "Both epochs and max_steps are set; training will stop at whichever comes first.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.log_interval <= 0:
+            raise ValueError(f"log_interval must be positive, got {self.log_interval}.")
+        if self.checkpoint_interval <= 0:
+            raise ValueError(
+                f"checkpoint_interval must be positive, got {self.checkpoint_interval}."
+            )
+        if self.validation_interval is not None and self.validation_interval <= 0:
+            raise ValueError(
+                f"validation_interval must be positive when set, got {self.validation_interval}."
+            )
+        if self.gradient_clip_norm is not None and self.gradient_clip_norm <= 0:
+            raise ValueError(
+                f"gradient_clip_norm must be positive when set, got {self.gradient_clip_norm}."
+            )
 
 
 @dataclass(frozen=True)
@@ -95,7 +144,18 @@ class InferenceConfig:
     def with_overrides(self, **kwargs: object) -> "InferenceConfig":
         """Return a copy with the provided attribute overrides."""
 
-        return replace(self, **kwargs)
+        new_dict = {**vars(self), **kwargs}
+        return InferenceConfig(**new_dict)
+
+    def __post_init__(self) -> None:
+        if self.sampler_steps <= 0:
+            raise ValueError(f"sampler_steps must be positive, got {self.sampler_steps}.")
+        if self.guidance_scale < 0:
+            raise ValueError(f"guidance_scale must be non-negative, got {self.guidance_scale}.")
+        if self.batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {self.batch_size}.")
+        if self.num_samples <= 0:
+            raise ValueError(f"num_samples must be positive, got {self.num_samples}.")
 
 
 __all__ = [
