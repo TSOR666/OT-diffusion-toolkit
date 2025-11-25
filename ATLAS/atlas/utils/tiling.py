@@ -25,6 +25,8 @@ def _build_window(height: int, width: int, device: torch.device, dtype: torch.dt
         win_x = torch.hann_window(width, periodic=False, dtype=dtype, device=device)
         window = torch.outer(win_y, win_x)
 
+    window = window.clamp_min(1e-8)
+
     return window.view(1, 1, height, width)
 
 
@@ -102,8 +104,6 @@ class TiledModelWrapper(nn.Module):
                 out_acc[:, :, y_start:y_end, x_start:x_end] += scores_f32 * window
                 weight[:, :, y_start:y_end, x_start:x_end] += window
 
-        if (weight == 0).any():
-            raise RuntimeError("Some pixels received zero weight; check tiling configuration.")
         weight = weight.clamp_(min=1e-8)
         out = (out_acc / weight).to(dtype=x.dtype)
         return out
