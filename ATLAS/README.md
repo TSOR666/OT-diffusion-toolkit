@@ -17,6 +17,8 @@ and a flexible kernel registry.
 
 ## Quick Start
 
+Before sampling you must have a trained checkpoint. Train with one of the example pipelines or download a community-prepared checkpoint first.
+
 ```bash
 # 1. Install PyTorch with CUDA
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
@@ -27,9 +29,10 @@ pip install -e .[vision,clip]
 # 3. Check your hardware
 python -m atlas.check_hardware
 
-# 4. Generate images
+# 4. Generate images using a trained checkpoint
 python -c "
 from atlas.easy_api import create_sampler
+# Replace 'model.pt' with a checkpoint you trained/downloaded
 sampler = create_sampler(checkpoint='model.pt', gpu_memory='auto')
 images = sampler.generate(prompts=['a mountain landscape'], timesteps=50)
 "
