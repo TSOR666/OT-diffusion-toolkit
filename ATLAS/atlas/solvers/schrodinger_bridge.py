@@ -511,20 +511,21 @@ class SchroedingerBridgeSolver:
 
             # Compute g from f with improved numerical stability
             Kf = kernel_op.apply(x, f)
-        # Use clamping to prevent numerical instability
-        if (Kf < 1e-10).any() or (Kf > 1e8).any():
-            self.logger.warning(
-                "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
-                float(Kf.min()),
-                float(Kf.max()),
-            )
-        g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
+
+            # Use clamping to prevent numerical instability
+            if (Kf < 1e-10).any() or (Kf > 1e8).any():
+                self.logger.warning(
+                    "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
+                    float(Kf.min()),
+                    float(Kf.max()),
+                )
+            g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
         else:
             # Traditional iterative approach
             # Initialize potentials
             f = torch.ones(batch_size, device=self.device)
             g = torch.ones_like(f)
-            
+
             # Iterative updates
             for i in range(max_iter):
                 f_prev = f.clone()
