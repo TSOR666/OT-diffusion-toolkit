@@ -61,7 +61,7 @@ class FFTKernelOperator(KernelOperator):
         if self.multi_scale:
             self.kernel_ffts = [self._compute_kernel_fft(grid_shape, epsilon * factor) 
                                for factor in self.scale_factors]
-            weight_values = torch.ones(len(self.scale_factors), dtype=torch.float32, device=self.device)
+            weight_values = torch.tensor(self.scale_factors, dtype=torch.float32, device=self.device)
             self.weights = weight_values / weight_values.sum()
         else:
             self.kernel_fft = self._compute_kernel_fft(grid_shape, epsilon)
@@ -77,6 +77,11 @@ class FFTKernelOperator(KernelOperator):
         Returns:
             FFT of the kernel
         """
+        if epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
+        if not shape or any(dim <= 0 for dim in shape):
+            raise ValueError(f"shape must contain only positive dimensions, got {shape}")
+
         # Create coordinate grid
         coords = []
         for i, size in enumerate(shape):
@@ -89,12 +94,16 @@ class FFTKernelOperator(KernelOperator):
         
         # Compute kernel
         if self.kernel_type == 'gaussian':
-            sigma_sq = max(epsilon ** 2, 1e-12)
-            kernel = torch.exp(-dist_sq / (2 * sigma_sq))
+            sigma_sq = epsilon ** 2
+            exponent = torch.clamp(-dist_sq / (2 * sigma_sq), min=-50.0)
+            kernel = torch.exp(exponent)
         elif self.kernel_type == 'laplacian':
-            kernel = torch.exp(-torch.sqrt(dist_sq + 1e-10) / epsilon)
+            exponent = torch.clamp(-torch.sqrt(dist_sq + 1e-10) / epsilon, min=-50.0)
+            kernel = torch.exp(exponent)
         elif self.kernel_type == 'cauchy':
-            kernel = 1.0 / (1.0 + dist_sq / epsilon**2)
+            denom = 1.0 + dist_sq / (epsilon ** 2)
+            denom = torch.clamp(denom, min=1e-12)
+            kernel = 1.0 / denom
         else:
             raise ValueError(
                 f"Unsupported kernel type: {self.kernel_type}. "
@@ -110,7 +119,7 @@ class FFTKernelOperator(KernelOperator):
             )
         kernel = kernel / kernel_sum
 
-        kernel = torch.fft.ifftshift(kernel, dim=tuple(range(len(shape))))
+        kernel = torch.fft.fftshift(kernel, dim=tuple(range(len(shape))))
 
         # Compute FFT of kernel
         kernel_fft = torch.fft.rfftn(kernel)
@@ -128,6 +137,8 @@ class FFTKernelOperator(KernelOperator):
         Returns:
             Result of kernel convolution
         """
+        if list(u.shape) != self.grid_shape:
+            raise ValueError(f"Input grid shape {tuple(u.shape)} does not match configured grid_shape {tuple(self.grid_shape)}")
         # Compute FFT of u
         u_fft = torch.fft.rfftn(u)
         
@@ -243,6 +254,10 @@ class FFTKernelOperator(KernelOperator):
         # Clear precomputed FFT kernels to free GPU memory
         if self.multi_scale:
             self.kernel_ffts.clear()
+            if hasattr(self, "weights"):
+                del self.weights
+                self.weights = None
         else:
-            del self.kernel_fft
-            self.kernel_fft = None
+            if hasattr(self, "kernel_fft"):
+                del self.kernel_fft
+                self.kernel_fft = None
