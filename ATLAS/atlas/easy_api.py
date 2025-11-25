@@ -736,7 +736,6 @@ def create_sampler(
         attention_levels=(1, 2),
         time_emb_dim=768,
         conditional=profile.enable_clip,
-        use_clip_conditioning=profile.enable_clip,
         context_dim=conditioning_config.context_dim,
         num_res_blocks=2,
         conditioning=conditioning_config,

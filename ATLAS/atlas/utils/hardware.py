@@ -175,6 +175,42 @@ def _detect_cuda_capabilities() -> HardwareCapabilities:
     )
 
 
+def _detect_mps_capabilities() -> HardwareCapabilities:
+    """Detect Apple Metal (MPS) capabilities."""
+
+    device_name = "Apple MPS"
+    # PyTorch does not currently expose detailed memory info for MPS; best-effort defaults
+    total_memory_gb = 0.0
+    free_memory_gb = 0.0
+
+    # MPS prefers float16 kernels when available
+    bf16_supported = False
+    fp16_supported = True
+    recommended_precision = "fp16"
+    use_mixed_precision = True
+
+    max_batch_size = _estimate_max_batch_size(
+        free_memory_gb or 8.0, resolution=512, use_fp16=use_mixed_precision
+    )
+
+    return HardwareCapabilities(
+        device_type="mps",
+        device_name=device_name,
+        compute_capability=None,
+        total_memory_gb=total_memory_gb,
+        free_memory_gb=free_memory_gb,
+        bf16_supported=bf16_supported,
+        fp16_supported=fp16_supported,
+        tf32_available=False,
+        tf32_enabled=False,
+        cuda_graphs_supported=False,
+        cuda_version=None,
+        use_mixed_precision=use_mixed_precision,
+        recommended_precision=recommended_precision,
+        max_recommended_batch_size=max_batch_size,
+    )
+
+
 def _detect_cpu_capabilities() -> HardwareCapabilities:
     """Detect CPU capabilities."""
     import platform
@@ -197,6 +233,36 @@ def _detect_cpu_capabilities() -> HardwareCapabilities:
         recommended_precision="fp32",
         max_recommended_batch_size=1,
     )
+
+
+def _estimate_max_batch_size(
+    free_memory_gb: float, *, resolution: int, use_fp16: bool = False
+) -> int:
+    """
+    Rough heuristic for maximum safe batch size based on free memory.
+
+    Args:
+        free_memory_gb: Available GPU memory in GB.
+        resolution: Target image resolution (pixels per side).
+        use_fp16: Whether mixed/FP16 precision will be used.
+
+    Returns:
+        Estimated maximum batch size (at least 1).
+    """
+
+    # Empirical constants tuned for diffusion models around 512px
+    base_mem_per_sample = 1.2  # GB for fp32 at 512px
+    if use_fp16:
+        base_mem_per_sample *= 0.6  # fp16 typically halves memory
+
+    scaling = (resolution / 512) ** 2
+    mem_per_sample = base_mem_per_sample * scaling
+
+    if mem_per_sample <= 0:
+        return 1
+
+    max_batch = int(free_memory_gb // mem_per_sample)
+    return max(1, max_batch)
 
 
 def get_hardware_info() -> Dict[str, Any]:

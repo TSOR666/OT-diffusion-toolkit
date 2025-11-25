@@ -46,9 +46,8 @@ def lsun256_experiment() -> Dict[str, Any]:
         dropout=0.1,
         time_emb_dim=640,
         conditional=False,
-        use_clip_conditioning=False,
-        context_dim=0,
         cross_attention_levels=(),
+        conditioning=ConditioningConfig(use_clip=False, context_dim=0),
     )
 
     dataset_cfg = DatasetConfig(
@@ -123,9 +122,8 @@ def celeba1024_experiment() -> Dict[str, Any]:
         dropout=0.05,
         time_emb_dim=768,
         conditional=False,
-        use_clip_conditioning=False,
-        context_dim=0,
         cross_attention_levels=(),
+        conditioning=ConditioningConfig(use_clip=False, context_dim=0),
     )
 
     dataset_cfg = DatasetConfig(
@@ -203,9 +201,8 @@ def ffhq128_experiment() -> Dict[str, Any]:
         dropout=0.1,
         time_emb_dim=640,
         conditional=False,
-        use_clip_conditioning=False,
-        context_dim=0,
         cross_attention_levels=(),
+        conditioning=ConditioningConfig(use_clip=False, context_dim=0),
     )
 
     dataset_cfg = DatasetConfig(
@@ -280,9 +277,8 @@ def imagenet64_experiment() -> Dict[str, Any]:
         dropout=0.1,
         time_emb_dim=512,
         conditional=False,
-        use_clip_conditioning=False,
-        context_dim=0,
         cross_attention_levels=(),
+        conditioning=ConditioningConfig(use_clip=False, context_dim=0),
     )
 
     dataset_cfg = DatasetConfig(
@@ -373,9 +369,8 @@ def consumer_6gb_preset() -> Dict[str, Any]:
         dropout=0.1,
         time_emb_dim=512,  # Reduced from 768
         conditional=False,
-        use_clip_conditioning=False,
-        context_dim=0,
         cross_attention_levels=(),
+        conditioning=ConditioningConfig(use_clip=False, context_dim=0),
     )
 
     kernel_cfg = KernelConfig(
@@ -459,9 +454,8 @@ def consumer_8gb_preset() -> Dict[str, Any]:
         dropout=0.1,
         time_emb_dim=640,
         conditional=True,
-        use_clip_conditioning=True,
-        context_dim=768,
         cross_attention_levels=(1, 2),
+        conditioning=ConditioningConfig(use_clip=True, context_dim=768),
     )
 
     kernel_cfg = KernelConfig(
@@ -545,9 +539,8 @@ def consumer_12gb_preset() -> Dict[str, Any]:
         dropout=0.1,
         time_emb_dim=768,
         conditional=True,
-        use_clip_conditioning=True,
-        context_dim=768,
         cross_attention_levels=(1, 2),
+        conditioning=ConditioningConfig(use_clip=True, context_dim=768),
     )
 
     kernel_cfg = KernelConfig(
@@ -631,9 +624,8 @@ def prosumer_16gb_preset() -> Dict[str, Any]:
         dropout=0.05,
         time_emb_dim=768,
         conditional=True,
-        use_clip_conditioning=True,
-        context_dim=768,
         cross_attention_levels=(1, 2),
+        conditioning=ConditioningConfig(use_clip=True, context_dim=768),
     )
 
     kernel_cfg = KernelConfig(
@@ -717,9 +709,8 @@ def professional_24gb_preset() -> Dict[str, Any]:
         dropout=0.05,
         time_emb_dim=768,
         conditional=True,
-        use_clip_conditioning=True,
-        context_dim=768,
         cross_attention_levels=(1, 2),
+        conditioning=ConditioningConfig(use_clip=True, context_dim=768),
     )
 
     kernel_cfg = KernelConfig(
@@ -792,9 +783,8 @@ def flagship_32gb_preset() -> Dict[str, Any]:
         dropout=0.05,
         time_emb_dim=896,
         conditional=True,
-        use_clip_conditioning=True,
-        context_dim=768,
         cross_attention_levels=(1, 2, 3),
+        conditioning=ConditioningConfig(use_clip=True, context_dim=768),
     )
 
     kernel_cfg = KernelConfig(
@@ -819,8 +809,8 @@ def flagship_32gb_preset() -> Dict[str, Any]:
     )
 
     training_cfg = TrainingConfig(
-        batch_size=20,
-        micro_batch_size=10,
+        batch_size=12,
+        micro_batch_size=6,
         learning_rate=1.8e-4,
         betas=(0.9, 0.99),
         weight_decay=1e-4,
@@ -837,8 +827,8 @@ def flagship_32gb_preset() -> Dict[str, Any]:
     inference_cfg = InferenceConfig(
         sampler_steps=80,
         guidance_scale=7.5,
-        batch_size=20,
-        num_samples=80,
+        batch_size=12,
+        num_samples=48,
         seed=42,
         use_ema=True,
         output_dir="outputs/flagship_32gb",
@@ -851,8 +841,8 @@ def flagship_32gb_preset() -> Dict[str, Any]:
         "training": training_cfg,
         "inference": inference_cfg,
         "description": "Optimized for 32GB flagship GPUs (RTX 5090 / 5090 Ti)",
-        "resolution": 1536,
-        "max_batch_size": 20,
+        "resolution": 1024,
+        "max_batch_size": 12,
     }
 
 

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field, replace
 from typing import List, Optional
+import warnings
 
 
 @dataclass
@@ -57,6 +58,18 @@ class SamplerConfig:
             raise ValueError(f"error_tolerance must be positive, got {self.error_tolerance}")
         if self.guidance_scale < 0:
             raise ValueError(f"guidance_scale must be non-negative, got {self.guidance_scale}")
+        if self.guidance_scale < 1.0:
+            warnings.warn(
+                f"guidance_scale ({self.guidance_scale}) < 1.0 reduces guidance strength.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.guidance_scale > 20.0:
+            warnings.warn(
+                f"Very high guidance_scale ({self.guidance_scale}) may cause artifacts.",
+                UserWarning,
+                stacklevel=2,
+            )
         if self.interpolation_order < 0:
             raise ValueError(f"interpolation_order must be non-negative, got {self.interpolation_order}")
         if self.max_cached_batch_size <= 0:
@@ -67,19 +80,36 @@ class SamplerConfig:
             raise ValueError(f"dynamic_weighting must be 'uniform', 'adaptive', or 'exponential', got {self.dynamic_weighting}")
         if not all(0 <= t <= 1 for t in self.critical_thresholds):
             raise ValueError(f"All critical_thresholds must be in [0, 1], got {self.critical_thresholds}")
-        if self.critical_thresholds and self.critical_thresholds != sorted(self.critical_thresholds, reverse=True):
-            raise ValueError("critical_thresholds must be in descending order.")
+        if self.critical_thresholds:
+            if not all(
+                self.critical_thresholds[i] >= self.critical_thresholds[i + 1]
+                for i in range(len(self.critical_thresholds) - 1)
+            ):
+                raise ValueError("critical_thresholds must be in descending order.")
+            if len(self.critical_thresholds) != len(set(self.critical_thresholds)):
+                warnings.warn(
+                    "critical_thresholds contains duplicates; this is inefficient.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         if self.cuda_graph_warmup_iters < 0:
             raise ValueError("cuda_graph_warmup_iters must be non-negative")
         if self.tile_size is not None and self.tile_size <= 0:
             raise ValueError("tile_size must be positive when set")
         if self.tile_stride is not None and self.tile_stride <= 0:
             raise ValueError("tile_stride must be positive when set")
+        if self.tile_size is not None and self.tile_stride is not None:
+            if self.tile_stride > self.tile_size:
+                raise ValueError(
+                    f"tile_stride ({self.tile_stride}) cannot exceed tile_size ({self.tile_size})"
+                )
         if not (0.0 <= self.tile_overlap < 1.0):
             raise ValueError("tile_overlap must be in [0, 1)")
-        if self.tile_blending != "none" and self.tile_overlap <= 0:
-            raise ValueError(
-                "tile_overlap must be positive when tile_blending is enabled."
+        if self.tile_blending != "none" and self.tile_overlap == 0:
+            warnings.warn(
+                "tile_blending is enabled but tile_overlap=0; blending will have no effect.",
+                UserWarning,
+                stacklevel=2,
             )
         if self.tile_blending not in {"hann", "linear", "none"}:
             raise ValueError("tile_blending must be 'hann', 'linear', or 'none'")
@@ -87,7 +117,32 @@ class SamplerConfig:
             raise ValueError("cg_relative_tolerance must be positive")
         if self.cg_absolute_tolerance < 0:
             raise ValueError("cg_absolute_tolerance must be non-negative")
+        if self.cg_relative_tolerance > 0.1 and self.cg_absolute_tolerance > 1.0:
+            warnings.warn(
+                "Both CG tolerances are quite loose; solution quality may suffer.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.auto_tuning and not self.memory_efficient:
+            warnings.warn(
+                "auto_tuning is enabled while memory_efficient=False; this may increase memory usage.",
+                ResourceWarning,
+                stacklevel=2,
+            )
+        if self.enable_cuda_graphs:
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    warnings.warn(
+                        "enable_cuda_graphs=True but CUDA is not available; graphs will be disabled at runtime.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            except Exception:
+                pass
 
     def with_overrides(self, **kwargs):
         """Return a copy with specific fields overridden."""
-        return replace(self, **kwargs)
+        new_cfg = replace(self, **kwargs)
+        new_cfg.validate()
+        return new_cfg
