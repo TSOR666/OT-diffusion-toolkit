@@ -144,10 +144,6 @@ class HighResModelConfig:
     def total_downsampling(self) -> int:
         return 2 ** self.depth
 
-    @property
-    def context_dim(self) -> int:
-        return self.conditioning.context_dim
-
     def __repr__(self) -> str:
         return (
             f"HighResModelConfig(depth={self.depth}, base_ch={self.base_channels}, "

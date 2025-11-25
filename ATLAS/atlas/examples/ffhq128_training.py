@@ -75,7 +75,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         except Exception as exc:
             errors.append(f"Cannot create checkpoint directory: {exc}")
 
-    if args.device and not re.match(r"^(cpu|cuda(:\\d+)?)$", args.device):
+    if args.device and not re.match(r"^(cpu|cuda(:\d+)?)$", args.device):
         errors.append(f"Invalid device format: {args.device}. Expected 'cpu', 'cuda', or 'cuda:N'.")
 
     if args.max_steps is not None and args.max_steps <= 0:
