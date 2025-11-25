@@ -28,24 +28,24 @@ def _build_transform(config: DatasetConfig) -> transforms.Compose:
         ) from _TORCHVISION_ERROR
     ops = [
         transforms.Resize(
-            config.resolution, interpolation=transforms.InterpolationMode.BICUBIC
+            (config.resolution, config.resolution),
+            interpolation=transforms.InterpolationMode.BICUBIC,
         )
     ]
-    if config.center_crop:
-        ops.append(transforms.CenterCrop(config.resolution))
-    else:
+    if not config.center_crop:
         ops.append(transforms.RandomCrop(config.resolution))
+    else:
+        ops.append(transforms.CenterCrop(config.resolution))
     if config.random_flip:
         ops.append(transforms.RandomHorizontalFlip())
     ops.append(transforms.ToTensor())
 
-    if config.channels in (1, 3):
-        ops.append(
-            transforms.Normalize(
-                mean=[0.5] * config.channels,
-                std=[0.5] * config.channels,
-            )
+    ops.append(
+        transforms.Normalize(
+            mean=[0.5] * config.channels,
+            std=[0.5] * config.channels,
         )
+    )
     return transforms.Compose(ops)
 
 
@@ -56,7 +56,8 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
     transform = _build_transform(config)
     name = config.name.lower()
     root = Path(config.root)
-    root.mkdir(parents=True, exist_ok=True)
+    if name not in {"fake", "synthetic"}:
+        root.mkdir(parents=True, exist_ok=True)
 
     if name in {"lsun", "lsun256"}:
         if datasets is None:
@@ -89,6 +90,16 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
             ) from _TORCHVISION_ERROR
         split_dir = config.extra.get("split", "")
         data_root = root / split_dir if split_dir else root
+        if not data_root.exists():
+            raise FileNotFoundError(
+                f"Dataset directory not found: {data_root}. "
+                f"Ensure data is present at this path or adjust DatasetConfig.root."
+            )
+        if not any(data_root.iterdir()):
+            raise ValueError(
+                f"Dataset directory is empty: {data_root}. "
+                f"ImageFolder expects class subdirectories with images."
+            )
         return datasets.ImageFolder(
             root=str(data_root),
             transform=transform,
@@ -100,9 +111,18 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
             raise ImportError(
                 "torchvision is required for FakeData. Install torchvision or swap in a custom dataset."
             ) from _TORCHVISION_ERROR
-        size = config.fake_size or max(config.batch_size or 1, 1)
+        size = config.fake_size or max((config.batch_size or 32) * 100, 1)
         image_size = (config.channels, config.resolution, config.resolution)
-        return datasets.FakeData(size=size, image_size=image_size, transform=transform)
+        fake_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.5] * config.channels,
+                    std=[0.5] * config.channels,
+                ),
+            ]
+        )
+        return datasets.FakeData(size=size, image_size=image_size, transform=fake_transform)
 
     raise ValueError(
         f"Unsupported dataset '{config.name}'. "
@@ -116,11 +136,16 @@ def create_dataloader(
     batch_size: Optional[int] = None,
     shuffle: bool = True,
     split: Optional[str] = None,
+    drop_last: Optional[bool] = None,
 ) -> DataLoader:
     """Build a PyTorch DataLoader respecting the dataset configuration."""
 
     dataset = build_dataset(config, split=split)
     eff_batch = batch_size or config.batch_size or 1
+    if eff_batch <= 0:
+        raise ValueError(f"batch_size must be positive, got {eff_batch}")
+    if drop_last is None:
+        drop_last = split in (None, "train")
     return DataLoader(
         dataset,
         batch_size=eff_batch,
@@ -128,7 +153,7 @@ def create_dataloader(
         num_workers=config.num_workers,
         pin_memory=config.pin_memory,
         persistent_workers=config.persistent_workers and config.num_workers > 0,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
 

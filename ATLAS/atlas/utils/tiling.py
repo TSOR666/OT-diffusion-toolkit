@@ -1,8 +1,9 @@
-"""Spatial tiling helpers for high-resolution sampling."""
+﻿"""Spatial tiling helpers for high-resolution sampling."""
 
 from __future__ import annotations
 
 from typing import Dict, Tuple, Optional
+from collections import OrderedDict
 import warnings
 
 import torch
@@ -24,7 +25,6 @@ def _build_window(height: int, width: int, device: torch.device, dtype: torch.dt
         win_x = torch.hann_window(width, periodic=False, dtype=dtype, device=device)
         window = torch.outer(win_y, win_x)
 
-    window = window / window.max().clamp_(min=1e-6)
     return window.view(1, 1, height, width)
 
 
@@ -39,8 +39,13 @@ class TiledModelWrapper(nn.Module):
         stride: int | None = None,
         overlap: float = 0.125,
         blending: str = "hann",
+        max_cache_size: int = 32,
     ) -> None:
         super().__init__()
+        if tile_size <= 0:
+            raise ValueError(f"tile_size must be positive, got {tile_size}")
+        if blending not in {"none", "linear", "hann"}:
+            raise ValueError("blending must be one of {'none', 'linear', 'hann'}")
         self.model = model
         self.tile_size = tile_size
         self.explicit_stride = stride
@@ -54,7 +59,8 @@ class TiledModelWrapper(nn.Module):
                 stacklevel=2,
             )
         self.blending = blending
-        self._window_cache: Dict[Tuple[int, int, str, Optional[int], torch.dtype], torch.Tensor] = {}
+        self.max_cache_size = max_cache_size
+        self._window_cache: "OrderedDict[Tuple, torch.Tensor]" = OrderedDict()
         self.predicts_score = getattr(model, "predicts_score", True)
         self.predicts_noise = getattr(model, "predicts_noise", False)
 
@@ -69,6 +75,14 @@ class TiledModelWrapper(nn.Module):
         tile_h = min(self.tile_size, h)
         tile_w = min(self.tile_size, w)
         stride = self.explicit_stride or int(max(1, self.tile_size * (1.0 - self.overlap)))
+
+        n_tiles = len(range(0, h, stride)) * len(range(0, w, stride))
+        if n_tiles > 100:
+            warnings.warn(
+                f"Processing {n_tiles} tiles for {h}x{w} input; consider larger tiles or stride.",
+                ResourceWarning,
+                stacklevel=2,
+            )
 
         out_acc = torch.zeros((b, c, h, w), device=x.device, dtype=torch.float32)
         weight = torch.zeros((1, 1, h, w), device=x.device, dtype=torch.float32)
@@ -88,7 +102,9 @@ class TiledModelWrapper(nn.Module):
                 out_acc[:, :, y_start:y_end, x_start:x_end] += scores_f32 * window
                 weight[:, :, y_start:y_end, x_start:x_end] += window
 
-        weight = weight.clamp_(min=1e-6)
+        if (weight == 0).any():
+            raise RuntimeError("Some pixels received zero weight; check tiling configuration.")
+        weight = weight.clamp_(min=1e-8)
         out = (out_acc / weight).to(dtype=x.dtype)
         return out
 
@@ -99,9 +115,14 @@ class TiledModelWrapper(nn.Module):
             device.type,
             device.index if device.type == "cuda" else None,
             dtype,
+            self.blending,
         )
         window = self._window_cache.get(key)
         if window is None:
             window = _build_window(height, width, device, dtype, self.blending)
             self._window_cache[key] = window
+            while len(self._window_cache) > self.max_cache_size:
+                self._window_cache.popitem(last=False)
+        else:
+            self._window_cache.move_to_end(key)
         return window
