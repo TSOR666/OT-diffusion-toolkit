@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI hardware check tool (`python -m atlas.check_hardware`)
 - Automatic resource awareness and optimization
 - CUDA graph support with LRU cache management
+- Examples README summarizing training/inference scripts and usage (`atlas/examples/README.md`)
 - Native 2K generation support with tiling
 - Configuration validation via `__post_init__`
 - Configurable latent downsampling factor
