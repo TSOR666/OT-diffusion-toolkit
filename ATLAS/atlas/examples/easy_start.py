@@ -23,11 +23,22 @@ from typing import Optional
 
 import torch
 
-try:
-    from PIL import Image
-except ImportError as exc:  # pragma: no cover - user environment guard
-    print("Error: Pillow is required. Install with `pip install Pillow`.")
-    raise SystemExit(1) from exc
+# Defer Pillow import until needed
+PIL_Image = None
+
+
+def _ensure_pil():
+    """Lazily import Pillow to allow --help without dependency."""
+    global PIL_Image
+    if PIL_Image is None:
+        try:
+            from PIL import Image as PIL_Image_import  # type: ignore
+        except ImportError as exc:  # pragma: no cover - user environment guard
+            print("Error: Pillow is required. Install with `pip install Pillow`.")
+            raise SystemExit(1) from exc
+        PIL_Image = PIL_Image_import
+    return PIL_Image
+
 
 # Add parent directory to path (append to avoid shadowing stdlib)
 parent_dir = Path(__file__).parent.parent
@@ -46,14 +57,19 @@ def save_images(samples: torch.Tensor, output_dir: Path, prefix: str = "sample")
 
     Args:
         samples: Tensor of shape (N, C, H, W) in range [-1, 1]
-        output_dir: Directory to save images
-        prefix: Filename prefix
+    output_dir: Directory to save images
+    prefix: Filename prefix
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    Image = _ensure_pil()
 
     for i, sample in enumerate(samples):
         if torch.any(torch.isnan(sample)) or torch.any(torch.isinf(sample)):
             raise ValueError(f"Sample {i} contains NaN or Inf values.")
+
+        sample_min, sample_max = sample.min().item(), sample.max().item()
+        if sample_min < -1 or sample_max > 1:
+            print(f"  Warning: Sample {i} out of range [{sample_min:.3f}, {sample_max:.3f}]; clipping to [-1, 1].")
 
         img = sample.clamp(-1, 1)
         img = ((img + 1.0) * 127.5).permute(1, 2, 0).detach().cpu().numpy()

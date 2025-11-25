@@ -39,8 +39,10 @@ def _expand_alpha(alpha: torch.Tensor) -> torch.Tensor:
 def _prepare_images(batch: torch.Tensor | Iterable[torch.Tensor]) -> torch.Tensor:
     if isinstance(batch, torch.Tensor):
         images = batch
-    else:
+    elif isinstance(batch, (list, tuple)):
         images = batch[0]
+    else:
+        raise TypeError(f"Unsupported batch type {type(batch)}; expected Tensor or (Tensor, ...).")
     images = images.float()
     max_val = images.max().item()
     min_val = images.min().item()
@@ -299,10 +301,10 @@ def run_inference(
     score_model = HighResLatentScoreModel(model_cfg).to(actual_device)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    required_keys = {"model", "ema"}
-    missing = required_keys - checkpoint.keys()
-    if missing:
-        raise ValueError(f"Checkpoint '{checkpoint_path}' is missing keys: {missing}")
+    if "model" not in checkpoint:
+        raise ValueError(f"Checkpoint '{checkpoint_path}' is missing required key 'model'.")
+    if "ema" not in checkpoint:
+        logger.warning("EMA weights missing in checkpoint; using raw model weights.")
     _apply_model_state(score_model, checkpoint, use_ema=infer_cfg.use_ema)
     score_model.eval()
 
@@ -348,7 +350,12 @@ def run_inference(
         batch_index += 1
 
     index_path = out_dir / "manifest.json"
-    index_path.write_text(json.dumps({"images": [p.name for p in saved_paths]}, indent=2))
+    index = {
+        "preset": preset_name,
+        "checkpoint": Path(checkpoint_path).name,
+        "images": [p.name for p in saved_paths],
+    }
+    index_path.write_text(json.dumps(index, indent=2))
     return index_path
 
 
