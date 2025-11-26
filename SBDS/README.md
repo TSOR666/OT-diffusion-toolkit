@@ -1,6 +1,8 @@
-# SBDS — Score-Based Schrödinger Bridge Diffusion (Research Toolkit)
+# SBDS - Score-Based Schrödinger Bridge Solver
 
-SBDS is a research toolkit focused on Schrödinger bridges and kernel approximations. It augments probability-flow integration with bridge transport and provides multiple computational tiers (full kernels, random Fourier features, Nystrom sketches, FFT transport) and adaptive noise schedules. Use it to explore algorithms and ablations around SB transport and kernel design.
+SBDS is a solver focused on Schrödinger bridges and kernel approximations. It augments probability-flow integration with bridge transport and provides multiple computational tiers (full kernels, random Fourier features, Nystrom sketches, FFT transport) and adaptive noise schedules. Use it to explore algorithms and ablations around SB transport and kernel design.
+
+SBDS is not a full-stack diffusion framework; it consumes pretrained score networks and surfaces solver-level transport tiers, schedules, and diagnostics for research explorations.
 
 ---
 
@@ -36,11 +38,7 @@ problem between model samples and reference samples at each timestep. SBDS suppo
 - **FFT transport** for grid-structured data (images/volumes).
 
 ### Hilbert Sinkhorn Divergence
-To compare distributions, SBDS offers the Hilbert Sinkhorn divergence:
-```
-- Category: full-stack DIFFUSION RESEARCH TOOLKIT — ships solver, schedules,
-- Focus: Schrödinger bridges and kernel approximations (RFF, Nystrom, FFT).
-with optional RFF-based cost approximations for high ambient dimensions.
+To compare distributions, SBDS offers the Hilbert Sinkhorn divergence with optional RFF-based cost approximations for high ambient dimensions.
 
 ### Adaptive Noise Schedule
 `EnhancedAdaptiveNoiseSchedule` provides:
@@ -52,8 +50,8 @@ with optional RFF-based cost approximations for high ambient dimensions.
 
 ## What It Is
 
-- Category: full-stack DIFFUSION RESEARCH TOOLKIT — ships solver, schedules,
-  transport tiers, and diagnostics suitable for standalone experimentation.
+- Category: Schrödinger bridge solver (requires a pretrained score network) — ships solver, schedules,
+  transport tiers, and diagnostics tailored for research experimentation.
 - Focus: Schrödinger bridges and kernel approximations (RFF, Nystrom, FFT).
 
 ## Training and Preparation
