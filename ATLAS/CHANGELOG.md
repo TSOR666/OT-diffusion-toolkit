@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No changes yet._
 
+## [1.0.0-rc1] - 2025-11-25
+
+### Changed
+- Promoted ATLAS to release candidate `1.0.0-rc1` with the current toolkit baseline for broader adoption.
+- Synced packaging metadata and helper scripts to reflect the new semantic version.
+
 ## [0.1.1] - 2025-11-25
 
 ### Added

@@ -86,4 +86,7 @@ If you've subclassed `FastSBOTSolver` and overridden `ddpm_step_improved()` or `
 - `alpha_bar_t` → `alpha_bar_curr`
 - `alpha_bar_next` → `alpha_bar_prev` (when it refers to the less noisy timestep)
 
+## [1.0.0-rc1] - 2025-11-21
 
+### Added
+- Declared the current test and documentation baseline as release candidate `1.0.0-rc1` to match the packaging metadata.

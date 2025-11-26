@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastsb-ot"
-version = "0.1.0"
+version = "1.0.0-rc1"
 description = "FastSB-OT - Fast Schrodinger bridge solver with entropy-regularised optimal transport"
 readme = "README.md"
 license = {text = "Apache-2.0"}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atlas-diffusion-toolkit"
-version = "0.1.1"
+version = "1.0.0-rc1"
 description = "High-resolution diffusion research toolkit built around score-based models and Schrodinger bridge solvers."
 readme = "README.md"
 license = {text = "Apache-2.0"}

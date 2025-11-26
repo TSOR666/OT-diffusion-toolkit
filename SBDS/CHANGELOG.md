@@ -139,3 +139,8 @@ No performance impact - fixes are purely correctness improvements.
 - ✅ 30 pytest tests: Full coverage
 
 The codebase is now **production-ready** with verified mathematical correctness.
+
+## [1.0.0-rc1] - 2025-11-21
+
+### Added
+- Marked the current mathematical fixes and test suite as release candidate `1.0.0-rc1` to match the new package versioning.

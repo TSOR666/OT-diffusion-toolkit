@@ -4,7 +4,7 @@
 
 ### Fixed
 - Corrected several blockers and minor errors across the codebase 
-- Updated versioning to 0.1.1
+- Updated versioning to 1.0.0-rc1
 - Added missing inference scripts for ffhq128 and imagenet64
 
 
