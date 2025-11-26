@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .kernel import KernelDerivativeRFF
 
@@ -92,10 +93,6 @@ class EnhancedAdaptiveNoiseSchedule:
         if self.rff is not None:
             return
 
-        if self.seed is not None:
-            torch.manual_seed(self.seed)
-            np.random.seed(self.seed)
-
         self.rff = KernelDerivativeRFF(
             input_dim=dim,
             feature_dim=self.rff_features,
@@ -111,6 +108,29 @@ class EnhancedAdaptiveNoiseSchedule:
         y_mean = y_features.mean(dim=0)
         return torch.sum((x_mean - y_mean) ** 2)
 
+    def _downsample_flatten(self, tensor: torch.Tensor, max_spatial: int = 16) -> torch.Tensor:
+        """
+        Downsample spatial dimensions before flattening for RFF stability and efficiency.
+        Supports 4D (N, C, H, W) and 5D (N, C, D, H, W) tensors; falls back to
+        adaptive 1D pooling for generic higher-rank inputs.
+        """
+        if tensor.dim() == 4:
+            _, _, h, w = tensor.shape
+            target = (min(max_spatial, h), min(max_spatial, w))
+            pooled = F.adaptive_avg_pool2d(tensor, target)
+            return pooled.flatten(1)
+        if tensor.dim() == 5:
+            _, _, d, h, w = tensor.shape
+            target = (min(max_spatial, d), min(max_spatial, h), min(max_spatial, w))
+            pooled = F.adaptive_avg_pool3d(tensor, target)
+            return pooled.flatten(1)
+        if tensor.dim() > 2:
+            flat = tensor.flatten(1)
+            target = min(max_spatial**2, flat.size(1))
+            pooled = F.adaptive_avg_pool1d(flat.unsqueeze(1), target).squeeze(1)
+            return pooled
+        return tensor.reshape(tensor.size(0), -1)
+
     def get_adaptive_timesteps(
         self,
         n_steps: int,
@@ -123,10 +143,7 @@ class EnhancedAdaptiveNoiseSchedule:
     ) -> List[float]:
         use_mmd = self.use_mmd if use_mmd is None else use_mmd
 
-        if rng_seed is not None:
-            np.random.seed(rng_seed)
-        elif self.seed is not None:
-            np.random.seed(self.seed)
+        rng = np.random.default_rng(self.seed if rng_seed is None else rng_seed)
 
         batch_size = min(8, shape[0])
         test_shape = (batch_size,) + shape[1:]
@@ -140,7 +157,9 @@ class EnhancedAdaptiveNoiseSchedule:
         t_grid = torch.linspace(0.05, 0.95, grid_size)
 
         if use_mmd:
-            self._initialize_rff(int(np.prod(shape[1:])))
+            dummy = torch.zeros(test_shape, device=device, dtype=model_dtype)
+            flat_dim = self._downsample_flatten(dummy).shape[1]
+            self._initialize_rff(flat_dim)
 
         data_features = []
         score_norms: List[float] = []
@@ -160,7 +179,7 @@ class EnhancedAdaptiveNoiseSchedule:
                 score_norms.append(float(torch.norm(score.reshape(batch_size, -1), dim=1).mean()))
 
                 if use_mmd and self.rff is not None:
-                    noisy_flat = noisy.reshape(batch_size, -1)
+                    noisy_flat = self._downsample_flatten(noisy)
                     data_features.append(self.rff.compute_features(noisy_flat))
 
         if use_mmd and len(data_features) > 1 and self.rff is not None:
@@ -170,8 +189,7 @@ class EnhancedAdaptiveNoiseSchedule:
                 if snr_weighting:
                     t_val = t_grid[idx].item()
                     alpha_val = self(t_val)
-                    snr = alpha_val / (1 - alpha_val)
-                    weight = snr / (1 + snr)
+                    weight = alpha_val * (1 - alpha_val)  # emphasize mid SNR region
                     mmd_sq = mmd_sq * weight
                 importance.append(float(mmd_sq))
         else:
@@ -180,7 +198,7 @@ class EnhancedAdaptiveNoiseSchedule:
         importance_arr = np.array(importance) + 1e-5
         importance_arr = importance_arr / importance_arr.sum()
 
-        segment_indices = np.random.choice(
+        segment_indices = rng.choice(
             len(importance_arr), size=n_steps - 1, p=importance_arr, replace=True
         )
         counts = np.bincount(segment_indices, minlength=len(importance_arr))
