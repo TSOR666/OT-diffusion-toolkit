@@ -35,7 +35,7 @@ def spectral_gradient(
     if u.dim() < 1:
         raise ValueError("Input tensor must have at least one dimension")
 
-    spatial_dims = list(range(-min(2, u.dim()), 0)) if u.dim() >= 2 else [-1]
+    spatial_dims = [-1] if u.dim() <= 2 else list(range(-2, 0))
     spatial_shape = [u.size(d) for d in spatial_dims]
     ndim = len(spatial_dims)
 
