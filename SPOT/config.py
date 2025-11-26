@@ -1,6 +1,7 @@
 """Configuration objects for the SPOT solver."""
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 from .constants import DEFAULT_DPM_ORDER, DEFAULT_SINKHORN_ITERATIONS
@@ -12,8 +13,8 @@ __all__ = ["SolverConfig"]
 class SolverConfig:
     """Configuration with sensible defaults."""
 
-    eps: float = 0.1
-    adaptive_eps: bool = True
+    eps: float = 0.1  # Base entropic regularization; used as the floor/start for adaptive scaling
+    adaptive_eps: bool = True  # If True, scale eps dynamically; uses eps as the baseline
     adaptive_eps_scale: str = "sigma"  # 'sigma' | 'data' | 'none'
     sinkhorn_iterations: int = 20  # Increased from default 10 for better convergence
     dpm_solver_order: int = 3  # Increased from default 2 for higher accuracy
@@ -23,10 +24,10 @@ class SolverConfig:
     richardson_extrapolation: bool = True
     richardson_threshold: float = 0.05  # Lowered from 0.1 for more careful extrapolation
     richardson_max_overhead: float = 0.5
-    max_tensor_size_elements: int = 250_000_000
-    max_dense_matrix_elements: int = 50_000_000
+    max_tensor_size_elements: int = 50_000_000  # ~200MB per tensor (conservative for 12GB GPUs)
+    max_dense_matrix_elements: int = 50_000_000  # ~200MB cost matrix (forces blockwise for N×M > 50M)
     use_patch_based_ot: bool = True
-    patch_size: int = 32  # Reduced from 64 to ensure multiple patches for common image sizes (64x64, 128x128)
+    patch_size: int = 32  # Reduced from 64; monitor for tiling artifacts and consider 64 for more global context
     highres_patch_size: int = 64  # Reduced from 96 for better patch coverage on high-res images
     ultrares_patch_size: int = 96  # Reduced from 128 for ultra-high-res images
     auto_tune_highres: bool = True
@@ -48,7 +49,7 @@ class SolverConfig:
 
     # Advanced integrator options
     integrator: str = "dpm_solver++"  # 'dpm_solver++' | 'heun' | 'ddim' | 'adaptive' | 'exponential'
-    heun_enabled: bool = False  # Use Heun's method instead of DPM-Solver++
+    heun_enabled: bool = False  # Deprecated; use integrator='heun' instead
     ddim_eta: float = 0.0  # DDIM eta parameter (0=deterministic, 1=DDPM-like)
     adaptive_atol: float = 1e-5  # Absolute tolerance for adaptive integrator
     adaptive_rtol: float = 1e-3  # Relative tolerance for adaptive integrator
@@ -67,6 +68,14 @@ class SolverConfig:
     compile_mode: str = "reduce-overhead"
     compile_fullgraph: bool = False
     compile_warmup: bool = True
+
+    def __post_init__(self) -> None:
+        if self.heun_enabled:
+            warnings.warn(
+                "heun_enabled is deprecated; set integrator='heun' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def validate(self) -> None:
         if self.eps <= 0:
@@ -108,6 +117,11 @@ class SolverConfig:
         valid_integrators = ["dpm_solver++", "heun", "ddim", "adaptive", "exponential"]
         if self.integrator not in valid_integrators:
             raise ValueError(f"integrator must be one of {valid_integrators}")
+        if self.heun_enabled and self.integrator != "heun":
+            raise ValueError(
+                f"Conflicting config: heun_enabled=True but integrator='{self.integrator}'. "
+                "Set integrator='heun' instead."
+            )
 
         valid_correctors = ["langevin", "tweedie", "adaptive"]
         if self.corrector_type not in valid_correctors:
@@ -124,11 +138,3 @@ class SolverConfig:
 
         if not 0 <= self.tweedie_mixing <= 1:
             raise ValueError("tweedie_mixing must be in [0, 1]")
-
-    @property
-    def dmp_solver_order(self) -> int:
-        return self.__dict__["dpm_solver_order"]
-
-    @dmp_solver_order.setter
-    def dmp_solver_order(self, value: int) -> None:
-        self.__dict__["dpm_solver_order"] = value
