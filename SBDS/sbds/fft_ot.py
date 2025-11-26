@@ -66,15 +66,37 @@ class FFTOptimalTransport:
         return "nearest", None
 
     def _resize_density(self, tensor: torch.Tensor, shape: List[int]) -> torch.Tensor:
-        mode, align_corners = self._select_interpolation_mode(len(shape))
+        """
+        Resize a density tensor without mixing batch/leading dimensions.
+        Leading dimensions (e.g., batch or channels) are flattened into a single
+        batch axis, resized independently, and then restored.
+        """
+        spatial_dims = len(shape)
+        if spatial_dims <= 0:
+            raise ValueError(f"Expected at least one spatial dimension, got {shape}")
+
+        mode, align_corners = self._select_interpolation_mode(spatial_dims)
         interpolate_kwargs = {"mode": mode}
         if align_corners is not None:
             interpolate_kwargs["align_corners"] = align_corners
 
+        leading = tensor.dim() - spatial_dims
+        if leading < 0:
+            raise ValueError(
+                f"Tensor with shape {tuple(tensor.shape)} has fewer dims than target shape {shape}"
+            )
+
+        original_shape = list(tensor.shape[-spatial_dims:])
+
+        # Collapse leading dims to treat each sample independently
+        collapsed = tensor.reshape(-1, *original_shape)
         resized = F.interpolate(
-            tensor.unsqueeze(0).unsqueeze(0), size=shape, **interpolate_kwargs
-        )
-        return resized.squeeze(0).squeeze(0)
+            collapsed.unsqueeze(1), size=shape, **interpolate_kwargs
+        ).squeeze(1)
+
+        # Restore original leading dimensions
+        restored_shape = (*tensor.shape[:leading], *shape)
+        return resized.reshape(restored_shape)
 
     def _is_grid_structured(self, x: torch.Tensor) -> Tuple[bool, Optional[List[int]]]:
         if x.dim() > 2:
@@ -106,16 +128,72 @@ class FFTOptimalTransport:
 
         return x.transpose(0, 1).reshape(channels, *grid_shape)
 
-    def _apply_kernel_fft(self, u: torch.Tensor, kernel_fft: torch.Tensor) -> torch.Tensor:
-        u_fft = torch.fft.rfftn(u)
-        result_fft = u_fft * kernel_fft
-        return torch.fft.irfftn(result_fft, s=u.shape)
+    def _apply_kernel_fft(
+        self,
+        u: torch.Tensor,
+        kernel_fft: torch.Tensor,
+        spatial_shape: List[int],
+        padded_shape: List[int],
+    ) -> torch.Tensor:
+        """
+        Apply convolution via FFT over the specified spatial dimensions.
+        Explicitly limits FFT to spatial axes to avoid mixing batch dimensions.
+        """
+        if len(spatial_shape) != len(padded_shape):
+            raise ValueError(
+                f"Spatial shape {spatial_shape} and padded shape {padded_shape} must match rank"
+            )
 
-    def _compute_kernel_fft(self, shape: List[int], epsilon: float) -> torch.Tensor:
+        spatial_dims = list(range(u.dim() - len(spatial_shape), u.dim()))
+        current_shape = [u.size(dim) for dim in spatial_dims]
+        pad_widths: List[int] = []
+        for size, pad_size in zip(reversed(current_shape), reversed(padded_shape)):
+            if pad_size < size:
+                raise ValueError(
+                    f"Padded size {pad_size} must be >= input size {size} for linear convolution"
+                )
+            pad_widths.extend([0, pad_size - size])
+
+        # Zero-pad to enforce linear (non-circular) convolution
+        padded = F.pad(u, pad=pad_widths)
+
+        u_fft = torch.fft.rfftn(padded, s=padded_shape, dim=spatial_dims)
+        result_fft = u_fft * kernel_fft
+        convolved = torch.fft.irfftn(result_fft, s=padded_shape, dim=spatial_dims)
+
+        # Crop back to the original spatial support
+        slices = [slice(None)] * convolved.dim()
+        for dim, size in zip(spatial_dims, spatial_shape):
+            slices[dim] = slice(0, size)
+        return convolved[tuple(slices)]
+
+    def _compute_kernel_fft(
+        self,
+        shape: List[int],
+        epsilon: float,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> Tuple[torch.Tensor, List[int]]:
+        """
+        Compute the FFT of the Gaussian/Laplacian kernel on a normalized grid.
+        Coordinates are scaled by the maximum spatial extent to avoid numerical
+        underflow on large grids (e.g., 256x256 images).
+        """
+        device = device or self.device
+        spatial_rank = len(shape)
+        if spatial_rank == 0:
+            raise ValueError("Shape must contain at least one spatial dimension")
+
+        max_size = float(max(shape))
+        padded_shape = [2 * s for s in shape]
+
         coords = []
-        for idx, size in enumerate(shape):
-            coord = torch.arange(size, device=self.device) - size // 2
-            coord = coord.reshape([1 if j != idx else size for j in range(len(shape))])
+        for idx, size in enumerate(padded_shape):
+            coord = (
+                torch.arange(size, device=device, dtype=dtype)
+                - (size - 1) / 2.0
+            ) / max_size
+            coord = coord.reshape([1 if j != idx else size for j in range(spatial_rank)])
             coords.append(coord)
         dist_sq = sum(coord ** 2 for coord in coords)
 
@@ -130,7 +208,7 @@ class FFTOptimalTransport:
             )
 
         kernel = torch.fft.ifftshift(kernel)
-        return torch.fft.rfftn(kernel)
+        return torch.fft.rfftn(kernel), padded_shape
 
     def _sinkhorn_fft(
         self,
@@ -138,36 +216,46 @@ class FFTOptimalTransport:
         nu: torch.Tensor,
         epsilon: float,
         kernel_fft: Optional[torch.Tensor] = None,
+        padded_shape: Optional[List[int]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu = mu / mu.sum()
         nu = nu / nu.sum()
 
         if kernel_fft is None:
-            kernel_fft = self._compute_kernel_fft(list(mu.shape), epsilon)
+            kernel_fft, padded_shape = self._compute_kernel_fft(
+                list(mu.shape), epsilon, dtype=mu.dtype, device=mu.device
+            )
+        elif padded_shape is None:
+            raise ValueError("padded_shape must be provided when kernel_fft is supplied explicitly")
 
         u = torch.zeros_like(mu)
         v = torch.zeros_like(nu)
 
         for _ in range(self.max_iter):
             u_prev = u.clone()
-            Ku = self._apply_kernel_fft(torch.exp(u), kernel_fft)
+            Ku = self._apply_kernel_fft(torch.exp(u), kernel_fft, list(mu.shape), padded_shape)
             v = torch.log(nu + 1e-15) - torch.log(Ku + 1e-15)
-            Kv = self._apply_kernel_fft(torch.exp(v), kernel_fft)
+            Kv = self._apply_kernel_fft(torch.exp(v), kernel_fft, list(nu.shape), padded_shape)
             u = torch.log(mu + 1e-15) - torch.log(Kv + 1e-15)
             if torch.max(torch.abs(u - u_prev)) < self.tol:
                 break
 
         a_vec = torch.exp(u)
         b_vec = torch.exp(v)
-        Kv = self._apply_kernel_fft(b_vec, kernel_fft)
+        Kv = self._apply_kernel_fft(b_vec, kernel_fft, list(nu.shape), padded_shape)
         objective = (u * mu).sum() + (v * nu).sum() - epsilon * (a_vec * Kv).sum()
         return objective, u, v
 
     def _multiscale_sinkhorn_fft(
-        self, mu: torch.Tensor, nu: torch.Tensor, epsilon: float
+        self,
+        mu: torch.Tensor,
+        nu: torch.Tensor,
+        epsilon: float,
+        kernel_fft: Optional[torch.Tensor] = None,
+        padded_shape: Optional[List[int]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.multiscale:
-            return self._sinkhorn_fft(mu, nu, epsilon)
+            return self._sinkhorn_fft(mu, nu, epsilon, kernel_fft, padded_shape)
 
         shape = mu.shape
         current_shape = [max(4, size // (2 ** self.scale_levels)) for size in shape]
@@ -188,11 +276,20 @@ class FFTOptimalTransport:
             mu_current = self._resize_density(mu, current_shape)
             nu_current = self._resize_density(nu, current_shape)
 
-            kernel_fft = self._compute_kernel_fft(current_shape, epsilon)
-            _, u_current, v_current = self._sinkhorn_fft(mu_current, nu_current, epsilon, kernel_fft)
+            k_fft_level, padded_shape_level = self._compute_kernel_fft(
+                current_shape, epsilon, dtype=mu.dtype, device=mu.device
+            )
+            _, u_current, v_current = self._sinkhorn_fft(
+                mu_current, nu_current, epsilon, k_fft_level, padded_shape_level
+            )
             u_coarse, v_coarse = u_current, v_current
 
-        objective, u_final, v_final = self._sinkhorn_fft(mu, nu, epsilon)
+        if kernel_fft is None or padded_shape is None:
+            kernel_fft, padded_shape = self._compute_kernel_fft(
+                list(mu.shape), epsilon, dtype=mu.dtype, device=mu.device
+            )
+
+        objective, u_final, v_final = self._sinkhorn_fft(mu, nu, epsilon, kernel_fft, padded_shape)
         return objective, u_final, v_final
 
     def _compute_gradient_on_grid(
@@ -228,6 +325,33 @@ class FFTOptimalTransport:
             gradients.append(grad_d)
         return gradients
 
+    def _prepare_grid_density(
+        self,
+        tensor: torch.Tensor,
+        grid_shape: List[int],
+        weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Reshape a (possibly batched) tensor into (batch, *grid_shape) and apply weights."""
+        spatial_size = int(np.prod(grid_shape))
+        if tensor.numel() % spatial_size != 0:
+            raise ValueError(
+                f"Tensor with shape {tuple(tensor.shape)} cannot be reshaped into grid {grid_shape}"
+            )
+
+        batch_size = tensor.numel() // spatial_size
+        densities = tensor.reshape(batch_size, *grid_shape)
+
+        if weights is not None:
+            if weights.numel() != batch_size:
+                raise ValueError(
+                    f"Weights of length {weights.numel()} do not match batch size {batch_size}"
+                )
+            weights = weights.to(densities.device, densities.dtype)
+            expand_shape = (batch_size, *[1] * len(grid_shape))
+            densities = densities * weights.view(*expand_shape)
+
+        return densities
+
     def optimal_transport(
         self,
         x: torch.Tensor,
@@ -240,28 +364,39 @@ class FFTOptimalTransport:
 
         if is_grid_x and is_grid_y and grid_shape_x == grid_shape_y:
             grid_shape = grid_shape_x
-            if x.dim() > 2:
-                mu = x.sum(0) if x.dim() > len(grid_shape) else x
-            else:
-                values = (
-                    weights_x
-                    if weights_x is not None
-                    else torch.ones(x.size(0), device=x.device)
-                )
-                mu = self._reshape_to_grid(values.unsqueeze(1), grid_shape).squeeze(0)
 
-            if y.dim() > 2:
-                nu = y.sum(0) if y.dim() > len(grid_shape) else y
-            else:
-                values = (
-                    weights_y
-                    if weights_y is not None
-                    else torch.ones(y.size(0), device=y.device)
-                )
-                nu = self._reshape_to_grid(values.unsqueeze(1), grid_shape).squeeze(0)
+            mu_batch = self._prepare_grid_density(x, grid_shape, weights_x)
+            nu_batch = self._prepare_grid_density(y, grid_shape, weights_y)
 
-            objective, u_pot, v_pot = self._multiscale_sinkhorn_fft(mu, nu, self.epsilon)
-            return objective, u_pot, v_pot
+            if mu_batch.shape[0] != nu_batch.shape[0]:
+                raise ValueError(
+                    f"Batch sizes do not match for grid OT: {mu_batch.shape[0]} vs {nu_batch.shape[0]}"
+                )
+
+            kernel_fft, padded_shape = self._compute_kernel_fft(
+                grid_shape, self.epsilon, dtype=mu_batch.dtype, device=mu_batch.device
+            )
+
+            objectives = []
+            u_pots = []
+            v_pots = []
+            for mu, nu in zip(mu_batch, nu_batch):
+                objective, u_pot, v_pot = self._multiscale_sinkhorn_fft(
+                    mu, nu, self.epsilon, kernel_fft, padded_shape
+                )
+                objectives.append(objective)
+                u_pots.append(u_pot)
+                v_pots.append(v_pot)
+
+            objective_tensor = torch.stack(objectives)
+            u_tensor = torch.stack(u_pots)
+            v_tensor = torch.stack(v_pots)
+
+            # Return mean cost to stay compatible with scalar expectations, but keep potentials batched
+            objective_mean = objective_tensor.mean()
+            if objective_mean.numel() == 1 and u_tensor.shape[0] == 1:
+                return objective_mean.squeeze(), u_tensor.squeeze(0), v_tensor.squeeze(0)
+            return objective_mean, u_tensor, v_tensor
 
         warnings.warn(
             "Data is not grid-structured; using chunked Sinkhorn fallback",
@@ -391,7 +526,7 @@ class FFTOptimalTransport:
                 if update_rows:
                     accum = torch.logaddexp(accum, torch.logsumexp(log_kernel, dim=1))
                 else:
-                    accum = torch.logaddexp(accum, torch.logsumexp(log_kernel, dim=0))
+                    accum = torch.logaddexp(accum, torch.logsumexp(log_kernel, dim=1))
 
             updated[i_start:i_end] = log_marginal_chunk - accum
 
