@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 
-class KernelDerivativeRFF:
+class KernelDerivativeRFF(nn.Module):
     """Random Fourier Feature approximation supporting kernel derivatives."""
 
     def __init__(
@@ -24,6 +25,7 @@ class KernelDerivativeRFF:
         orthogonal: bool = True,
         derivative_order: int = 1,
     ) -> None:
+        super().__init__()
         # Input validation
         if input_dim <= 0:
             raise ValueError(f"input_dim must be positive, got {input_dim}")
@@ -55,7 +57,6 @@ class KernelDerivativeRFF:
         self.feature_dim = feature_dim
         self.sigma = sigma
         self.kernel_type = kernel_type
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.rademacher = rademacher
         self.orthogonal = orthogonal
         self.derivative_order = derivative_order
@@ -64,13 +65,21 @@ class KernelDerivativeRFF:
             torch.manual_seed(seed)
             np.random.seed(seed)
 
-        self._initialize_random_features()
+        init_device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        weights, offset = self._initialize_random_features(init_device)
+        self.register_buffer("weights", weights)
+        self.register_buffer("offset", offset)
         self.error_bound_factor = math.sqrt(
             math.log(max(input_dim * 100, 2)) / feature_dim
         )
 
-    def _initialize_random_features(self) -> None:
-        # Gaussian kernel: spectral measure is also Gaussian, scale by 1/
+    @property
+    def device(self) -> torch.device:
+        """Expose the current device (follows buffers when .to()/.cuda() are used)."""
+        return self.weights.device
+
+    def _initialize_random_features(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Sample random Fourier features and phase offsets."""
         scale = 1.0 / self.sigma
 
         if self.orthogonal:
@@ -78,39 +87,47 @@ class KernelDerivativeRFF:
             remainder = self.feature_dim % self.input_dim
             blocks = []
             for _ in range(num_blocks):
-                block = torch.randn(self.input_dim, self.input_dim, device=self.device)
+                block = torch.randn(self.input_dim, self.input_dim, device=device)
                 q, _ = torch.linalg.qr(block)
                 blocks.append(q)
             if remainder > 0:
-                block = torch.randn(self.input_dim, remainder, device=self.device)
+                block = torch.randn(self.input_dim, remainder, device=device)
                 q, _ = torch.linalg.qr(block, mode="reduced")
                 blocks.append(q)
             weights = torch.cat(blocks, dim=1) * scale
         else:
             if self.rademacher:
                 weights = torch.randint(
-                    0, 2, (self.input_dim, self.feature_dim), device=self.device
+                    0, 2, (self.input_dim, self.feature_dim), device=device
                 )
                 weights = (weights.float() * 2 - 1) * scale
             else:
-                weights = torch.randn(self.input_dim, self.feature_dim, device=self.device) * scale
+                weights = torch.randn(self.input_dim, self.feature_dim, device=device) * scale
 
-        offset = torch.rand(self.feature_dim, device=self.device) * 2 * math.pi
-        self.weights = weights
-        self.offset = offset
+        offset = torch.rand(self.feature_dim, device=device) * 2 * math.pi
+        return weights, offset
 
-    def compute_features(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.to(self.device)
+    def _flatten_input(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() > 2:
             x = x.reshape(x.size(0), -1)
+        return x.to(device=self.device, dtype=self.weights.dtype)
 
-        if x.size(1) != self.input_dim:
+    def _feature_projections(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x_flat = self._flatten_input(x)
+        projection = x_flat @ self.weights + self.offset
+        return x_flat, projection
+
+    def compute_features(self, x: torch.Tensor) -> torch.Tensor:
+        x_flat = self._flatten_input(x)
+
+        if x_flat.size(1) != self.input_dim:
             raise ValueError(
-                f"Input dimension {x.size(1)} does not match expected {self.input_dim}"
+                f"Input dimension {x_flat.size(1)} does not match expected {self.input_dim}"
             )
 
-        projection = x @ self.weights + self.offset
-        return torch.cos(projection) * math.sqrt(2.0 / self.feature_dim)
+        projection = x_flat @ self.weights + self.offset
+        feature_scale = math.sqrt(2.0 / self.feature_dim)
+        return torch.cos(projection) * feature_scale
 
     def compute_kernel(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
         if x.dim() > 2:
@@ -133,95 +150,85 @@ class KernelDerivativeRFF:
         coordinate: Optional[int | tuple[int, int]] = None,
     ) -> torch.Tensor:
         """
-        Compute kernel derivatives using Gaussian kernel derivative formulas.
+        Compute kernel derivatives using RFF feature-space gradients.
 
-        For a Gaussian kernel k(x,y) = exp(-||x-y||²/(2σ²)):
-        - Order 1: ∂k(x,y)/∂x_i = k(x,y) * (y_i - x_i) / σ²
-        - Order 2: ∂²k(x,y)/∂x_i∂x_j = k(x,y) * (y_i - x_i)(y_j - x_j) / σ⁴ - δ_ij * k(x,y) / σ²
-
-        Args:
-            x: Input tensor of shape (n, d) or higher dimensional
-            y: Optional second input of shape (m, d). If None, uses y = x.
-            order: Derivative order (1 or 2)
-            coordinate: Optional specific coordinate(s) to compute derivative for
-
-        Returns:
-            Derivative tensor with shape depending on order and coordinate specification
+        For φ(x) = sqrt(2/D) * cos(Wx + b):
+        - First derivative: (∂φ(x)/∂x)^T φ(y)
+        - Second derivative: Hessian of φ(x) contracted with φ(y)
         """
+        if order < 1 or order > 2:
+            raise NotImplementedError(f"Derivatives of order {order} not implemented")
         if order > self.derivative_order:
             raise ValueError(
                 f"Requested derivative order {order} > supported order {self.derivative_order}"
             )
 
-        # Reshape x if needed
-        if x.dim() > 2:
-            x = x.reshape(x.size(0), -1)
+        x_flat, x_proj = self._feature_projections(x)
+        if x_flat.size(1) != self.input_dim:
+            raise ValueError(
+                f"Input dimension {x_flat.size(1)} does not match expected {self.input_dim}"
+            )
 
-        # Handle y: assign x if None, otherwise reshape if needed
+        feature_scale = math.sqrt(2.0 / self.feature_dim)
+        x_cos = torch.cos(x_proj)
+        x_sin = torch.sin(x_proj)
+
         if y is None:
-            y = x
-        elif y.dim() > 2:
-            y = y.reshape(y.size(0), -1)
+            y_features = x_cos * feature_scale
+        else:
+            _, y_proj = self._feature_projections(y)
+            y_features = torch.cos(y_proj) * feature_scale
+
+        weights_t = self.weights.t()  # (D, d)
 
         if order == 1:
-            kernel = self.compute_kernel(x, y)
-            if coordinate is not None:
-                diff = y[:, coordinate].unsqueeze(0) - x[:, coordinate].unsqueeze(1)
-                return kernel * diff / (self.sigma**2)
+            grad_phi_x = -feature_scale * x_sin.unsqueeze(-1) * weights_t.unsqueeze(0)
+            derivatives = torch.einsum("bjd,kj->dbk", grad_phi_x, y_features)
 
-            derivatives = []
-            for idx in range(self.input_dim):
-                diff_i = y[:, idx].unsqueeze(0) - x[:, idx].unsqueeze(1)
-                derivatives.append(kernel * diff_i / (self.sigma**2))
-            return torch.stack(derivatives, dim=0)
-
-        if order == 2:
-            kernel = self.compute_kernel(x, y)
             if coordinate is not None:
                 if isinstance(coordinate, tuple):
-                    i_idx, j_idx = coordinate
-                else:
-                    i_idx = j_idx = coordinate
-                diff_i = y[:, i_idx].unsqueeze(0) - x[:, i_idx].unsqueeze(1)
-                diff_j = y[:, j_idx].unsqueeze(0) - x[:, j_idx].unsqueeze(1)
-                hessian = kernel * (diff_i * diff_j / (self.sigma**4))
-                if i_idx == j_idx:
-                    hessian = hessian - kernel / (self.sigma**2)
-                return hessian
+                    raise ValueError("coordinate for first-order derivative must be an int index")
+                return derivatives[coordinate]
 
-            hessian = torch.zeros(
-                self.input_dim,
-                self.input_dim,
-                x.size(0),
-                y.size(0),
-                device=self.device,
-            )
-            for i_idx in range(self.input_dim):
-                for j_idx in range(self.input_dim):
-                    diff_i = y[:, i_idx].unsqueeze(0) - x[:, i_idx].unsqueeze(1)
-                    diff_j = y[:, j_idx].unsqueeze(0) - x[:, j_idx].unsqueeze(1)
-                    hessian[i_idx, j_idx] = kernel * (diff_i * diff_j / (self.sigma**4))
-                    if i_idx == j_idx:
-                        hessian[i_idx, j_idx] = hessian[i_idx, j_idx] - kernel / (self.sigma**2)
-            return hessian
+            return derivatives
 
-        raise NotImplementedError(f"Derivatives of order {order} not implemented")
+        weight_outer = weights_t.unsqueeze(-1) * weights_t.unsqueeze(-2)  # (D, d, d)
+        hess_phi_x = -feature_scale * x_cos.unsqueeze(-1).unsqueeze(-1) * weight_outer.unsqueeze(0)
+        hessian = torch.einsum("bjdq,kj->dqbk", hess_phi_x, y_features)
+
+        if coordinate is not None:
+            if isinstance(coordinate, tuple):
+                i_idx, j_idx = coordinate
+            else:
+                i_idx = j_idx = coordinate
+            return hessian[i_idx, j_idx]
+
+        return hessian
 
     def compute_score_approximation(
         self, x: torch.Tensor, y: torch.Tensor, weights_y: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        kernel = self.compute_kernel(x, y)
-        derivatives = self.compute_kernel_derivative(x, y, order=1)
+        feature_scale = math.sqrt(2.0 / self.feature_dim)
+
+        x_flat, x_proj = self._feature_projections(x)
+        _, y_proj = self._feature_projections(y)
+
+        x_cos = torch.cos(x_proj)
+        x_sin = torch.sin(x_proj)
+        y_features = torch.cos(y_proj) * feature_scale
 
         if weights_y is not None:
-            kernel = kernel * weights_y.unsqueeze(0)
-            derivatives = derivatives * weights_y.unsqueeze(0).unsqueeze(0)
+            y_features = y_features * weights_y.view(-1, 1).to(y_features.dtype)
 
-        kernel_sum = kernel.sum(dim=1, keepdim=True) + 1e-10
-        score = torch.zeros(x.size(0), self.input_dim, device=self.device)
-        for idx in range(self.input_dim):
-            score[:, idx] = derivatives[idx].sum(dim=1) / kernel_sum.squeeze(1)
-        return score
+        phi_y_sum = y_features.sum(dim=0)
+        phi_x = x_cos * feature_scale
+
+        kernel_sum = torch.einsum("bd,d->b", phi_x, phi_y_sum).unsqueeze(-1) + 1e-10
+
+        grad_phi_x = -feature_scale * x_sin.unsqueeze(-1) * self.weights.t().unsqueeze(0)
+        numerator = torch.einsum("bjd,j->bd", grad_phi_x, phi_y_sum)
+
+        return numerator / kernel_sum
 
     def estimate_error_bound(self, n_samples: int) -> Dict[str, float]:
         """
