@@ -743,7 +743,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
             alpha_t_dt_clamped = max(alpha_t_dt, MIN_ALPHA_VARIANCE)
             beta_t = max(0.0, -(math.log(alpha_t_clamped) - math.log(alpha_t_dt_clamped)) / dt_safe)
         # Clamp beta to a reasonable range to avoid numerical blow-ups near endpoints
-        beta_t = float(min(beta_t, BETA_CLAMP_MAX))
+        # Always enforce non-negativity even when the noise schedule supplies get_beta.
+        beta_t = float(np.clip(beta_t, 0.0, BETA_CLAMP_MAX))
 
         # Probability flow ODE drift: dx/dt = -0.5 * beta(t) * [x + s_theta(x,t)]
         # Equivalently: dx/dt = -0.5 * beta(t) * x - 0.5 * beta(t) * score
