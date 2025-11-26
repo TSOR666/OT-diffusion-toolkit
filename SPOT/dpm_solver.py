@@ -58,17 +58,22 @@ class DPMSolverPP:
         if isinstance(model_outputs, deque):
             model_outputs = list(model_outputs)
 
+        if len(model_outputs) == 0:
+            raise ValueError("model_outputs must contain at least one tensor")
+        if current_idx < 0 or current_idx + 1 >= len(timesteps):
+            raise IndexError(
+                f"current_idx={current_idx} is out of bounds for timesteps of length {len(timesteps)}"
+            )
+
         schedule = self._ensure_schedule()
 
-        try:
-            if len(model_outputs) == 1 or current_idx == 0:
-                return self._first_order_update(x, model_outputs[-1], timesteps, current_idx, schedule)
-            if len(model_outputs) == 2 or self.order < 3:
-                return self._second_order_update(x, model_outputs[-2:], timesteps, current_idx, schedule)
-            return self._third_order_update(x, model_outputs[-3:], timesteps, current_idx, schedule)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.debug("DPM-Solver++ failed: %s, falling back to first order", exc)
+        if current_idx < 1 or len(model_outputs) < 2 or self.order < 2:
             return self._first_order_update(x, model_outputs[-1], timesteps, current_idx, schedule)
+
+        if current_idx < 2 or len(model_outputs) < 3 or self.order < 3:
+            return self._second_order_update(x, model_outputs[-2:], timesteps, current_idx, schedule)
+
+        return self._third_order_update(x, model_outputs[-3:], timesteps, current_idx, schedule)
 
     def _first_order_update(
         self,
@@ -115,18 +120,19 @@ class DPMSolverPP:
         lambda_curr = schedule.lambda_(t_curr_tensor)
         lambda_next = schedule.lambda_(t_next_tensor)
 
-        h = lambda_next - lambda_curr
-        h_prev = lambda_curr - lambda_prev
+        h = (lambda_next - lambda_curr).to(torch.float32)
+        h_prev = (lambda_curr - lambda_prev).to(torch.float32)
+        h_scalar = float(h.item())
 
         # Guard against numerical instability in timestep ratios
-        if abs(h) < EPSILON_CLAMP:
+        if abs(h_scalar) < EPSILON_CLAMP:
             logger.debug(
-                f"DPM-Solver timestep too small (|h|={abs(h):.2e} < {EPSILON_CLAMP:.2e}), "
+                f"DPM-Solver timestep too small (|h|={abs(h_scalar):.2e} < {EPSILON_CLAMP:.2e}), "
                 f"falling back to first-order update"
             )
             return self._first_order_update(x, model_outputs[-1], timesteps, idx, schedule)
 
-        r = h_prev / h
+        r = float(h_prev.item()) / h_scalar
         if not torch.isfinite(torch.tensor(r)):
             logger.debug(f"DPM-Solver produced non-finite ratio r={r}, falling back to first-order")
             return self._first_order_update(x, model_outputs[-1], timesteps, idx, schedule)
@@ -173,20 +179,21 @@ class DPMSolverPP:
         lambda_curr = schedule.lambda_(t_curr_tensor)
         lambda_next = schedule.lambda_(t_next_tensor)
 
-        h = lambda_next - lambda_curr
-        h_prev = lambda_curr - lambda_prev
-        h_prev2 = lambda_prev - lambda_prev2
+        h = (lambda_next - lambda_curr).to(torch.float32)
+        h_prev = (lambda_curr - lambda_prev).to(torch.float32)
+        h_prev2 = (lambda_prev - lambda_prev2).to(torch.float32)
+        h_scalar = float(h.item())
 
         # Guard against numerical instability in timestep ratios
-        if abs(h) < EPSILON_CLAMP:
+        if abs(h_scalar) < EPSILON_CLAMP:
             logger.debug(
-                f"DPM-Solver timestep too small (|h|={abs(h):.2e}), "
+                f"DPM-Solver timestep too small (|h|={abs(h_scalar):.2e}), "
                 f"falling back to second-order update"
             )
             return self._second_order_update(x, model_outputs[-2:], timesteps, idx, schedule)
 
-        r1 = h_prev / h
-        r2 = h_prev2 / h
+        r1 = float(h_prev.item()) / h_scalar
+        r2 = float(h_prev2.item()) / h_scalar
 
         if not (torch.isfinite(torch.tensor(r1)) and torch.isfinite(torch.tensor(r2))):
             logger.debug(f"DPM-Solver produced non-finite ratios, falling back to second-order")
@@ -195,21 +202,25 @@ class DPMSolverPP:
         alpha_curr, sigma_curr = schedule.alpha_sigma(t_curr_tensor)
         alpha_next, _ = schedule.alpha_sigma(t_next_tensor)
 
-        denom1 = r1 * (r1 + r2)
-        denom2 = r2 * (r1 + r2)
-
-        if abs(denom1) < EPSILON_CLAMP or abs(denom2) < EPSILON_CLAMP:
-            logger.debug(f"DPM-Solver denominators too small, falling back to second-order")
+        if abs(r1) < EPSILON_CLAMP or abs(r2) < EPSILON_CLAMP or abs(r1 + r2) < EPSILON_CLAMP:
+            logger.debug(f"DPM-Solver timestep ratios too small, falling back to second-order")
             return self._second_order_update(x, model_outputs[-2:], timesteps, idx, schedule)
 
-        D1 = (1 + 1 / denom1) * model_outputs[-1] - (1 / denom1) * model_outputs[-2]
-        D2 = (
-            (1 + 1 / denom2) * model_outputs[-1]
-            - (1 + 1 / denom2 + 1 / denom1) * model_outputs[-2]
-            + (1 / denom1) * model_outputs[-3]
+        # Third-order multistep coefficients (DPM-Solver++ 3M) using variable step ratios r1, r2
+        D1 = (model_outputs[-1] - model_outputs[-2]) / r1
+        D2 = ((model_outputs[-1] - model_outputs[-2]) / r1 - (model_outputs[-2] - model_outputs[-3]) / r2) / (
+            r1 + r2
         )
 
         alpha_ratio = (alpha_next / alpha_curr).to(dtp)
-        sigma_term = (sigma_curr * torch.expm1(h)).to(dtp)
+        phi_1 = torch.expm1(h)
+        phi_2 = (phi_1 - h) / h_scalar
+        phi_3 = (phi_1 - h - 0.5 * h * h) / (h_scalar * h_scalar)
+        phi_1 = phi_1.to(dtp)
+        phi_2 = phi_2.to(dtp)
+        phi_3 = phi_3.to(dtp)
 
-        return alpha_ratio * x - sigma_term * (1.5 * D1 - 0.5 * D2)
+        update_term = phi_1 * model_outputs[-1] + phi_2 * D1 + phi_3 * D2
+        sigma_curr = sigma_curr.to(dtp)
+
+        return alpha_ratio * x - sigma_curr * update_term

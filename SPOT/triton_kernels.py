@@ -128,12 +128,22 @@ if TRITON_AVAILABLE:
         BLOCK_COLS: tl.constexpr,
         BLOCK_DIM: tl.constexpr,
     ):
-        """Fused cost computation and softmax kernel."""
+        """Fused cost computation and softmax kernel.
+
+        IMPORTANT: This kernel only works correctly when ALL columns fit in a single tile
+        (n_cols <= BLOCK_COLS). The softmax normalization is computed over the entire row,
+        which requires all columns to be present in memory simultaneously.
+
+        If n_cols > BLOCK_COLS, the caller MUST fall back to a multi-pass algorithm or
+        PyTorch native implementation. Calling this kernel with multiple column tiles
+        will produce INCORRECT results due to improper normalization.
+        """
         row_pid = tl.program_id(axis=0)
-        col_pid = tl.program_id(axis=1)
+        # Note: No col_pid - this kernel only supports a single column tile
+        # The caller ensures n_cols <= BLOCK_COLS via fallback logic
 
         row_start = row_pid * BLOCK_ROWS
-        col_start = col_pid * BLOCK_COLS
+        col_start = 0  # Always process all columns starting from 0
 
         row_offsets = row_start + tl.arange(0, BLOCK_ROWS)
         col_offsets = col_start + tl.arange(0, BLOCK_COLS)
@@ -173,7 +183,8 @@ if TRITON_AVAILABLE:
         cost_tile = x_sq_vals[:, None] + y_sq_vals[None, :] - 2.0 * acc
         S = -cost_tile / eps
 
-        # Numerically stable softmax across columns
+        # Numerically stable softmax across ALL columns (n_cols <= BLOCK_COLS guaranteed)
+        # This computes global softmax because all columns are present in this single tile
         S_max = tl.max(S, axis=1, keep_dims=True)
         S_shifted = S - S_max
         exp_S = tl.exp(S_shifted)
@@ -244,8 +255,8 @@ def triton_sinkhorn_update(
     dim = x.shape[1]
 
     # Adaptive block sizes based on problem size
-    BLOCK_ROWS = min(128, max(32, tile_size))
-    BLOCK_COLS = min(128, max(32, tile_size))
+    BLOCK_ROWS = min(64, max(32, tile_size))
+    BLOCK_COLS = min(64, max(32, tile_size))
     BLOCK_DIM = 64 if dim >= 64 else 32
 
     grid = (triton.cdiv(n_rows, BLOCK_ROWS),)
@@ -280,11 +291,15 @@ def fused_cost_softmax(
 ) -> torch.Tensor:
     """Compute cost matrix and softmax in a single fused kernel.
 
+    IMPORTANT: This function uses a Triton kernel that requires ALL columns to fit
+    in a single tile for correct softmax normalization. If n_cols > BLOCK_COLS,
+    it automatically falls back to PyTorch native implementation.
+
     Args:
         x: Source points [N, D]
         y: Target points [M, D]
         eps: Entropic regularization parameter
-        tile_size: Tile size for blocking
+        tile_size: Tile size for blocking (max 64 for stability)
 
     Returns:
         Softmax weights [N, M]
@@ -312,14 +327,28 @@ def fused_cost_softmax(
 
     out = torch.empty((n_rows, n_cols), device=x.device, dtype=torch.float32)
 
+    # Cap block sizes at 64 for numerical stability and compatibility
     BLOCK_ROWS = min(64, max(16, tile_size))
-    BLOCK_COLS = min(64, max(16, tile_size))
+    BLOCK_COLS = min(64, max(16, tile_size), n_cols)
     BLOCK_DIM = 64 if dim >= 64 else 32
 
-    grid = (
-        triton.cdiv(n_rows, BLOCK_ROWS),
-        triton.cdiv(n_cols, BLOCK_COLS),
+    # CRITICAL: The Triton softmax kernel requires all columns of a row to be present
+    # in a single tile for correct normalization. If n_cols > BLOCK_COLS, we MUST
+    # fall back to PyTorch to avoid incorrect softmax computation across tiles.
+    if n_cols > BLOCK_COLS:
+        # Fallback to numerically stable PyTorch implementation
+        cost = (x_sq[:, None] + y_sq[None, :] - 2.0 * (x @ y.T)) / eps
+        return torch.softmax(-cost, dim=1)
+
+    # Assertion: Verify we can process all columns in one tile
+    # This should always pass due to the fallback above, but serves as a safety check
+    assert n_cols <= BLOCK_COLS, (
+        f"Internal error: n_cols={n_cols} > BLOCK_COLS={BLOCK_COLS}. "
+        f"This should have triggered PyTorch fallback."
     )
+
+    # Use 1D grid - only tile over rows, process all columns in a single tile
+    grid = (triton.cdiv(n_rows, BLOCK_ROWS),)
 
     eps_value = torch.tensor(float(eps), device=x.device, dtype=torch.float32)
 

@@ -20,6 +20,14 @@ class NoiseScheduleProtocol(Protocol):
     def lambda_(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
         ...
 
+    def beta(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
+        """Compute beta(t) = -d/dt lambda(t) analytically.
+
+        This is the noise rate schedule used in SDE/ODE formulations.
+        Should be implemented analytically for numerical stability.
+        """
+        ...
+
 
 class CosineSchedule:
     """Reference cosine schedule with unified semantics."""
@@ -48,6 +56,45 @@ class CosineSchedule:
         if __debug__:
             assert out.dtype == torch.float32, f"(t) must be fp32, got {out.dtype}"
         return out
+
+    def beta(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
+        """Analytical beta(t) = -d/dt lambda(t) for cosine schedule.
+
+        Derivation:
+            f(t) = cos²(π/2 * (t+s)/(1+s))
+            λ(t) = log(f/(1-f))
+            dλ/dt = (df/dt) / (f(1-f))
+            df/dt = -sin(2θ) * π/(2(1+s)) where θ = π/2 * (t+s)/(1+s)
+            β(t) = -dλ/dt
+
+        Returns:
+            beta(t) as float32 tensor
+        """
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
+
+        # Compute angle θ = π/2 * (t+s)/(1+s)
+        theta = (t32 + self.s) / (1 + self.s) * math.pi / 2
+
+        # f(t) = cos²(θ)
+        cos_theta = torch.cos(theta)
+        f = cos_theta ** 2
+
+        # df/dt = -sin(2θ) * π/(2(1+s))
+        sin_2theta = torch.sin(2 * theta)
+        df_dt = -sin_2theta * math.pi / (2 * (1 + self.s))
+
+        # β(t) = -dλ/dt = -(df/dt) / (f(1-f))
+        # Add small epsilon to denominator for numerical stability
+        denominator = (f * (1 - f)).clamp_min(EPSILON_CLAMP)
+        beta_t = -df_dt / denominator
+
+        # Ensure beta is non-negative (it should be by construction)
+        beta_t = beta_t.clamp_min(0.0)
+
+        if __debug__:
+            assert beta_t.dtype == torch.float32, f"beta(t) must be fp32, got {beta_t.dtype}"
+
+        return beta_t
 
 
 class LinearSchedule:
@@ -86,4 +133,20 @@ class LinearSchedule:
         if __debug__:
             assert out.dtype == torch.float32, f"(t) must be fp32, got {out.dtype}"
         return out
+
+    def beta(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
+        """Analytical beta(t) for linear schedule.
+
+        For LinearSchedule, beta(t) = beta_start + (beta_end - beta_start) * t
+
+        Returns:
+            beta(t) as float32 tensor
+        """
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
+        beta_t = self.beta_start + (self.beta_end - self.beta_start) * t32
+
+        if __debug__:
+            assert beta_t.dtype == torch.float32, f"beta(t) must be fp32, got {beta_t.dtype}"
+
+        return beta_t
 

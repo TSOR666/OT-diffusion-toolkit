@@ -25,6 +25,21 @@ class LangevinCorrector:
     Applies n_steps of Langevin MCMC to refine the sample by following
     the score function more closely. This can reduce discretization errors
     from the predictor step.
+
+    Mathematical Note:
+        The Langevin update is: x_{i+1} = x_i + epsilon * score + sqrt(2*epsilon) * z
+        where epsilon = 2 * (snr * sigma)^2 is the step size.
+
+        This formulation assumes:
+        1. score_fn returns the UNNORMALIZED score: ∇ log p_t(x)
+        2. For Gaussian perturbations with variance sigma^2, the score scales as ~x/sigma^2
+        3. The step size epsilon scales with sigma^2 to maintain proper SNR dynamics
+
+        CRITICAL: If your score model returns a NORMALIZED score (e.g., sigma * ∇ log p_t(x)
+        as in some latent diffusion models), this step size will be incorrect by a factor
+        of sigma^2. Verify your score_fn output convention!
+
+        Reference: Song et al. "Score-Based Generative Modeling through SDEs" (2021)
     """
 
     def __init__(
@@ -40,7 +55,8 @@ class LangevinCorrector:
             schedule: Noise schedule
             n_steps: Number of Langevin steps per correction
             snr: Signal-to-noise ratio for step size (typical: 0.05-0.2)
-            denoise: Whether to perform final denoising step
+                Higher SNR = larger steps = faster mixing but less accuracy
+            denoise: Whether to perform final denoising step (no noise injection)
         """
         self.schedule = schedule
         self.n_steps = n_steps
@@ -147,16 +163,29 @@ class TweedieCorrector:
         t_tensor = torch.full((1,), t, device=x.device, dtype=torch.float32)
         alpha_t, sigma_t = self.schedule.alpha_sigma(t_tensor)
 
+        # Safety check: alpha should never be too close to 0
+        # This can happen at t → T (pure noise regime)
+        alpha_min = 1e-3
+        if alpha_t.item() < alpha_min:
+            logger.warning(
+                f"TweedieCorrector: alpha_t={alpha_t.item():.2e} < {alpha_min} at t={t:.3f}. "
+                f"Tweedie correction is unstable in high-noise regime. Skipping correction."
+            )
+            return x
+
         # Compute score
         score = score_fn(x, t)
 
         # Tweedie's formula: estimate x0
+        # Disable autocast to avoid precision issues in division
         with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
             sigma_sq = sigma_t.float() ** 2
             alpha_float = alpha_t.float()
 
             # x0_estimate = (x_t - sigma^2 * score) / alpha
-            x0_estimate = (x.float() - sigma_sq * score.float()) / (alpha_float + 1e-8)
+            # Use clamp instead of epsilon addition for more principled stability
+            alpha_clamped = torch.clamp(alpha_float, min=alpha_min)
+            x0_estimate = (x.float() - sigma_sq * score.float()) / alpha_clamped
             x0_estimate = x0_estimate.to(x.dtype)
 
         # Mix with original sample
@@ -237,11 +266,17 @@ class AdaptiveCorrector:
                 self.max_corrections
             )
 
-            x_corrected = x
-            for _ in range(n_corrections):
-                x_corrected = self.langevin_corrector.correct(
-                    x_corrected, t, score_fn, generator
-                )
+            # More efficient: call Langevin corrector once with multiple steps
+            # instead of looping (avoids redundant overhead)
+            original_n_steps = self.langevin_corrector.n_steps
+            self.langevin_corrector.n_steps = n_corrections
+
+            x_corrected = self.langevin_corrector.correct(
+                x, t, score_fn, generator
+            )
+
+            # Restore original n_steps
+            self.langevin_corrector.n_steps = original_n_steps
 
             self.correction_count += 1
 
@@ -319,17 +354,20 @@ class PredictorCorrectorSampler:
 
         Returns:
             Next state after prediction and correction
+
+        Raises:
+            TypeError: If predictor does not have a step() method
         """
         # Predictor step
-        if hasattr(self.predictor, 'step'):
-            x_pred = self.predictor.step(x, t_curr, t_next, score_fn)
-        else:
-            # Fallback for simple drift functions
-            dt = t_next - t_curr
-            drift = score_fn(x, t_curr)
-            t_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
-            _, sigma = self.schedule.alpha_sigma(t_tensor)
-            x_pred = x + 0.5 * drift * sigma.to(x.dtype) * dt
+        if not hasattr(self.predictor, 'step'):
+            raise TypeError(
+                f"Predictor must have a 'step(x, t_curr, t_next, score_fn)' method. "
+                f"Got type: {type(self.predictor).__name__}. "
+                f"Use an integrator from SPOT.integrators (HeunIntegrator, DDIMIntegrator, etc.) "
+                f"or ensure your custom predictor implements the step() interface."
+            )
+
+        x_pred = self.predictor.step(x, t_curr, t_next, score_fn)
 
         # Corrector step
         if self.use_corrector and self.corrector is not None:
