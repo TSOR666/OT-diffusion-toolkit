@@ -41,6 +41,7 @@ LOG_STABILITY_EPS = 1e-10  # Epsilon for stable log operations
 KERNEL_STABILITY_EPS = 1e-10  # Epsilon for kernel stability
 STABLE_EXP_MAX = 50.0  # Maximum value for stable exponential
 STABLE_EXP_MIN = -50.0  # Minimum value for stable exponential
+BETA_CLAMP_MAX = 20.0  # Upper bound for beta(t) when approximated numerically
 
 # Sinkhorn parameters
 SINKHORN_ITERATIONS_FULL = 50  # Iterations for full Sinkhorn
@@ -187,6 +188,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         self.kernel_derivative_order = kernel_derivative_order
         self.chunk_size = chunk_size
         self.spectral_gradient = spectral_gradient
+        self._warned_fft_batch = False
         # Respect model hint when available; otherwise use provided flag
         if hasattr(score_model, "predicts_noise"):
             self.model_outputs_noise = bool(getattr(score_model, "predicts_noise"))
@@ -411,7 +413,14 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 
                 # Check if data is grid-structured (for images/volumes) and we can use FFT-OT
                 is_grid, _ = self._is_grid_structured(x_t)
-                use_fft = self.use_fft_ot and is_grid
+                use_fft = self.use_fft_ot and is_grid and x_t.size(0) == 1
+                if self.use_fft_ot and is_grid and x_t.size(0) > 1 and not self._warned_fft_batch:
+                    warnings.warn(
+                        "FFT-OT is currently disabled for batch size > 1 to avoid batch-collapsed transport. "
+                        "Set use_fft_ot=False or provide batch size 1 to enable FFT-OT.",
+                        RuntimeWarning,
+                    )
+                    self._warned_fft_batch = True
                 
                 # Adjust kernel bandwidth based on noise level for better numerical stability
                 if self.adaptive_eps:
@@ -728,13 +737,13 @@ class EnhancedScoreBasedSBDiffusionSolver:
             beta_t = self.noise_schedule.get_beta(t, dt)
         else:
             # Numerical approximation
-            alpha_t_dt = self.noise_schedule(max(0, t - dt))
-            if alpha_t > 0 and alpha_t_dt > 0:
-                beta_t = -(np.log(alpha_t) - np.log(alpha_t_dt)) / dt
-            else:
-                beta_t = 0.02  # Default value
+            dt_safe = max(dt, 1e-4)
+            alpha_t_clamped = max(alpha_t, MIN_ALPHA_VARIANCE)
+            alpha_t_dt = self.noise_schedule(max(0, t - dt_safe))
+            alpha_t_dt_clamped = max(alpha_t_dt, MIN_ALPHA_VARIANCE)
+            beta_t = max(0.0, -(math.log(alpha_t_clamped) - math.log(alpha_t_dt_clamped)) / dt_safe)
         # Clamp beta to a reasonable range to avoid numerical blow-ups near endpoints
-        beta_t = float(np.clip(beta_t, 0.0, 50.0))
+        beta_t = float(min(beta_t, BETA_CLAMP_MAX))
 
         # Probability flow ODE drift: dx/dt = -0.5 * beta(t) * [x + s_theta(x,t)]
         # Equivalently: dx/dt = -0.5 * beta(t) * x - 0.5 * beta(t) * score
@@ -991,6 +1000,13 @@ class EnhancedScoreBasedSBDiffusionSolver:
         Returns:
             Tuple of (transported samples, regularized transport cost)
         """
+        if x_t.size(0) > 1:
+            warnings.warn(
+                "FFT SB transport currently supports batch size 1 to avoid batch-collapsed transport. "
+                "Falling back to RFF transport.",
+                RuntimeWarning,
+            )
+            return self._rff_sb_transport(x_t, t_curr, t_next, iterations)
         # Initialize with score-based prediction
         x_pred = x_t + self._compute_drift(x_t, t_curr, t_curr - t_next)
         
