@@ -1217,13 +1217,15 @@ class ProductionSPOTSolver:
         start_time = time.perf_counter()
         
         transport1 = self._standard_transport(x, y, eps1)
-        
+
         first_solve_time = time.perf_counter() - start_time
-        
+
         transport2 = self._standard_transport(x, y, eps2)
-        
+
         total_time = time.perf_counter() - start_time
-        overhead = (total_time - first_solve_time) / max(total_time, 1e-9)
+        # Overhead = (second_solve_time) / (first_solve_time)
+        # If second solve costs same as first, overhead = 100% (doubling the work)
+        overhead = (total_time - first_solve_time) / max(first_solve_time, 1e-9)
         
         if overhead > self.config.richardson_max_overhead:
             logger.debug(f"Skipping Richardson extrapolation - overhead {overhead:.1%} exceeds budget {self.config.richardson_max_overhead:.1%}")
