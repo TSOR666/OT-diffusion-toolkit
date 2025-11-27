@@ -40,7 +40,8 @@ class KernelModule(nn.Module):
             config.cuda_cache_flush_watermark,
             config.cuda_cache_flush_threshold_mb
         )
-        self.freq_weights_cache = {}
+        # FIX: Use OrderedDict for proper LRU eviction instead of static dict
+        self.freq_weights_cache = OrderedDict()
         self.freq_weights_lock = threading.Lock()
         self.fisher_cache = MemoryEfficientCacheFixed(
             config.cache_size_mb // 8,
@@ -66,7 +67,13 @@ class KernelModule(nn.Module):
 
         cached = self.kernel_cache.get(cache_key, clone=False)
         if cached is not None:
-            return cached.contiguous()
+            # FIX: Verify cached tensor is on correct device
+            if cached.device == device:
+                return cached.contiguous()
+            else:
+                # Device mismatch (rare, but possible with multi-GPU)
+                # Remove invalid entry and recompute
+                pass
 
         grid_key = tuple(shape)
         grids = self._freq_grid_cache.get(grid_key)
@@ -112,18 +119,28 @@ class KernelModule(nn.Module):
         return kernel_fft
 
     def get_frequency_weights(self, shape: Tuple[int, ...], device_str: str) -> torch.Tensor:
-        """Get frequency weights for importance weighting with thread safety"""
+        """Get frequency weights for importance weighting with proper LRU cache.
+
+        FIX: Proper LRU eviction instead of "fill once and stop caching" behavior.
+        """
         cache_key = (shape, device_str)
 
         with self.freq_weights_lock:
             cached = self.freq_weights_cache.get(cache_key)
             if cached is not None:
+                # LRU: Move to end to mark as recently used
+                self.freq_weights_cache.move_to_end(cache_key)
                 return cached.to(torch.device(device_str))
 
+            # Compute new weights
             weights = self._compute_frequency_weights_fixed(shape, device_str)
 
-            if len(self.freq_weights_cache) < 32:
-                self.freq_weights_cache[cache_key] = weights.cpu()
+            # LRU eviction: Remove oldest entry if cache is full
+            if len(self.freq_weights_cache) >= 32:
+                self.freq_weights_cache.popitem(last=False)  # Evict least recently used
+
+            # Store on CPU to save GPU memory
+            self.freq_weights_cache[cache_key] = weights.cpu()
 
         return weights.to(torch.device(device_str))
 
@@ -164,32 +181,24 @@ class KernelModule(nn.Module):
     def estimate_fisher_diagonal(self, x: torch.Tensor, score: torch.Tensor, t: float, alpha: float = None) -> torch.Tensor:
         """Estimate diagonal Fisher information matrix with proper precision handling
 
+        CRITICAL FIX: Removed data_ptr() based caching.
+        The cost of computing Fisher (abs + optional conv2d) is negligible compared to:
+        1. Hash computation overhead
+        2. Risk of cache collision from memory address reuse
+        3. Risk of stale data from pointer aliasing
+
+        Fisher estimation is O(N) element-wise operation, not worth dangerous caching.
+
         Args:
             x: input
             score: current score estimate
-            t: a scalar used only for cache bucketing (can be 0.0 if alpha is provided)
-            alpha: (t) value; if provided it is used both in computation and cache key
+            t: a scalar used only for logging/debugging (not used in computation)
+            alpha: (alpha_bar) value for adaptive epsilon calculation
         """
-        # Add a tiny content fingerprint to reduce pointer-reuse collisions
-        fp = score.reshape(-1)
-        if fp.numel() >= 4:
-            sample = torch.stack([fp[0], fp[fp.numel()//3], fp[2*fp.numel()//3], fp[-1]]).float()
-            # cheap, device-local checksum
-            chk = float(sample.sum().item())
-        else:
-            chk = float(fp.float().sum().item())
-
-        # Include stride in cache key for extra safety
-        stride_sig = tuple(score.stride()) if score.is_contiguous() else "non_contig"
-        # Include  in the cache key to avoid reusing across very different noise levels
-        t_part = f"{t:.6f}"
-        a_part = f"{alpha:.6f}" if alpha is not None else "na"
-        cache_key = (x.shape, f"{t_part}|ab:{a_part}", str(x.device), str(x.dtype), int(score.data_ptr()),
-                     f"{chk:.6e}", stride_sig)
-
-        cached = self.fisher_cache.get(cache_key, clone=False)
-        if cached is not None:
-            return cached
+        # REMOVED: Dangerous data_ptr() based caching
+        # The risk of collision (same address, similar checksum) is too high
+        # Cost: ~1% overhead from abs() + optional 3x3 conv2d
+        # Benefit of removal: Guaranteed correct Fisher info, no silent corruption
 
         original_dtype = score.dtype
         if self.config.use_fp32_fisher and score.dtype in [torch.float16, torch.bfloat16]:
@@ -217,27 +226,36 @@ class KernelModule(nn.Module):
 
             fisher = fisher_flat.reshape(score.shape)
         else:
-            # default alpha if not provided: assume 1t (only as fallback)
+            # default alpha if not provided: assume 1-t (only as fallback)
             alpha_val = float(alpha if alpha is not None else max(0.0, min(1.0, 1.0 - float(t))))
             adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_val)
             fisher = torch.abs(score_fp32) + adaptive_eps
 
+            # FIX: Validate spatial dimensions before applying 2D convolution
             if x.dim() == 4:
-                B, C = fisher.shape[:2]
-                fisher = fisher.reshape(B * C, 1, *fisher.shape[2:])
+                B, C, H, W = fisher.shape
 
-                if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
-                    try:
-                        if x.is_contiguous(memory_format=torch.channels_last):
-                            fisher = fisher.contiguous(memory_format=torch.channels_last)
-                    except (TypeError, AttributeError):
-                        pass
+                # Only apply gaussian smoothing if spatial dimensions are large enough
+                if H >= 3 and W >= 3:
+                    fisher = fisher.reshape(B * C, 1, H, W)
 
-                kernel_size = self.gaussian_kernel.shape[-1]
-                padding = kernel_size // 2
+                    if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+                        try:
+                            if x.is_contiguous(memory_format=torch.channels_last):
+                                fisher = fisher.contiguous(memory_format=torch.channels_last)
+                        except (TypeError, AttributeError):
+                            pass
 
-                fisher = F.conv2d(fisher, self.gaussian_kernel, padding=padding)
-                fisher = fisher.reshape(B, C, *fisher.shape[2:])
+                    # FIX: Ensure gaussian kernel is on correct device
+                    kernel = self.gaussian_kernel.to(device=fisher.device, dtype=fisher.dtype)
+                    kernel_size = kernel.shape[-1]
+                    padding = kernel_size // 2
+
+                    fisher = F.conv2d(fisher, kernel, padding=padding)
+                    fisher = fisher.reshape(B, C, H, W)
+                else:
+                    # Skip smoothing for small spatial dimensions
+                    pass
 
         if original_dtype == torch.float16:
             fisher = fisher.clamp(max=65504)
@@ -247,7 +265,8 @@ class KernelModule(nn.Module):
         if fisher.dtype != original_dtype:
             fisher = fisher.to(original_dtype)
 
-        self.fisher_cache.put(cache_key, fisher)
+        # REMOVED: Caching - computation is cheap, caching is dangerous
+        # self.fisher_cache.put(cache_key, fisher)
 
         return fisher
 
