@@ -3,7 +3,7 @@ from typing import List, Tuple
 import warnings
 import logging
 
-import torch.nn as nn
+import torch
 
 from ..config.conditioning_config import LoRAConfig
 
