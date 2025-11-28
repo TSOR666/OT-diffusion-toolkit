@@ -15,6 +15,7 @@ from . import common
 from .cache import MemoryEfficientCacheFixed
 from .config import FastSBOTConfig
 
+logger = common.logger
 compile_function_fixed = common.compile_function_fixed
 TRITON_AVAILABLE = common.TRITON_AVAILABLE
 launch_triton_kernel_safe = getattr(common, "launch_triton_kernel_safe", None)
@@ -105,7 +106,10 @@ class KernelModule(nn.Module):
         dist_sq = sum(g**2 for g in grids)
 
         kernel_fft = torch.exp(-2 * (math.pi * sigma)**2 * dist_sq)
-        kernel_fft = torch.maximum(kernel_fft, kernel_fft.new_tensor(1e-6))
+        # NUMERICAL FIX: Use much smaller clamping threshold to avoid distorting high frequencies
+        # Previous 1e-6 was too aggressive and created ringing artifacts
+        # 1e-12 preserves frequency response while preventing division issues
+        kernel_fft = torch.maximum(kernel_fft, kernel_fft.new_tensor(1e-12))
 
         self.kernel_cache.put(cache_key, kernel_fft)
 
@@ -205,8 +209,19 @@ class KernelModule(nn.Module):
             fisher_flat = fisher.reshape(-1)
 
             n_elements = score_flat.numel()
-            # default alpha if not provided: assume 1t (only as fallback)
-            alpha_val = float(alpha if alpha is not None else max(0.0, min(1.0, 1.0 - float(t))))
+            # APPROXIMATION WARNING: alpha fallback uses 1-t which is only valid for linear schedules
+            # For cosine or other schedules, alpha_bar must be passed explicitly
+            if alpha is None:
+                alpha_val = max(0.0, min(1.0, 1.0 - float(t)))
+                if not hasattr(self, '_alpha_fallback_warned'):
+                    logger.warning(
+                        "Using alpha_bar = 1-t fallback for Fisher estimation. "
+                        "This is only correct for linear noise schedules. "
+                        "Pass alpha_bar explicitly for cosine or other schedules."
+                    )
+                    self._alpha_fallback_warned = True
+            else:
+                alpha_val = float(alpha)
             launch_triton_kernel_safe(
                 fisher_diagonal_kernel_fixed,
                 score_flat, fisher_flat,
@@ -217,19 +232,33 @@ class KernelModule(nn.Module):
 
             fisher = fisher_flat.reshape(score.shape)
         else:
-            # default alpha if not provided: assume 1t (only as fallback)
-            alpha_val = float(alpha if alpha is not None else max(0.0, min(1.0, 1.0 - float(t))))
+            # APPROXIMATION WARNING: alpha fallback uses 1-t which is only valid for linear schedules
+            if alpha is None:
+                alpha_val = max(0.0, min(1.0, 1.0 - float(t)))
+                if not hasattr(self, '_alpha_fallback_warned'):
+                    logger.warning(
+                        "Using alpha_bar = 1-t fallback for Fisher estimation. "
+                        "This is only correct for linear noise schedules. "
+                        "Pass alpha_bar explicitly for cosine or other schedules."
+                    )
+                    self._alpha_fallback_warned = True
+            else:
+                alpha_val = float(alpha)
             adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_val)
-            fisher = torch.abs(score_fp32) + adaptive_eps
+            # MATHEMATICAL FIX: Fisher information diagonal is E[∇log p · ∇log p^T] ≈ score^2
+            # Using score^2 (element-wise squaring) matches theoretical definition
+            # and is consistent with the Triton kernel implementation
+            fisher = score_fp32 * score_fp32 + adaptive_eps
 
             if x.dim() == 4:
                 B, C = fisher.shape[:2]
                 fisher = fisher.reshape(B * C, 1, *fisher.shape[2:])
 
+                # PERFORMANCE FIX: Convert fisher to channels_last for optimal conv2d performance
+                # Check fisher's layout, not x's layout
                 if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
                     try:
-                        if x.is_contiguous(memory_format=torch.channels_last):
-                            fisher = fisher.contiguous(memory_format=torch.channels_last)
+                        fisher = fisher.contiguous(memory_format=torch.channels_last)
                     except (TypeError, AttributeError):
                         pass
 
