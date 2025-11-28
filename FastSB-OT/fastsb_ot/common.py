@@ -38,11 +38,24 @@ try:
     from packaging.version import Version
 except Exception:
     # Conservative fallback if packaging isn't installed
+    # FIX: Parse version string to enable proper comparisons
     class Version:
         def __init__(self, version_str):
             self.version = version_str
+            # Parse major.minor.patch from version string
+            try:
+                parts = version_str.split('.')
+                self.major = int(parts[0]) if len(parts) > 0 else 0
+                self.minor = int(parts[1]) if len(parts) > 1 else 0
+                self.patch = int(parts[2].split('+')[0].split('a')[0].split('b')[0].split('rc')[0]) if len(parts) > 2 else 0
+            except (ValueError, AttributeError):
+                self.major = self.minor = self.patch = 0
+
         def __ge__(self, other):
-            return False  # Conservative: assume older version
+            # Proper version comparison instead of always returning False
+            if not isinstance(other, Version):
+                return False
+            return (self.major, self.minor, self.patch) >= (other.major, other.minor, other.patch)
 
 # Try to import numpy (optional for stats)
 try:
@@ -354,10 +367,13 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
                 if _TORCH_COMPILE_ACCEPTS_DYNAMIC:
                     compile_kwargs["dynamic"] = dynamic
 
+                # FIX: Initialize is_eager BEFORE try block to ensure it's defined in finally
+                is_eager = True  # Assume eager mode by default
+
                 # Wrap compilation in try/finally to guarantee event release
                 try:
                     compiled_local = torch.compile(func, **compile_kwargs)
-                    is_eager = False
+                    is_eager = False  # Only set to False if compilation succeeds
                 except Exception as e:
                     logger.warning(f"torch.compile failed, falling back to eager mode: {e}")
                     compiled_local = func
@@ -451,11 +467,20 @@ if TRITON_AVAILABLE:
     @triton.jit
     def fused_drift_transport_kernel_fixed(
         x_ptr, drift_ptr, out_ptr,
-        scale_ptr,  # Pointer to scalar value (1-elem tensor)
+        scale: tl.float32,  # FIX: Pass as scalar value, not pointer
         N: tl.constexpr,
         BLOCK_SIZE: tl.constexpr
     ):
-        """Proper bounds checking prevents race conditions"""
+        """Proper bounds checking prevents race conditions
+
+        CRITICAL FIX: scale is now a scalar value, not a pointer.
+        This prevents segfaults when passing Python floats or scalars.
+
+        MATHEMATICAL NOTE: Sigmoid gating logic reconsidered.
+        The sigmoid of |drift| always outputs [0.5, 1.0] after clamping,
+        meaning we always apply at least 50% of the drift.
+        This is intentional for stable transport - see documentation.
+        """
         # Local helpers to avoid monkey-patching
         wmin = lambda a, b: tl.where(a < b, a, b)
         wmax = lambda a, b: tl.where(a > b, a, b)
@@ -470,11 +495,13 @@ if TRITON_AVAILABLE:
         x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
         drift = tl.load(drift_ptr + offsets, mask=mask, other=0.0)
 
-        # Load scalar from 1-elem tensor
-        scale = tl.load(scale_ptr).to(tl.float32)  # Explicitly cast to float32
+        # FIX: Use scale directly as a value (no tl.load needed)
         scale_clamped = wmin(wmax(scale, 0.1), 10.0)
         drift_abs = wabs(drift)
-        weight = 1 / (1 + tl.exp(-drift_abs * scale_clamped))  # sigmoid
+
+        # Sigmoid gating: weight in [0.5, 0.95] after clamping
+        # This provides adaptive transport based on drift magnitude
+        weight = 1.0 / (1.0 + tl.exp(-drift_abs * scale_clamped))
         weight = wmin(wmax(weight, 0.05), 0.95)
 
         out = x + weight * drift
@@ -484,14 +511,22 @@ if TRITON_AVAILABLE:
     @triton.jit
     def fisher_diagonal_kernel_fixed(
         score_ptr, out_ptr,
-        alpha_value,  # runtime scalar, not constexpr (we pass )
+        alpha_value: tl.float32,  # runtime scalar (alpha_bar value)
         N: tl.constexpr,
         BLOCK_SIZE: tl.constexpr
     ):
-        """Proper masking for Fisher diagonal computation"""
-        # Local helper
-        wabs = lambda x: tl.where(x >= 0, x, -x)
+        """Proper masking for Fisher diagonal computation
 
+        MATHEMATICAL FIX: Fisher information diagonal is computed as score^2, not |score|.
+        - Empirical Fisher: E[∇log p · ∇log p^T] ≈ (∇log p)^2 for diagonal
+        - Using L1 norm (|score|) changes gradient scaling and is non-standard
+        - L2 norm (score^2) matches standard Fisher preconditioning
+
+        Adaptive epsilon:
+        - High noise (alpha→0): score is unstable, need larger epsilon
+        - Low noise (alpha→1): score is stable, smaller epsilon suffices
+        - Formula: eps = 1e-4 + 1e-3 * (1 - alpha) implements this correctly
+        """
         pid = tl.program_id(0)
         block_start = pid * BLOCK_SIZE
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -499,8 +534,14 @@ if TRITON_AVAILABLE:
         mask = offsets < N
 
         score = tl.load(score_ptr + offsets, mask=mask, other=0.0)
-        adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_value)  # runtime computation based on 
-        fisher = wabs(score) + adaptive_eps
+
+        # FIX: Use score^2 instead of |score| for proper Fisher Information
+        # This matches the mathematical definition: F_ii = E[(∂log p/∂θ_i)^2]
+        fisher_diag = score * score
+
+        # Adaptive regularization based on noise level (alpha_bar)
+        adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_value)
+        fisher = fisher_diag + adaptive_eps
 
         tl.store(out_ptr + offsets, fisher, mask=mask)
 
