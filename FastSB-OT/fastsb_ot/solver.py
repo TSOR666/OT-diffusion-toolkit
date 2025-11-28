@@ -218,7 +218,10 @@ class FastSBOTSolver(nn.Module):
         # Check monotonic decrease (_bar(0)  _bar(1/32)  ...  _bar(1))
         non_monotonic = []
         for i in range(len(vals)-1):
-            if vals[i] < vals[i+1] - 1e-9:  # Small tolerance for float precision
+            # MAJOR FIX: Increased tolerance from 1e-9 to 1e-6 for FP32 trig operations
+            # Cosine schedules can accumulate errors from repeated cos() calls that exceed 1e-9
+            # Using 1e-6 (relative to typical alpha_bar values) prevents false positives
+            if vals[i] < vals[i+1] - 1e-6:
                 non_monotonic.append((probe_points[i], vals[i], probe_points[i+1], vals[i+1]))
 
         if non_monotonic:
@@ -1030,16 +1033,22 @@ class FastSBOTSolver(nn.Module):
 
         return drift
 
-    def compute_fisher_transport(self, x: torch.Tensor, score: torch.Tensor, alpha_bar_t: float, dt: torch.Tensor) -> torch.Tensor:
+    def compute_fisher_transport(self, x: torch.Tensor, score: torch.Tensor, alpha_bar_t: float, dt: torch.Tensor, t_curr: float = None) -> torch.Tensor:
         """Transport using Fisher information geometry (dt in FP32)
 
         Args:
             x: current state
             score: score estimate
-            alpha_bar_t: (t) at current time (NOT the time index t)
+            alpha_bar_t: α_bar(t) at current time (NOT the time index t)
             dt: step size (float tensor, ideally FP32)
+            t_curr: Current timestep for Fisher cache bucketing (optional)
         """
-        fisher_diag = self.kernel_module.estimate_fisher_diagonal(x, score, t=0.0, alpha=alpha_bar_t)
+        # CRITICAL FIX: Use actual timestep for Fisher estimation when available
+        # Previously hardcoded t=0.0 which creates poor cache bucketing
+        # The t parameter is used for cache bucketing; when alpha is provided (as here),
+        # it doesn't affect computation but does affect cache efficiency
+        t_for_fisher = t_curr if t_curr is not None else 0.0
+        fisher_diag = self.kernel_module.estimate_fisher_diagonal(x, score, t=t_for_fisher, alpha=alpha_bar_t)
 
         if self.config.use_fp32_fisher and score.dtype in [torch.float16, torch.bfloat16]:
             score_fp32 = score.float()
@@ -1086,9 +1095,16 @@ class FastSBOTSolver(nn.Module):
             drift_flat = drift_work.reshape(-1).contiguous()
             out = torch.empty_like(x_flat)
 
-            # Triton scalar as 1-elem tensor for future-proofing
-            scale_val = (5.0 * (1 - alpha_bar)).float().mean().clamp_(0.1, 10.0)
-            scale_buf = torch.tensor([float(scale_val)], device=x_work.device, dtype=x_work.dtype)
+            # MAJOR FIX: Properly extract scalar alpha_bar value before computation
+            # Previous code: (5.0 * (1 - alpha_bar)).float().mean() was nonsensical for scalars
+            if torch.is_tensor(alpha_bar):
+                alpha_bar_val = float(alpha_bar.mean().item()) if alpha_bar.numel() > 1 else float(alpha_bar.item())
+            else:
+                alpha_bar_val = float(alpha_bar)
+
+            # Compute scale as float directly with proper clamping
+            scale_float = max(0.1, min(10.0, 5.0 * (1.0 - alpha_bar_val)))
+            scale_buf = torch.tensor([scale_float], device=x_work.device, dtype=x_work.dtype)
 
             n_elements = x_flat.numel()
             launch_triton_kernel_safe(
@@ -1685,9 +1701,10 @@ def example_usage():
 
     # For CFG compatibility, wrap your model:
     class CFGWrapper(nn.Module):
-        def __init__(self, model):
+        def __init__(self, model, cfg_scale=7.5):
             super().__init__()
             self.model = model
+            self.cfg_scale = cfg_scale  # MINOR FIX: Initialize cfg_scale attribute
 
         def forward(self, x, t, condition=None):
             if condition is not None:
