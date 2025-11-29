@@ -11,14 +11,25 @@ from typing import Callable, List, Optional, Literal
 import torch
 
 from . import common
+<<<<<<< Updated upstream
+=======
+import threading
+>>>>>>> Stashed changes
 
 logger = common.logger
 Version = common.Version
 NUMPY_AVAILABLE = common.NUMPY_AVAILABLE
 _CACHED_DEVICE_PROPERTIES = common._CACHED_DEVICE_PROPERTIES
+<<<<<<< Updated upstream
 np = getattr(common, "np", None)
 
 __all__ = ["QualityPreset", "FastSBOTConfig", "apply_config_seed"]
+=======
+_DEVICE_CACHE_LOCK = threading.Lock()  # Thread-safe cache access
+np = getattr(common, "np", None)
+
+__all__ = ["QualityPreset", "FastSBOTConfig"]
+>>>>>>> Stashed changes
 
 
 class QualityPreset(Enum):
@@ -71,8 +82,12 @@ class FastSBOTConfig:
     legacy_transport_mode: bool = False
 
     # Quality enhancements
+<<<<<<< Updated upstream
     # FIX: Allow user to override corrector_steps by making it Optional
     corrector_steps: Optional[int] = None
+=======
+    corrector_steps: int = field(init=False)
+>>>>>>> Stashed changes
     corrector_snr: float = 0.25
     freq_weighting: bool = True
 
@@ -125,7 +140,10 @@ class FastSBOTConfig:
     log_level: str = "INFO"
 
     # Deterministic RNG hook
+<<<<<<< Updated upstream
     # FIX: Remove default generator creation - solver will create device-appropriate generator
+=======
+>>>>>>> Stashed changes
     generator: Optional[torch.Generator] = None
 
     # ENHANCED SAMPLING PARAMETERS
@@ -156,6 +174,7 @@ class FastSBOTConfig:
     _sinkhorn_iterations: int = field(init=False, default=50)
 
     def __post_init__(self):
+<<<<<<< Updated upstream
         """Set parameters based on quality preset and hardware capabilities.
 
         CRITICAL FIX: Removed global seed application from init.
@@ -171,6 +190,16 @@ class FastSBOTConfig:
 
         FIX: Only apply defaults if user didn't explicitly set values.
         """
+=======
+        """Set parameters based on quality preset and apply seed"""
+        self._apply_quality_preset()
+        self._apply_hardware_config()
+        self._validate_config()
+        self._apply_seed()
+
+    def _apply_quality_preset(self):
+        """Apply quality preset settings"""
+>>>>>>> Stashed changes
         presets = {
             "draft": (0, 10),
             "balanced": (0, 50),
@@ -178,6 +207,7 @@ class FastSBOTConfig:
             "extreme": (2, 100)
         }
 
+<<<<<<< Updated upstream
         default_corrector, default_sinkhorn = presets.get(self.quality, presets["balanced"])
 
         # Only override if not explicitly set by user
@@ -347,5 +377,161 @@ def apply_config_seed(config: FastSBOTConfig, device: Optional[torch.device] = N
     logger.info(f"Applied seed {config.seed} (deterministic={deterministic}, device={generator.device if generator else 'none'})")
 
     return generator
+=======
+        if self.quality in presets:
+            self.corrector_steps, sinkhorn_iterations = presets[self.quality]
+        else:
+            self.corrector_steps, sinkhorn_iterations = presets["balanced"]
+
+        self._sinkhorn_iterations = sinkhorn_iterations
+
+    def _apply_hardware_config(self):
+        """Apply hardware-specific adjustments with memory limits"""
+        if torch.cuda.is_available():
+            device_id = torch.cuda.current_device()
+
+            # Thread-safe device property caching
+            with _DEVICE_CACHE_LOCK:
+                if device_id not in _CACHED_DEVICE_PROPERTIES:
+                    _CACHED_DEVICE_PROPERTIES[device_id] = torch.cuda.get_device_properties(device_id)
+                props = _CACHED_DEVICE_PROPERTIES[device_id]
+            capability = props.major, props.minor
+            total_memory = props.total_memory
+
+            # Only use channels_last on Ampere+ (capability >= 8.0)
+            self.use_channels_last = capability[0] >= 8
+
+            if capability[0] >= 8 and self.quality in ["ultra", "extreme"]:
+                self.use_bfloat16 = True
+
+            legacy_gpu = capability[0] < 7
+            if legacy_gpu:
+                # Triton kernels require Volta+ for stable performance
+                self.use_triton_kernels = False
+                # Keep hierarchical bridge available but force safer precision later
+                self.legacy_transport_mode = True
+            else:
+                self.legacy_transport_mode = False
+
+            if self.adaptive_patch_size:
+                if total_memory < 8e9:
+                    self.max_patch_size = min(self.max_patch_size, 256)
+                    self.memory_limit_ot_mb = 50
+                elif total_memory < 16e9:
+                    self.max_patch_size = min(self.max_patch_size, 384)
+                    self.memory_limit_ot_mb = 100
+                else:
+                    self.memory_limit_ot_mb = 200
+        else:
+            self.use_channels_last = False
+            self.legacy_transport_mode = True
+
+    def _validate_config(self):
+        """Validate configuration parameter ranges and consistency
+
+        Raises ValueError for invalid configurations, logs warnings for potentially problematic settings
+        """
+        # Validate DDIM eta range
+        if not (0 <= self.ddim_eta <= 1):
+            raise ValueError(
+                f"ddim_eta must be in [0, 1], got {self.ddim_eta}. "
+                f"Use 0 for deterministic DDIM, 1 for DDPM-like sampling."
+            )
+
+        # Validate dynamic thresholding percentile
+        if not (0.5 < self.dynamic_thresholding_percentile < 1.0):
+            raise ValueError(
+                f"dynamic_thresholding_percentile must be in (0.5, 1.0), "
+                f"got {self.dynamic_thresholding_percentile}. "
+                f"Values below 0.5 clip below median, values at 1.0 disable clipping."
+            )
+
+        # Validate guidance scale
+        if self.guidance_scale < 0:
+            raise ValueError(f"guidance_scale must be non-negative, got {self.guidance_scale}")
+
+        if self.guidance_scale > 5.0:
+            logger.warning(
+                f"guidance_scale ({self.guidance_scale}) is unusually high. "
+                f"Recommended range: 1.0-2.0 for score scaling (this is NOT CFG)."
+            )
+
+        # Validate training patch size
+        if self.training_max_patch_size is not None:
+            if self.training_max_patch_size < 64:
+                raise ValueError(
+                    f"training_max_patch_size ({self.training_max_patch_size}) is too small. "
+                    f"Minimum recommended: 64 pixels."
+                )
+
+            if self.training_max_patch_size > self.max_patch_size * 2:
+                logger.warning(
+                    f"training_max_patch_size ({self.training_max_patch_size}) is much larger than "
+                    f"max_patch_size ({self.max_patch_size}). This may cause distribution shift during inference. "
+                    f"Consider increasing max_patch_size."
+                )
+
+        # Validate eps
+        if self.eps <= 0:
+            raise ValueError(f"eps must be positive, got {self.eps}")
+
+        # Validate corrector SNR
+        if not (0 < self.corrector_snr <= 1.0):
+            logger.warning(
+                f"corrector_snr ({self.corrector_snr}) is outside typical range (0, 1]. "
+                f"This may cause instability in corrector steps."
+            )
+
+        # Validate momentum beta
+        if not (0 <= self.momentum_beta < 1.0):
+            raise ValueError(
+                f"momentum_beta must be in [0, 1), got {self.momentum_beta}"
+            )
+
+    def _apply_seed(self):
+        """Apply seed for reproducibility with optional deterministic RNG"""
+        if self.seed is not None:
+            random.seed(self.seed)
+            # Only seed NumPy if it's available
+            if NUMPY_AVAILABLE:
+                np.random.seed(self.seed)
+            torch.manual_seed(self.seed)
+
+            if self.generator is None:
+                try:
+                    # Create CPU generator by default; solver will migrate to device as needed
+                    self.generator = torch.Generator()
+                    self.generator.manual_seed(self.seed)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to create/seed generator: {e}. "
+                        f"Sampling may not be fully deterministic."
+                    )
+                    self.generator = None
+            else:
+                # Generator already exists, try to seed it
+                try:
+                    self.generator.manual_seed(self.seed)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to seed existing generator: {e}. "
+                        f"Generator may use different seed than config.seed."
+                    )
+
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(self.seed)
+
+                deterministic = os.environ.get("FASTSBOT_DETERMINISTIC", "0") == "1"
+                torch.backends.cudnn.deterministic = deterministic
+                torch.backends.cudnn.benchmark = not deterministic
+
+                # Safer deterministic algorithms - wrap with try/except
+                if deterministic and hasattr(torch, 'use_deterministic_algorithms'):
+                    try:
+                        torch.use_deterministic_algorithms(True)
+                    except Exception as e:
+                        logger.warning(f"Deterministic algorithms requested but not fully available: {e}. "
+                                       f"Some operations (FFT, Triton) may not be deterministic.")
+>>>>>>> Stashed changes
 
 

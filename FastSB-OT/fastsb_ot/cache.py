@@ -19,6 +19,7 @@ __all__ = ["MemoryEfficientCacheFixed"]
 class MemoryEfficientCacheFixed:
     """Thread-safe cache with smart GPU cleanup and immutable returns
 
+<<<<<<< Updated upstream
     CRITICAL FIXES:
     - Tensor view storage leak: Compacts views to prevent hidden memory overhead
     - Performance: Removed synchronous CUDA calls from hot path
@@ -41,10 +42,28 @@ class MemoryEfficientCacheFixed:
         self.cache = OrderedDict()
         self.max_size_bytes = max_size_mb * 1024 * 1024
         self._original_max_size_bytes = self.max_size_bytes  # Store user intent
+=======
+    Fixes applied:
+    - Thread-safe access to all shared state (_pending_flush_bytes, _last_cuda_flush)
+    - CUDA operations moved outside lock to prevent blocking
+    - Type validation for put() to prevent AttributeError
+    - Storage overhead detection to prevent memory leaks from tensor views
+    - Multi-GPU memory tracking
+    - Fixed adaptive downscaling logic
+    - Optimized clear() implementation
+    """
+
+    def __init__(self, max_size_mb: int = 1024, max_entries: int = 100,
+                 cuda_flush_watermark: float = 0.8, flush_threshold_mb: int = 32):
+        self.cache = OrderedDict()
+        self.max_size_bytes = max_size_mb * 1024 * 1024
+        self._original_max_size_bytes = self.max_size_bytes  # Track original limit
+>>>>>>> Stashed changes
         self.max_entries = max_entries
         self.current_size = 0
         self.hits = 0
         self.misses = 0
+<<<<<<< Updated upstream
         self.cuda_flush_watermark = cuda_flush_watermark  # Unused, kept for compatibility
         self.flush_threshold_bytes = flush_threshold_mb * 1024 * 1024
         self.enable_adaptive_sizing = enable_adaptive_sizing
@@ -80,6 +99,20 @@ class MemoryEfficientCacheFixed:
             if key in self.cache:
                 self.hits += 1
                 # Move to end (LRU update)
+=======
+        self.cuda_flush_watermark = cuda_flush_watermark
+        self.flush_threshold_bytes = flush_threshold_mb * 1024 * 1024
+        self._lock = threading.Lock()
+        self._last_cuda_flush = 0
+        self._pending_flush_bytes = 0
+        self._adaptive_resize_attempts = 0
+
+    def get(self, key: Any, clone: bool = False) -> Optional[torch.Tensor]:
+        """Get from cache with optional cloning for immutability"""
+        with self._lock:
+            if key in self.cache:
+                self.hits += 1
+>>>>>>> Stashed changes
                 value = self.cache.pop(key)
                 self.cache[key] = value
                 return value.clone() if clone else value
@@ -87,6 +120,7 @@ class MemoryEfficientCacheFixed:
             return None
 
     def put(self, key: Any, value: torch.Tensor):
+<<<<<<< Updated upstream
         """Put tensor in cache with proper memory accounting and cleanup.
 
         CRITICAL FIX: Compacts tensor views to prevent storage leaks.
@@ -137,6 +171,48 @@ class MemoryEfficientCacheFixed:
                 return
 
             # LRU eviction loop - NO CUDA CALLS HERE
+=======
+        """Put tensor in cache with proper cleanup
+
+        Fixes:
+        - Type validation to prevent AttributeError
+        - Storage overhead detection to prevent view memory leaks
+        - CUDA operations moved outside lock
+        - Proper thread-safe state management
+        """
+        # FIX #1: Type validation
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(value).__name__}")
+
+        if value.requires_grad:
+            value = value.detach()
+
+        # FIX #2: Check for storage overhead (view memory leak prevention)
+        # Do this BEFORE acquiring lock to avoid blocking
+        if value.numel() > 0:
+            view_size = value.element_size() * value.nelement()
+            storage_size = value.untyped_storage().size()
+            # Clone if storage is >50% larger than view (indicates this is a slice/view)
+            if storage_size > view_size * 1.5:
+                value = value.clone()
+
+        evicted_cuda_bytes = 0
+
+        with self._lock:
+            value_size = value.element_size() * value.nelement()
+
+            # Log when rejecting large items
+            if value_size > self.max_size_bytes // 2:
+                if not hasattr(self, '_large_item_warned'):
+                    size_mb = value_size / (1024 * 1024)
+                    max_mb = self.max_size_bytes / (1024 * 1024)
+                    logger.debug(f"Cache rejecting large tensor ({size_mb:.1f} MB > {max_mb/2:.1f} MB). "
+                                 f"Consider increasing cache_size_mb if hit rate is low.")
+                    self._large_item_warned = True
+                return
+
+            # Eviction loop
+>>>>>>> Stashed changes
             while (self.current_size + value_size > self.max_size_bytes or
                    len(self.cache) >= self.max_entries):
                 if not self.cache:
@@ -146,6 +222,7 @@ class MemoryEfficientCacheFixed:
                 old_size = old_value.element_size() * old_value.nelement()
                 self.current_size -= old_size
 
+<<<<<<< Updated upstream
                 # Track CUDA memory for async flush
                 if old_value.device.type == 'cuda':
                     evicted_cuda_bytes += old_size
@@ -298,11 +375,210 @@ class MemoryEfficientCacheFixed:
         with self._lock:
             total = self.hits + self.misses
             stats = {
+=======
+                if old_value.device.type == 'cuda':
+                    evicted_cuda_bytes += old_size
+                del old_value
+
+            self.cache[key] = value
+            self.current_size += value_size
+
+            # FIX #3: Update pending flush bytes under lock
+            self._pending_flush_bytes += evicted_cuda_bytes
+
+            # FIX #4: Snapshot state for CUDA flush (to be done outside lock)
+            pending_bytes = self._pending_flush_bytes
+            last_flush_time = self._last_cuda_flush
+
+        # FIX #5: CUDA operations OUTSIDE lock to prevent blocking other threads
+        if evicted_cuda_bytes > 0:
+            self._try_cuda_flush_unlocked(pending_bytes, last_flush_time)
+
+        # Adaptive downscaling check (also outside lock)
+        self._maybe_downscale_cache()
+
+    def _try_cuda_flush_unlocked(self, pending_bytes: int, last_flush_time: float):
+        """Try to flush CUDA cache without holding the main lock
+
+        Fixes:
+        - All CUDA operations done outside main lock
+        - Multi-GPU memory tracking
+        - Atomic updates to shared state
+        - Removed redundant checks
+        """
+        if not torch.cuda.is_available():
+            with self._lock:
+                self._pending_flush_bytes = 0
+            return
+
+        current_time = time.time()
+        should_flush = False
+
+        try:
+            # FIX #6: Multi-GPU memory tracking
+            allocated, reserved = self._get_total_cuda_memory()
+            unused = reserved - allocated
+
+            # Determine if we should flush
+            if pending_bytes >= self.flush_threshold_bytes and unused >= self.flush_threshold_bytes:
+                # Both pending and unused exceed threshold - flush immediately
+                should_flush = True
+            elif current_time - last_flush_time >= 1.0:
+                # Time gate passed, check if either condition warrants flush
+                # FIX #7: Removed redundant "reserved > 0" check
+                if unused > self.flush_threshold_bytes:
+                    should_flush = True
+                elif pending_bytes >= self.flush_threshold_bytes:
+                    should_flush = True
+
+            if should_flush:
+                # CUDA operation outside lock
+                torch.cuda.empty_cache()
+
+                # FIX #8: Atomic update of shared state under lock
+                with self._lock:
+                    self._pending_flush_bytes = 0
+                    self._last_cuda_flush = current_time
+
+                # Adaptive downscaling after successful flush
+                self._maybe_downscale_cache(force=True)
+            elif pending_bytes >= self.flush_threshold_bytes:
+                # Reset if we've accumulated enough but time gate prevents flush
+                if current_time - last_flush_time >= 1.0:
+                    with self._lock:
+                        self._pending_flush_bytes = 0
+        except Exception as e:
+            # On error, try to flush anyway and reset state
+            logger.debug(f"CUDA flush error: {e}")
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            with self._lock:
+                self._pending_flush_bytes = 0
+                self._last_cuda_flush = current_time
+
+    def _get_total_cuda_memory(self) -> tuple[int, int]:
+        """Get total allocated and reserved memory across all CUDA devices
+
+        FIX #9: Multi-GPU support
+        """
+        if not torch.cuda.is_available():
+            return 0, 0
+
+        allocated = 0
+        reserved = 0
+
+        try:
+            device_count = torch.cuda.device_count()
+            for device_id in range(device_count):
+                allocated += torch.cuda.memory_allocated(device_id)
+                reserved += torch.cuda.memory_reserved(device_id)
+        except Exception:
+            # Fallback to default device
+            allocated = torch.cuda.memory_allocated()
+            reserved = torch.cuda.memory_reserved()
+
+        return allocated, reserved
+
+    def clear(self):
+        """Clear cache and free GPU memory
+
+        FIX #10: Optimized implementation - removed inefficient del loop
+        FIX #11: CUDA flush outside lock
+        """
+        with self._lock:
+            self.cache.clear()  # Python GC handles cleanup, no need for del loop
+            self.current_size = 0
+            self._pending_flush_bytes = 0
+
+        # FIX #12: CUDA flush outside lock to prevent blocking
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            self._maybe_downscale_cache(force=True)
+
+    def reset(self):
+        """Alias for clear() for backward compatibility"""
+        self.clear()
+
+    def _maybe_downscale_cache(self, force: bool = False):
+        """Adapt cache limits to available GPU memory to reduce manual tuning.
+
+        FIX #13: Fixed adaptive downscaling logic
+        - Now properly handles high utilization scenarios
+        - Correctly determines when to downscale
+        """
+        if not torch.cuda.is_available():
+            return
+        if not hasattr(torch.cuda, "mem_get_info"):
+            return
+        if self._adaptive_resize_attempts >= 3 and not force:
+            return
+
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info()
+        except RuntimeError:
+            return
+
+        # Calculate target based on available memory (15% of free)
+        target_limit = max(int(free_bytes * 0.15), self.flush_threshold_bytes * 2)
+
+        # FIX #14: Fixed downscaling logic
+        # Downscale if ANY of these conditions are true:
+        # 1. Forced (after clear or flush)
+        # 2. Cache is >75% full AND target is less than current max
+        # 3. Target is significantly less than current max (memory pressure)
+
+        with self._lock:
+            current_max = self.max_size_bytes
+            current_usage = self.current_size
+
+        should_downscale = False
+
+        if force:
+            should_downscale = True
+        elif current_usage > current_max * 0.75 and target_limit < current_max:
+            # High utilization AND memory pressure
+            should_downscale = True
+        elif target_limit < current_max * 0.7:
+            # Significant memory pressure (target is <70% of current)
+            should_downscale = True
+
+        if should_downscale:
+            # Don't shrink below minimum threshold
+            new_cap = max(target_limit, self.flush_threshold_bytes * 2)
+            # Don't expand beyond original max
+            new_cap = min(new_cap, self._original_max_size_bytes)
+
+            if new_cap < current_max:
+                logger.debug(
+                    "MemoryEfficientCacheFixed adapting capacity: %.1fMB -> %.1fMB (free %.1fMB)",
+                    current_max / 1e6,
+                    new_cap / 1e6,
+                    free_bytes / 1e6
+                )
+                with self._lock:
+                    self.max_size_bytes = new_cap
+                self._adaptive_resize_attempts += 1
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics
+
+        FIX #15: Added lock protection for thread-safe stats reading
+        """
+        with self._lock:
+            total = self.hits + self.misses
+            return {
+>>>>>>> Stashed changes
                 "hits": self.hits,
                 "misses": self.misses,
                 "hit_rate": self.hits / total if total > 0 else 0,
                 "size_mb": self.current_size / (1024 * 1024),
                 "max_size_mb": self.max_size_bytes / (1024 * 1024),
+<<<<<<< Updated upstream
                 "original_max_size_mb": self._original_max_size_bytes / (1024 * 1024),
                 "entries": len(self.cache),
                 "pending_flush_mb": self._pending_flush_bytes / (1024 * 1024),
@@ -315,3 +591,8 @@ class MemoryEfficientCacheFixed:
                 })
 
             return stats
+=======
+                "entries": len(self.cache),
+                "pending_flush_mb": self._pending_flush_bytes / (1024 * 1024)
+            }
+>>>>>>> Stashed changes
