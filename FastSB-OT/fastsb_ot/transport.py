@@ -113,21 +113,20 @@ class SlicedOptimalTransport:
                         n_projections: int) -> torch.Tensor:
         """Sliced OT with deterministic projections
 
-        CRITICAL GRADIENT LIMITATION:
-        This implementation uses scatter_ with integer indices from argsort, which
-        breaks gradient flow with respect to x positions during training.
-
-        - Gradients flow through y_sorted (values) ✓
-        - Gradients DO NOT flow through x_indices (integer sort order) ✗
+        GRADIENT FLOW NOTE:
+        - Gradients flow w.r.t. x through the projection: ∂(x@θ)/∂x = θ ✓
+        - Gradients flow w.r.t. y through sorted values: ∂y_sorted/∂y ✓
+        - Gradients DO NOT flow through sort order (integer indices from argsort) ✗
 
         Consequence:
         - For INFERENCE (sampling): Mathematically valid approximation of OT
-        - For TRAINING: Loss gradient w.r.t. x positions is ZERO or incorrect
+        - For TRAINING: Gradients provide a valid (though biased) approximation of
+          the true OT gradient ∂W_1/∂x for sliced Wasserstein distance
 
-        If you need gradients for training position-dependent losses, use:
-        1. Soft-sort (differentiable sorting) instead of hard argsort
+        Alternative approaches for improved gradient flow:
+        1. Soft-sort (differentiable sorting) for smooth gradient through sort order
         2. Direct Wasserstein distance: torch.sum((x_sorted - y_sorted)**2)
-        3. Full Sinkhorn (_full_ot) for small problems
+        3. Full Sinkhorn (_full_ot) for exact OT gradients on small problems
         """
         B, N, d = x.shape
         device = x.device
@@ -182,10 +181,10 @@ class SlicedOptimalTransport:
 
         P_fp32 = self._sinkhorn_batch_fixed(C.float(), eps)
         y_fp32 = y.float() if y.dtype != torch.float32 else y
-        # Barycentric projection requires dividing by row mass (uniform = 1/N). Without
-        # this scaling the map is biased toward zero by roughly a factor of 1/N.
-        row_sums = P_fp32.sum(dim=2, keepdim=True).clamp_min(1e-12)
-        out_fp32 = torch.bmm(P_fp32, y_fp32) / row_sums
+        # Barycentric projection: P is already row-normalized by Sinkhorn
+        # After convergence with uniform marginals, P rows sum to 1/n
+        # The transport map is simply: T(x) = P @ y
+        out_fp32 = torch.bmm(P_fp32, y_fp32)
         return out_fp32.to(y.dtype)
 
     def _sinkhorn_batch_fixed(
@@ -250,22 +249,26 @@ class SlicedOptimalTransport:
         # This prevents gradient explosions in barycentric projection
         if torch.isnan(P).any() or torch.isinf(P).any():
             logger.warning(f"Sinkhorn produced NaN/Inf (eps={eps:.2e}). Falling back to uniform coupling.")
-            # Fallback to uniform coupling (identity-like for square matrices)
-            P = torch.eye(n, m, device=device, dtype=dtype).unsqueeze(0).expand(B, -1, -1) / max(n, m)
+            # Fallback to uniform coupling: P[i,j] = 1/(n*m) satisfies marginal constraints
+            # Row sum: sum_j P[i,j] = m/(n*m) = 1/n ✓
+            # Col sum: sum_i P[i,j] = n/(n*m) = 1/m ✓
+            P = torch.full((B, n, m), 1.0 / (n * m), device=device, dtype=dtype)
             return P
 
         # Check row sum deviation from uniform (should be ~1/n for each row)
         row_sums = P.sum(dim=2)
         expected_row_sum = 1.0 / n
-        max_deviation = torch.abs(row_sums - expected_row_sum).max()
+        relative_error = torch.abs(row_sums - expected_row_sum) / expected_row_sum
+        max_relative_error = relative_error.max()
 
-        # If coupling is severely degenerate (e.g. rows sum to near-zero), fallback
-        if max_deviation > 0.5 / n:  # Allow 50% deviation
+        # If coupling is severely degenerate, fallback to uniform coupling
+        # Use 20% relative error threshold (loose tolerance for numerical stability)
+        if max_relative_error > 0.2:
             logger.warning(
-                f"Sinkhorn coupling degenerate (max row sum deviation: {max_deviation:.2e}, "
-                f"expected: {expected_row_sum:.2e}, eps={eps:.2e}). Falling back to uniform coupling."
+                f"Sinkhorn coupling degenerate (max relative error: {max_relative_error:.2%}, "
+                f"expected row sum: {expected_row_sum:.2e}, eps={eps:.2e}). Falling back to uniform coupling."
             )
-            P = torch.eye(n, m, device=device, dtype=dtype).unsqueeze(0).expand(B, -1, -1) / max(n, m)
+            P = torch.full((B, n, m), 1.0 / (n * m), device=device, dtype=dtype)
             return P
 
         return P
@@ -313,11 +316,11 @@ class MomentumTransport(nn.Module):
             self._cache_misses += 1
             if self._cache_misses == 1:
                 logger.debug(f"Created velocity cache for shape {shape_key}")
-            elif self._cache_misses > 1:
+            elif self._cache_misses > 5:  # Only warn after significant number of misses
                 logger.warning(
                     f"Momentum cache miss (shape {shape_key}). "
-                    f"Frequent misses ({self._cache_misses} shapes) may indicate "
-                    f"momentum is being reset too often (e.g., varying batch size)."
+                    f"High number of misses ({self._cache_misses} unique shapes) detected. "
+                    f"This may indicate varying batch sizes or frequent shape changes."
                 )
         else:
             self._cache_hits += 1
@@ -397,8 +400,19 @@ class HierarchicalBridge(nn.Module):
             transport = self._compute_scale_transport(x_scaled, drift_scaled, scale)
 
             if scale < 1.0:
-                # Upsampling uses bilinear (no aliasing risk)
-                transport = F.interpolate(transport, size=x.shape[-2:], mode='bilinear', align_corners=False)
+                # Upsampling with anti-aliasing to prevent reconstruction artifacts
+                # antialias parameter requires PyTorch >= 1.11
+                try:
+                    transport = F.interpolate(
+                        transport, size=x.shape[-2:], mode='bilinear',
+                        align_corners=False, antialias=True
+                    )
+                except TypeError:
+                    # Fallback for older PyTorch versions
+                    transport = F.interpolate(
+                        transport, size=x.shape[-2:], mode='bilinear',
+                        align_corners=False
+                    )
 
             transports.append(transport)
 
@@ -441,10 +455,15 @@ class HierarchicalBridge(nn.Module):
 
         freq_mag = torch.sqrt(freq_y[:, None]**2 + freq_x[None, :]**2)
 
+        # At small scales: use uniform weighting (high frequencies already removed by downsampling)
+        # At full scale: emphasize high-frequency changes (fine details)
         if scale >= 1.0:
+            # Full resolution: emphasize high-frequency changes
             freq_weight = freq_mag
         else:
-            freq_weight = 1.0 - freq_mag
+            # Downsampled: frequencies already limited by scale, use uniform weighting
+            # This avoids redundant emphasis on low frequencies
+            freq_weight = torch.ones_like(freq_mag)
 
         energy = (torch.abs(t_fft - x_fft) * freq_weight[None, None, :, :]).mean()
 
