@@ -31,7 +31,8 @@ class NoisePredictorToScoreWrapper(nn.Module):
         matches training.
     clamp:
         Minimum value for ``1 - alpha_bar`` when computing ``sigma`` to avoid
-        division by zero.
+        division by zero. Default 1e-6 provides safer bounds for FP16:
+        σ_min = √(1e-6) = 1e-3, so max score scale ≈ 1000.
     device:
         Optional device hint; if provided we eagerly move the wrapper to the device.
     """
@@ -44,25 +45,63 @@ class NoisePredictorToScoreWrapper(nn.Module):
         noise_model: nn.Module,
         schedule: Callable[[float], float],
         *,
-        clamp: float = 1e-8,
+        clamp: float = 1e-6,
         device: Union[torch.device, str, None] = None,
     ) -> None:
         super().__init__()
         self.noise_model = noise_model
         self.schedule = schedule
         self.clamp = float(clamp)
+        self._warned_non_vectorized = False  # Track if we've warned about non-vectorized schedule
         if device is not None:
             self.to(device)
 
     def forward(self, x: torch.Tensor, t: Union[torch.Tensor, float]) -> torch.Tensor:
+        """Convert noise prediction to score estimate.
+
+        IMPORTANT: This assumes DDPM/variance-preserving forward process:
+            x_t = √(α_bar_t) * x_0 + √(1 - α_bar_t) * ε
+
+        The score-noise relationship is: ∇_x log p_t(x_t) = -ε / √(1 - α_bar_t)
+
+        For other parameterizations (EDM, VE, DDIM with η ≠ 1), this conversion
+        may be incorrect. Ensure your noise schedule matches your training setup.
+        """
+        # Handle empty batch edge case
+        if x.shape[0] == 0:
+            return torch.empty_like(x)
+
         eps = self.noise_model(x, t)
         sigma = self._sigma_from_t(t, x)
 
-        # Broadcast sigma to match epsilon shape.
+        # Validate shape compatibility before broadcasting
+        if sigma.ndim > 1 and sigma.shape[0] != eps.shape[0] and sigma.shape[0] != 1:
+            raise ValueError(
+                f"Batch size mismatch: sigma has {sigma.shape[0]} elements, "
+                f"but eps has batch size {eps.shape[0]}"
+            )
+
+        # Broadcast sigma to match epsilon shape by adding trailing dimensions
         while sigma.ndim < eps.ndim:
             sigma = sigma.unsqueeze(-1)
 
-        return -eps / sigma
+        # Final check: ensure batch dimensions align
+        if sigma.shape[0] != eps.shape[0] and sigma.shape[0] != 1:
+            raise ValueError(
+                f"After broadcasting, batch dimension mismatch: "
+                f"sigma.shape={sigma.shape}, eps.shape={eps.shape}"
+            )
+
+        # Compute score with overflow protection for reduced precision
+        score = -eps / sigma
+
+        # Protect against overflow in FP16/BF16
+        if score.dtype == torch.float16:
+            score = torch.clamp(score, -65504, 65504)
+        elif score.dtype == torch.bfloat16:
+            score = torch.clamp(score, -3.38e38, 3.38e38)
+
+        return score
 
     # ------------------------------------------------------------------
     def _sigma_from_t(self, t: Union[torch.Tensor, float], ref: torch.Tensor) -> torch.Tensor:
@@ -98,29 +137,42 @@ class NoisePredictorToScoreWrapper(nn.Module):
             else:
                 alpha_tensor = alpha_tensor.to(device=device, dtype=dtype)
 
-        except (TypeError, RuntimeError, AttributeError, ValueError) as e:
+        except (TypeError, RuntimeError, AttributeError) as e:
             # FALLBACK: Schedule doesn't support tensors (e.g., uses math.cos instead of torch.cos)
             # This path forces CPU sync but is only taken for non-vectorized schedules
-            # Users should be warned to use vectorized schedules for performance
-            import warnings
-            warnings.warn(
-                f"Schedule function does not support tensor inputs ({type(e).__name__}). "
-                f"Falling back to slow element-wise evaluation. "
-                f"For best performance, ensure your schedule uses torch.* functions instead of math.* "
-                f"(e.g., torch.cos instead of math.cos).",
-                UserWarning,
-                stacklevel=3
-            )
+            # Warn only once per instance to avoid log spam
+            if not self._warned_non_vectorized:
+                import warnings
+                warnings.warn(
+                    f"Schedule function does not support tensor inputs ({type(e).__name__}). "
+                    f"Falling back to slow element-wise evaluation. "
+                    f"For best performance, ensure your schedule uses torch.* functions instead of math.* "
+                    f"(e.g., torch.cos instead of math.cos). "
+                    f"This warning will only appear once.",
+                    UserWarning,
+                    stacklevel=3
+                )
+                self._warned_non_vectorized = True
 
+            # Single GPU→CPU transfer, then apply schedule on CPU
             flat = t_tensor.reshape(-1)
-            # REMOVED: List comprehension with GPU→CPU sync
-            # alpha_vals = [float(self.schedule(float(v))) for v in flat]
+            t_cpu = flat.cpu()  # Single sync: move entire batch to CPU
 
-            # Use vectorized apply_ as fallback (still forces sync but clearer)
-            alpha_tensor = torch.zeros_like(flat)
-            for i in range(flat.shape[0]):
-                alpha_tensor[i] = float(self.schedule(float(flat[i])))
+            # Apply schedule element-wise on CPU (no additional syncs)
+            alpha_values = [float(self.schedule(float(t_cpu[i]))) for i in range(t_cpu.shape[0])]
+
+            # Move result back to GPU as single tensor
+            alpha_tensor = torch.tensor(alpha_values, device=device, dtype=dtype)
             alpha_tensor = alpha_tensor.reshape(t_tensor.shape)
+
+        # Validate that schedule returned valid α_bar values in [0, 1]
+        # This catches bugs in the schedule function that could lead to NaN
+        if torch.any(alpha_tensor < 0) or torch.any(alpha_tensor > 1):
+            raise ValueError(
+                f"Schedule returned invalid α_bar values outside [0, 1]. "
+                f"Got min={alpha_tensor.min().item():.6f}, max={alpha_tensor.max().item():.6f}. "
+                f"Check your noise schedule implementation."
+            )
 
         sigma = torch.sqrt(torch.clamp(1.0 - alpha_tensor, min=self.clamp))
 
@@ -131,7 +183,7 @@ def wrap_noise_predictor(
     noise_model: nn.Module,
     schedule: Callable[[float], float],
     *,
-    clamp: float = 1e-8,
+    clamp: float = 1e-6,
     device: Union[torch.device, str, None] = None,
 ) -> NoisePredictorToScoreWrapper:
     """Factory helper mirroring :class:`NoisePredictorToScoreWrapper` construction."""
