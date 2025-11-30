@@ -72,16 +72,24 @@ See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for detailed requirements and c
 ## Mathematical Foundations
 
 ### Score-Based Diffusion
-ATLAS adopts the variance-preserving SDE
+ATLAS parameterises the variance-preserving SDE through the cumulative signal power
+`alpha(t) in (0, 1]` returned by the noise schedule:
+```
+sigma^2(t) = (1 - alpha(t)) / alpha(t)
+beta(t) = - d alpha(t) / dt / alpha(t)
+```
+which yields the standard VP SDE
 ```
 dx = -0.5 * beta(t) * x * dt + sqrt(beta(t)) * dW_t
 ```
 where the score network learns `s_theta(x, t) ~ grad_x log p_t(x)` via denoising score
-matching. The probability-flow ODE is
+matching. The probability-flow ODE used in code is
 ```
 dx/dt = -0.5 * beta(t) * x - beta(t) * s_theta(x, t)
 ```
 and is integrated with predictor-corrector schemes or higher-order samplers.
+The default Karras schedule returns `alpha(t)` directly; the solver now uses the
+analytical derivative of this schedule when available to avoid finite-difference error.
 
 ### Schrodinger Bridge Updates
 To stabilise long trajectories the sampler inserts an entropic optimal transport solve

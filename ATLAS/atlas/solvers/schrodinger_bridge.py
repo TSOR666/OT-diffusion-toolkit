@@ -4,6 +4,7 @@ import math
 import time
 from collections import OrderedDict
 from contextlib import nullcontext
+from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -26,6 +27,11 @@ from ..kernels import (
 )
 from ..utils.noise_prediction import NoisePredictionAdapter
 from ..utils.random import set_seed
+
+try:
+    from ..schedules import karras_noise_schedule
+except Exception:  # pragma: no cover - soft import to avoid circular issues in docs builds
+    karras_noise_schedule = None
 
 
 _VALID_KERNEL_TYPES = {"gaussian", "laplacian", "cauchy"}
@@ -65,6 +71,7 @@ class SchroedingerBridgeSolver:
         self._score_model: nn.Module
         self.noise_predictor: NoisePredictionAdapter
         self.score_model = score_model
+        self._karras_params = self._extract_karras_params(noise_schedule)
         
         # Use provided configs or set defaults
         if kernel_config is None:
@@ -190,11 +197,90 @@ class SchroedingerBridgeSolver:
         one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=info.tiny)
         return torch.sqrt(one_minus_alpha / alpha_clamped)
 
-    def _compute_sde_coefficients(
+    def _extract_karras_params(
+        self, schedule: Callable
+    ) -> Optional[Tuple[float, float, float]]:
+        """Infer parameters for karras_noise_schedule even when wrapped in functools.partial."""
+        if karras_noise_schedule is None:
+            return None
+
+        func = schedule.func if isinstance(schedule, partial) else schedule
+        if func is not karras_noise_schedule:
+            return None
+
+        defaults = karras_noise_schedule.__defaults__ or (0.002, 80.0, 7.0)
+        kw = schedule.keywords if isinstance(schedule, partial) and schedule.keywords else {}
+
+        try:
+            sigma_min = float(kw.get("sigma_min", defaults[0]))
+            sigma_max = float(kw.get("sigma_max", defaults[1]))
+            rho = float(kw.get("rho", defaults[2]))
+        except Exception:
+            return None
+
+        return sigma_min, sigma_max, rho
+
+    def _karras_alpha_prime(
         self, t: float, reference: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
-        alpha_t = self._schedule_to_tensor(t, reference)
+    ) -> Optional[torch.Tensor]:
+        """Analytical derivative d(alpha)/dt for the Karras noise schedule."""
+        if self._karras_params is None:
+            return None
+
+        sigma_min, sigma_max, rho = self._karras_params
+        dtype = reference.dtype
+        device = reference.device
+
+        if isinstance(t, torch.Tensor):
+            t_tensor = t.detach()
+            if not torch.is_floating_point(t_tensor):
+                t_tensor = t_tensor.to(dtype=torch.float32)
+            t_tensor = t_tensor.to(device=device, dtype=dtype)
+            if t_tensor.ndim > 0:
+                t_tensor = t_tensor.reshape(-1)[0]
+        else:
+            t_tensor = torch.tensor(float(t), device=device, dtype=dtype)
+
+        t_tensor = torch.clamp(t_tensor, 0.0, 1.0)
+
+        sigma_min_root = torch.tensor(sigma_min, device=device, dtype=dtype) ** (1.0 / rho)
+        sigma_max_root = torch.tensor(sigma_max, device=device, dtype=dtype) ** (1.0 / rho)
+        sigma_path = sigma_max_root + t_tensor * (sigma_min_root - sigma_max_root)
+
+        # sigma(t) = path(t) ** rho; d sigma / dt = rho * path(t) ** (rho-1) * path'(t)
+        sigma_t = sigma_path ** rho
+        sigma_prime = rho * (sigma_path ** (rho - 1.0)) * (sigma_min_root - sigma_max_root)
+
+        denom = 1.0 + sigma_t ** 2
+        alpha_prime = -2.0 * sigma_t * sigma_prime / (denom ** 2)
+        return alpha_prime
+
+    def _analytic_alpha_prime(
+        self, t: float, reference: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """
+        Attempt to compute d(alpha)/dt analytically.
+        
+        Priority:
+        1) Custom derivative attached to the schedule (``alpha_derivative`` or ``derivative``)
+        2) Built-in Karras schedule derivative
+        Fallback: numerical finite differences handled elsewhere.
+        """
+        derivative_fn = getattr(self.noise_schedule, "alpha_derivative", None) or getattr(
+            self.noise_schedule, "derivative", None
+        )
+        if derivative_fn is not None:
+            try:
+                return self._schedule_value_to_tensor(derivative_fn(t), reference)
+            except Exception:
+                self.logger.debug("Failed to use custom schedule derivative; will fall back.", exc_info=True)
+
+        return self._karras_alpha_prime(t, reference)
+
+    def _finite_difference_alpha_prime(
+        self, t: float, reference: torch.Tensor, alpha_t: torch.Tensor
+    ) -> torch.Tensor:
+        """Fallback numerical derivative used when no analytical formula is available."""
         delta = 1e-3
         t_upper = min(1.0, t + delta)
         t_lower = max(0.0, t - delta)
@@ -204,19 +290,23 @@ class SchroedingerBridgeSolver:
             t_upper = min(1.0, t + delta)
             t_lower = max(0.0, t - delta)
             if t_upper == t_lower:
-                zero = torch.zeros_like(alpha_t)
-                return zero, zero
+                return torch.zeros_like(alpha_t)
 
-        alpha_upper = self._schedule_value_to_tensor(
-            self.noise_schedule(t_upper), reference
-        )
-        alpha_lower = self._schedule_value_to_tensor(
-            self.noise_schedule(t_lower), reference
-        )
+        alpha_upper = self._schedule_value_to_tensor(self.noise_schedule(t_upper), reference)
+        alpha_lower = self._schedule_value_to_tensor(self.noise_schedule(t_lower), reference)
 
         denom = max(t_upper - t_lower, 1e-6)
         denom_tensor = alpha_t.new_tensor(denom)
-        alpha_prime = (alpha_upper - alpha_lower) / denom_tensor
+        return (alpha_upper - alpha_lower) / denom_tensor
+
+    def _compute_sde_coefficients(
+        self, t: float, reference: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
+        alpha_t = self._schedule_to_tensor(t, reference)
+        alpha_prime = self._analytic_alpha_prime(t, reference)
+        if alpha_prime is None:
+            alpha_prime = self._finite_difference_alpha_prime(t, reference, alpha_t)
 
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
