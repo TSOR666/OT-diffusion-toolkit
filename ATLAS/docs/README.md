@@ -189,9 +189,12 @@ A: Depends on your hardware and target resolution:
 
 **Q: What datasets can I use?**
 A: ATLAS supports:
-- **Built-in**: MNIST, CIFAR-10, CelebA, FFHQ, ImageNet, LSUN
+- **Auto-download**: CIFAR-10, MNIST (via torchvision)
+- **Manual download**: CelebA, CelebA-HQ, FFHQ, ImageNet, LSUN
 - **Custom**: Any folder of images (ImageFolder format)
 - Minimum 1000+ diverse images recommended
+
+For download links, see [Getting Started § Dataset Downloads](GETTING_STARTED.md#dataset-downloads)
 
 ### Performance & Optimization
 

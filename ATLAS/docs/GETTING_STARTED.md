@@ -154,14 +154,21 @@ Unfortunately, ATLAS doesn't come with pre-trained checkpoints. You have these c
 For learning purposes, train a tiny model on a small dataset:
 
 ```bash
-# This will train a small model for testing (takes 2-4 hours on GPU)
-python -m atlas.examples.basic_training \
-    --dataset mnist \
-    --epochs 10 \
-    --resolution 64 \
-    --batch-size 32 \
-    --checkpoint-dir ./my_first_model
+# CIFAR-10: Small 32×32 images, downloads automatically (takes 1-2 hours on GPU)
+python -m atlas.examples.cifar10_training \
+    --data-root ./data/cifar10 \
+    --checkpoints ./my_first_model \
+    --device cuda
+
+# ImageNet 64×64: Larger dataset, faster training than high-res (takes 2-4 hours on GPU)
+python -m atlas.examples.imagenet64_training \
+    --data-root /path/to/imagenet64 \
+    --checkpoints ./my_first_model \
+    --device cuda \
+    --max-steps 10000
 ```
+
+**Note:** CIFAR-10 downloads automatically. ImageNet requires manual download (see [Dataset Downloads](#dataset-downloads) below).
 
 ### Option C: Train a Full Model
 
@@ -263,10 +270,11 @@ images = sampler.generate(
 ### Q: What datasets can I use?
 
 **A:** ATLAS supports:
-- **Built-in**: MNIST, CIFAR-10, CelebA, FFHQ, ImageNet, LSUN
+- **Auto-download**: CIFAR-10, MNIST (via torchvision)
+- **Manual download**: CelebA, CelebA-HQ, FFHQ, ImageNet, LSUN
 - **Custom**: Any folder of images organized by class
 
-See [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md#preparing-datasets) for details.
+See [Dataset Downloads](#dataset-downloads) section below for links.
 
 ### Q: My GPU runs out of memory, what do I do?
 
@@ -330,6 +338,82 @@ ls path/to/checkpoint.pt
 1. Model isn't trained enough (train more epochs)
 2. Wrong checkpoint loaded
 3. Dataset was too small/varied
+
+## Dataset Downloads
+
+### Datasets with Auto-Download
+
+These datasets download automatically when you run training:
+
+- **CIFAR-10** (32×32, 60K images)
+  - Command: `python -m atlas.examples.cifar10_training --data-root ./data/cifar10`
+  - Downloads via torchvision automatically
+
+- **MNIST** (28×28, 70K images)
+  - Downloads via torchvision automatically
+
+### Datasets Requiring Manual Download
+
+#### CelebA (178×218, 202K images)
+- **Official**: [CelebA Dataset](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html)
+- **Alternative**: Kaggle, Academic Torrents
+- Use: `python -m atlas.examples.celeba_training --data-root /path/to/celeba`
+
+#### CelebA-HQ (1024×1024, 30K images)
+- **GitHub**: [CelebA-HQ Dataset](https://github.com/tkarras/progressive_growing_of_gans)
+- **Drive**: Available via Google Drive links
+- Use: `python -m atlas.examples.celeba1024_training --data-root /path/to/celeba_hq`
+
+#### FFHQ (1024×1024, 70K images)
+- **Official**: [Flickr-Faces-HQ Dataset](https://github.com/NVlabs/ffhq-dataset)
+- **Kaggle**: [FFHQ on Kaggle](https://www.kaggle.com/datasets/arnaud58/flickrfaceshq-dataset-ffhq)
+- Use: `python -m atlas.examples.ffhq128_training --data-root /path/to/ffhq`
+
+#### ImageNet (Varies, 1.2M+ images)
+- **Official**: [ImageNet](https://image-net.org/download.php) (requires registration)
+- **Downsampled versions**:
+  - ImageNet 64×64: [Academic Torrents](https://academictorrents.com/)
+  - ImageNet 32×32: [Image-Net.org](https://image-net.org/download-images.php)
+- Use: `python -m atlas.examples.imagenet64_training --data-root /path/to/imagenet64`
+
+#### LSUN (Varies by category, millions of images)
+- **Official**: [LSUN Dataset](https://www.yf.io/p/lsun)
+- **Categories**: Bedroom, Church, Tower, etc.
+- **Download script**: Available in LSUN GitHub repo
+- Use: `python -m atlas.examples.lsun256_training --data-root /path/to/lsun/bedroom`
+
+### Custom Datasets
+
+To use your own images:
+
+1. **Organize as ImageFolder**:
+   ```
+   my_dataset/
+   ├── class1/
+   │   ├── image1.jpg
+   │   ├── image2.jpg
+   │   └── ...
+   ├── class2/
+   │   ├── image1.jpg
+   │   └── ...
+   └── ...
+   ```
+
+2. **Or single class** (unconditional generation):
+   ```
+   my_dataset/
+   └── images/
+       ├── image1.jpg
+       ├── image2.jpg
+       └── ...
+   ```
+
+3. **Minimum requirements**:
+   - 1000+ images recommended
+   - Consistent aspect ratio preferred
+   - Supported formats: JPG, PNG, BMP
+
+4. **Use with ATLAS**: Point `--data-root` to your dataset folder
 
 ## Next Steps
 

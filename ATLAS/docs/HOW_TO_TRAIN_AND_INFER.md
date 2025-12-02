@@ -105,27 +105,43 @@ ATLAS ships ready-to-train presets. The `atlas.examples.training_pipeline.run_tr
 ### 5.1 Minimal Training Command (All Platforms)
 
 ```bash
+# CIFAR-10: Auto-downloads, fastest for testing
+python -m atlas.examples.cifar10_training \
+  --data-root ./data/cifar10 \
+  --checkpoints ./checkpoints \
+  --device cpu
+
+# LSUN: Requires manual download
 python -m atlas.examples.lsun256_training \
-  --data-root /path/to/lsun \
+  --data-root /path/to/lsun/bedroom \
   --checkpoints ./checkpoints \
   --device cpu
 ```
 
-FFHQ and ImageNet follow the exact same CLI surface—only the preset name
-changes. Both expect ImageFolder-style directories with class subfolders
-inside the split you point to:
+Other datasets follow the exact same CLI surface—only the preset name changes:
 
 ```bash
+# FFHQ 128×128
 python -m atlas.examples.ffhq128_training \
   --data-root /datasets/ffhq \
   --checkpoints ./checkpoints/ffhq128
 
+# ImageNet 64×64
 python -m atlas.examples.imagenet64_training \
   --data-root /datasets/imagenet64 \
   --checkpoints ./checkpoints/imagenet64
+
+# CelebA-HQ 1024×1024
+python -m atlas.examples.celeba1024_training \
+  --data-root /datasets/celeba_hq \
+  --checkpoints ./checkpoints/celeba
 ```
-- Replace `--device cpu` with `--device cuda:0` (NVIDIA), `--device mps` (Apple Silicon), or omit it to let ATLAS auto-detect.
-- The LSUN preset expects the dataset at `/path/to/lsun`; see dataset documentation for download instructions.
+
+**Notes:**
+- Replace `--device cpu` with `--device cuda:0` (NVIDIA), `--device mps` (Apple Silicon), or omit it to let ATLAS auto-detect
+- **CIFAR-10** downloads automatically via torchvision
+- **Other datasets** require manual download - see [Dataset Downloads](GETTING_STARTED.md#dataset-downloads) for links
+- Datasets should be in ImageFolder format (folder per class)
 
 ### 5.2 Adjusting for CPU-Only or Low-Memory Systems
 
@@ -152,14 +168,19 @@ This warning is benign—training continues normally. To silence it or skip comp
 
 ### 5.5 Estimated Training Times (Default Presets)
 
-| Dataset (Preset) | Default Epochs | RTX 3090 (24GB) | RTX 4090 (24GB) | RTX 5090 (24GB) | A100 80GB |
-| --- | --- | --- | --- | --- | --- |
-| ImageNet 64 (`experiment:imagenet64`) | 600 | ~2.1 days | ~1.5 days | ~1.2 days | ~0.9 days |
-| FFHQ 128 (`experiment:ffhq128`) | 800 | ~3.0 days | ~2.1 days | ~1.7 days | ~1.3 days |
-| LSUN Bedroom 256 (`experiment:lsun256`) | 400 | ~4.5 days | ~3.1 days | ~2.6 days | ~2.0 days |
-| CelebA-HQ 1024 (`experiment:celeba1024`) | 600 | ~8.2 days | ~5.6 days | ~4.3 days | ~3.1 days |
+| Dataset (Preset) | Resolution | Default Epochs | RTX 3090 (24GB) | RTX 4090 (24GB) | RTX 5090 (24GB) | A100 80GB |
+| --- | --- | --- | --- | --- | --- | --- |
+| CIFAR-10 (`experiment:cifar10`) | 32×32 | 400 | ~1.2 days | ~0.8 days | ~0.6 days | ~0.5 days |
+| ImageNet 64 (`experiment:imagenet64`) | 64×64 | 600 | ~2.1 days | ~1.5 days | ~1.2 days | ~0.9 days |
+| FFHQ 128 (`experiment:ffhq128`) | 128×128 | 800 | ~3.0 days | ~2.1 days | ~1.7 days | ~1.3 days |
+| LSUN Bedroom 256 (`experiment:lsun256`) | 256×256 | 400 | ~4.5 days | ~3.1 days | ~2.6 days | ~2.0 days |
+| CelebA-HQ 1024 (`experiment:celeba1024`) | 1024×1024 | 600 | ~8.2 days | ~5.6 days | ~4.3 days | ~3.1 days |
 
-_Assumes mixed-precision training, default gradient accumulation, and a single GPU running PyTorch 2.1 with cuDNN 9.1. Expect ±15% variance from storage throughput, dataset augmentation cost, and driver versions._
+**Quick training for testing:**
+- CIFAR-10 with `--max-steps 10000`: ~1-2 hours on RTX 4090
+- ImageNet 64 with `--max-steps 10000`: ~2-3 hours on RTX 4090
+
+_Assumes mixed-precision training, default gradient accumulation, and a single GPU running PyTorch 2.1+ with cuDNN 9.1+. Expect ±15% variance from storage throughput, dataset augmentation cost, and driver versions._
 
 ---
 

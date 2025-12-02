@@ -174,4 +174,53 @@ These improvements are based on common beginner pain points. If you find issues 
 
 ---
 
+## Latest Updates (2025-12-02)
+
+### CIFAR-10 Integration
+
+Added CIFAR-10 to all training documentation:
+- **Auto-download capability**: CIFAR-10 is now the recommended dataset for beginners
+- **Updated all training examples** to include CIFAR-10 as the fastest option
+- **Training time estimates** added for CIFAR-10 (1-2 hours for quick tests)
+
+### Dataset Download Links
+
+Added comprehensive dataset download section to [GETTING_STARTED.md](GETTING_STARTED.md#dataset-downloads):
+
+**Auto-download datasets:**
+- CIFAR-10 (32×32, 60K images)
+- MNIST (28×28, 70K images)
+
+**Manual download datasets with links:**
+- CelebA (178×218, 202K images) - Official site, Kaggle
+- CelebA-HQ (1024×1024, 30K images) - GitHub, Google Drive
+- FFHQ (1024×1024, 70K images) - Official GitHub, Kaggle
+- ImageNet (Various, 1.2M+ images) - Official site, Academic Torrents
+- LSUN (Various, millions) - Official site with download scripts
+
+**Custom dataset guidance:**
+- ImageFolder format structure
+- Single-class format for unconditional generation
+- Minimum requirements (1000+ images)
+- Supported formats (JPG, PNG, BMP)
+
+### Updated Training Examples
+
+All training documentation now lists available examples:
+1. `cifar10_training.py` - **NEW**, fastest for beginners
+2. `imagenet64_training.py`
+3. `ffhq128_training.py`
+4. `lsun256_training.py`
+5. `celeba1024_training.py`
+
+### Cross-References
+
+All documentation now properly cross-references:
+- Training guides → Dataset downloads section
+- Quick start → Getting started for dataset info
+- FAQ → Dataset downloads
+- README → Dataset downloads
+
+---
+
 *Documentation improvements completed: 2025-12-02*

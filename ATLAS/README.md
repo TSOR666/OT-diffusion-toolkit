@@ -182,11 +182,14 @@ See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for detailed requirements and c
    Or use the CLI shims that mirror the preset names:
 
    ```bash
+   python -m atlas.examples.cifar10_training --data-root ./data/cifar10  # Auto-downloads
    python -m atlas.examples.imagenet64_training --data-root /datasets/imagenet64
    python -m atlas.examples.ffhq128_training --data-root /datasets/ffhq
-   python -m atlas.examples.lsun256_training --data-root /datasets/lsun
+   python -m atlas.examples.lsun256_training --data-root /datasets/lsun/bedroom
    python -m atlas.examples.celeba1024_training --data-root /datasets/celeba_hq
    ```
+
+   **Dataset downloads:** CIFAR-10 auto-downloads. Other datasets require manual download - see [Dataset Downloads](docs/GETTING_STARTED.md#dataset-downloads).
 
 **Tips**
 - Enable gradient checkpointing for deep UNets (`model_cfg.use_checkpointing=True`).

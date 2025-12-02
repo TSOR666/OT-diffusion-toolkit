@@ -191,6 +191,14 @@ samples = sampler.sample(
 Train a small model for testing/learning:
 
 ```bash
+# CIFAR-10 (fastest, auto-downloads)
+python -m atlas.examples.cifar10_training \
+    --data-root ./data/cifar10 \
+    --checkpoints ./my_first_model \
+    --device cuda \
+    --max-steps 10000
+
+# ImageNet 64×64 (requires manual download)
 python -m atlas.examples.imagenet64_training \
     --data-root /path/to/imagenet64 \
     --checkpoints ./my_first_model \
@@ -199,8 +207,9 @@ python -m atlas.examples.imagenet64_training \
 ```
 
 **What this does:**
-- Downloads/uses ImageNet 64x64 dataset
-- Trains for 10K steps (~2 hours on RTX 4090)
+- CIFAR-10: Auto-downloads 32×32 images, fastest for testing
+- ImageNet: Uses 64×64 images, requires [manual download](GETTING_STARTED.md#dataset-downloads)
+- Trains for 10K steps (~1-2 hours on RTX 4090)
 - Saves checkpoints to `./my_first_model/`
 - You can start seeing results after ~5K steps
 
@@ -209,21 +218,23 @@ python -m atlas.examples.imagenet64_training \
 For real production models (days to weeks):
 
 ```bash
-# CelebA-HQ 1024x1024 (takes ~1 week on RTX 4090)
+# CelebA-HQ 1024×1024 (takes ~1 week on RTX 4090)
 python -m atlas.examples.celeba1024_training \
     --data-root /datasets/celeba_hq \
     --checkpoints ./checkpoints/celeba
 
-# LSUN Bedroom 256x256 (takes ~3-4 days on RTX 4090)
+# LSUN Bedroom 256×256 (takes ~3-4 days on RTX 4090)
 python -m atlas.examples.lsun256_training \
-    --data-root /datasets/lsun \
+    --data-root /datasets/lsun/bedroom \
     --checkpoints ./checkpoints/lsun
 ```
 
 **Training tips:**
-- Start with small resolutions (64x64 or 128x128)
+- Start with small resolutions (CIFAR-10 32×32 or ImageNet 64×64)
 - Monitor training: checkpoints saved every 5K steps
 - Training times in [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md#55-estimated-training-times-default-presets)
+
+**Dataset downloads:** See [Getting Started § Dataset Downloads](GETTING_STARTED.md#dataset-downloads) for all dataset links.
 
 **Custom datasets:** See [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md#5-training-atlas-presets) for using your own image folders.
 
