@@ -17,6 +17,7 @@ from atlas.utils import create_dataloader
         ("experiment:celeba1024", 1024, 12),
         ("experiment:ffhq128", 128, 64),
         ("experiment:imagenet64", 64, 256),
+        ("experiment:cifar10", 32, 256),
     ],
 )
 def test_experiment_presets_structure(name: str, expected_resolution: int, batch_size: int) -> None:
