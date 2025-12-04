@@ -276,6 +276,10 @@ class KernelModule(nn.Module):
         if fisher.dtype != original_dtype:
             fisher = fisher.to(original_dtype)
 
+        # CRITICAL FIX: Ensure Fisher information remains strictly positive
+        # after dtype conversion and clamping (required for transport stability)
+        fisher = torch.clamp(fisher, min=1e-6)
+
         self.fisher_cache.put(cache_key, fisher)
 
         return fisher

@@ -616,6 +616,17 @@ class FastSBOTSolver(nn.Module):
 
         # Use cached overlap mask instead of recomputing
         overlap_count = self._get_overlap_mask(H_pad, W_pad, patch_size, stride, x.device)
+
+        # CRITICAL FIX: Validate patch overlap to prevent division issues
+        min_overlap = overlap_count.min().item()
+        if min_overlap <= 0:
+            raise ValueError(
+                f"Patch overlap is zero (min={min_overlap:.2f}). "
+                f"This indicates patches don't overlap properly. "
+                f"Increase patch_overlap_ratio (current: {self.config.patch_overlap_ratio}) "
+                f"or adjust patch_size (current: {patch_size}) and stride (current: {stride})."
+            )
+
         # Shape: (1, 1, H_pad, W_pad), broadcast over B
         # Convert to FP32 for safe division
         orig_dtype = scores_padded.dtype

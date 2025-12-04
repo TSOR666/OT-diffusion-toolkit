@@ -38,66 +38,11 @@ try:
     from packaging.version import Version
 except Exception:
     # Conservative fallback if packaging isn't installed
-    # FIX: Parse version string to enable proper comparisons
     class Version:
-        """Minimal version comparison (fallback when packaging unavailable)"""
         def __init__(self, version_str):
             self.version = version_str
-<<<<<<< Updated upstream
-            # Parse major.minor.patch from version string
-            try:
-                parts = version_str.split('.')
-                self.major = int(parts[0]) if len(parts) > 0 else 0
-                self.minor = int(parts[1]) if len(parts) > 1 else 0
-                self.patch = int(parts[2].split('+')[0].split('a')[0].split('b')[0].split('rc')[0]) if len(parts) > 2 else 0
-            except (ValueError, AttributeError):
-                self.major = self.minor = self.patch = 0
-
         def __ge__(self, other):
-            # Proper version comparison instead of always returning False
-            if not isinstance(other, Version):
-                return False
-            return (self.major, self.minor, self.patch) >= (other.major, other.minor, other.patch)
-=======
-            try:
-                # Parse version string (handles formats like "2.1.0", "2.1.0rc1", etc.)
-                parts = version_str.split('.')
-                self.major = int(parts[0]) if len(parts) > 0 else 0
-                self.minor = int(parts[1]) if len(parts) > 1 else 0
-                # Remove suffixes (rc, alpha, beta, etc.)
-                patch_str = parts[2] if len(parts) > 2 else "0"
-                self.patch = int(patch_str.split('+')[0].split('a')[0].split('b')[0].split('rc')[0])
-            except (ValueError, AttributeError, IndexError):
-                self.major = self.minor = self.patch = 0
-
-        def _cmp_tuple(self):
-            return (self.major, self.minor, self.patch)
-
-        def __ge__(self, other):
-            if not isinstance(other, Version):
-                return NotImplemented
-            return self._cmp_tuple() >= other._cmp_tuple()
-
-        def __gt__(self, other):
-            if not isinstance(other, Version):
-                return NotImplemented
-            return self._cmp_tuple() > other._cmp_tuple()
-
-        def __le__(self, other):
-            if not isinstance(other, Version):
-                return NotImplemented
-            return self._cmp_tuple() <= other._cmp_tuple()
-
-        def __lt__(self, other):
-            if not isinstance(other, Version):
-                return NotImplemented
-            return self._cmp_tuple() < other._cmp_tuple()
-
-        def __eq__(self, other):
-            if not isinstance(other, Version):
-                return NotImplemented
-            return self._cmp_tuple() == other._cmp_tuple()
->>>>>>> Stashed changes
+            return False  # Conservative: assume older version
 
 # Try to import numpy (optional for stats)
 try:
@@ -142,18 +87,16 @@ except ImportError:
 
 # PyTorch cross-version RNG compatibility helper
 def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
-    """Generate random tensor like x with optional generator (cross-version compatible)
-
-    WARNING: If generator device mismatches x.device, falls back to non-deterministic sampling
-    """
+    """Generate random tensor like x with optional generator (cross-version compatible)"""
     if generator is not None:
         try:
             return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
-        except RuntimeError as e:
-            # Device mismatch - cannot maintain determinism
+        except Exception as e:
+            # CRITICAL FIX: Log warning when RNG fallback breaks determinism
             logger.warning(
-                f"Generator device mismatch with tensor device {x.device}. "
-                f"Falling back to non-deterministic sampling. Error: {e}"
+                f"Generator-device mismatch detected: {e}. "
+                f"Falling back to non-deterministic random generation. "
+                f"This will break reproducibility. Ensure generator device matches tensor device."
             )
             return torch.randn_like(x)
     else:
@@ -416,13 +359,10 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
                 if _TORCH_COMPILE_ACCEPTS_DYNAMIC:
                     compile_kwargs["dynamic"] = dynamic
 
-                # FIX: Initialize is_eager BEFORE try block to ensure it's defined in finally
-                is_eager = True  # Assume eager mode by default
-
                 # Wrap compilation in try/finally to guarantee event release
                 try:
                     compiled_local = torch.compile(func, **compile_kwargs)
-                    is_eager = False  # Only set to False if compilation succeeds
+                    is_eager = False
                 except Exception as e:
                     logger.warning(f"torch.compile failed, falling back to eager mode: {e}")
                     compiled_local = func
@@ -457,17 +397,12 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
             else:
                 # Add timeout to prevent indefinite blocking
                 if not evt.wait(timeout=compile_timeout):
-                    # Warn once per signature about timeout (thread-safe check)
+                    # Warn once per signature about timeout
                     global _TIMEOUT_WARNED
-                    should_warn = False
-                    with inflight_lock:  # Protect _TIMEOUT_WARNED access
-                        if sig_core not in _TIMEOUT_WARNED:
-                            _TIMEOUT_WARNED.add(sig_core)
-                            should_warn = True
-
-                    if should_warn:
+                    if sig_core not in _TIMEOUT_WARNED:
                         logger.warning(f"Compilation timeout after {compile_timeout}s for signature {base_func_key}, "
                                        f"using eager mode. This warning will only appear once per signature.")
+                        _TIMEOUT_WARNED.add(sig_core)
 
                     compiled_fn = func
 
@@ -475,14 +410,13 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
                     with cache_lock:
                         cache[shape_sig_eager] = (func, 0)
 
-                    # Atomically remove and signal event
+                    # Ensure waiters don't hang on this key
                     with inflight_lock:
-                        evt_to_signal = inflight.pop(sig_core, None)
-                        if evt_to_signal is not None:
-                            try:
-                                evt_to_signal.set()
-                            except Exception:
-                                pass
+                        inflight.pop(sig_core, None)
+                    try:
+                        evt.set()
+                    except Exception:
+                        pass
                 else:
                     with cache_lock:
                         entry = cache.get(shape_sig_compiled) or cache.get(shape_sig_eager)
@@ -503,14 +437,9 @@ def fastsbot_next_power_of_two(n):
     return 1 << (n - 1).bit_length()
 
 def get_optimal_block_size(n_elements, device_capability=None):
-    """Hardware-aware block size selection with cached device properties"""
+    """Hardware-aware block size selection"""
     if device_capability is None and torch.cuda.is_available():
-        device_idx = torch.cuda.current_device()
-
-        # Use cache to avoid repeated device queries
-        if device_idx not in _CACHED_DEVICE_PROPERTIES:
-            _CACHED_DEVICE_PROPERTIES[device_idx] = torch.cuda.get_device_capability(device_idx)
-        device_capability = _CACHED_DEVICE_PROPERTIES[device_idx]
+        device_capability = torch.cuda.get_device_capability()
 
     if device_capability and device_capability[0] >= 9:
         max_block_size = 1024
@@ -527,20 +456,11 @@ if TRITON_AVAILABLE:
     @triton.jit
     def fused_drift_transport_kernel_fixed(
         x_ptr, drift_ptr, out_ptr,
-        scale: tl.float32,  # FIX: Pass as scalar value, not pointer
+        scale_ptr,  # Pointer to scalar value (1-elem tensor)
         N: tl.constexpr,
         BLOCK_SIZE: tl.constexpr
     ):
-        """Proper bounds checking prevents race conditions
-
-        CRITICAL FIX: scale is now a scalar value, not a pointer.
-        This prevents segfaults when passing Python floats or scalars.
-
-        MATHEMATICAL NOTE: Sigmoid gating logic reconsidered.
-        The sigmoid of |drift| always outputs [0.5, 1.0] after clamping,
-        meaning we always apply at least 50% of the drift.
-        This is intentional for stable transport - see documentation.
-        """
+        """Proper bounds checking prevents race conditions"""
         # Local helpers to avoid monkey-patching
         wmin = lambda a, b: tl.where(a < b, a, b)
         wmax = lambda a, b: tl.where(a > b, a, b)
@@ -555,13 +475,11 @@ if TRITON_AVAILABLE:
         x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
         drift = tl.load(drift_ptr + offsets, mask=mask, other=0.0)
 
-        # FIX: Use scale directly as a value (no tl.load needed)
+        # Load scalar from 1-elem tensor
+        scale = tl.load(scale_ptr).to(tl.float32)  # Explicitly cast to float32
         scale_clamped = wmin(wmax(scale, 0.1), 10.0)
         drift_abs = wabs(drift)
-
-        # Sigmoid gating: weight in [0.5, 0.95] after clamping
-        # This provides adaptive transport based on drift magnitude
-        weight = 1.0 / (1.0 + tl.exp(-drift_abs * scale_clamped))
+        weight = 1 / (1 + tl.exp(-drift_abs * scale_clamped))  # sigmoid
         weight = wmin(wmax(weight, 0.05), 0.95)
 
         out = x + weight * drift
@@ -571,34 +489,14 @@ if TRITON_AVAILABLE:
     @triton.jit
     def fisher_diagonal_kernel_fixed(
         score_ptr, out_ptr,
-<<<<<<< Updated upstream
-        alpha_value: tl.float32,  # runtime scalar (alpha_bar value)
+        alpha_value,  # runtime scalar, not constexpr (we pass )
         N: tl.constexpr,
         BLOCK_SIZE: tl.constexpr
     ):
-        """Proper masking for Fisher diagonal computation
+        """Proper masking for Fisher diagonal computation"""
+        # Local helper
+        wabs = lambda x: tl.where(x >= 0, x, -x)
 
-        MATHEMATICAL FIX: Fisher information diagonal is computed as score^2, not |score|.
-        - Empirical Fisher: E[∇log p · ∇log p^T] ≈ (∇log p)^2 for diagonal
-        - Using L1 norm (|score|) changes gradient scaling and is non-standard
-        - L2 norm (score^2) matches standard Fisher preconditioning
-
-        Adaptive epsilon:
-        - High noise (alpha→0): score is unstable, need larger epsilon
-        - Low noise (alpha→1): score is stable, smaller epsilon suffices
-        - Formula: eps = 1e-4 + 1e-3 * (1 - alpha) implements this correctly
-=======
-        alpha_value,  # runtime scalar, not constexpr (we pass α_bar)
-        N: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr
-    ):
-        """Fisher diagonal computation with proper score^2 (not |score|)
-
-        MATHEMATICAL FIX: Fisher information diagonal is E[∇log p · ∇log p^T] ≈ (∇log p)^2
-        - Using score^2 (element-wise squaring) is correct for empirical Fisher diagonal
-        - Using |score| was non-standard and gave incorrect gradient scaling
->>>>>>> Stashed changes
-        """
         pid = tl.program_id(0)
         block_start = pid * BLOCK_SIZE
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -606,23 +504,8 @@ if TRITON_AVAILABLE:
         mask = offsets < N
 
         score = tl.load(score_ptr + offsets, mask=mask, other=0.0)
-<<<<<<< Updated upstream
-
-        # FIX: Use score^2 instead of |score| for proper Fisher Information
-        # This matches the mathematical definition: F_ii = E[(∂log p/∂θ_i)^2]
-        fisher_diag = score * score
-
-        # Adaptive regularization based on noise level (alpha_bar)
-        adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_value)
-        fisher = fisher_diag + adaptive_eps
-=======
-        # Adaptive regularization: ε = ε_base + ε_scale * (1 - α_bar)
-        # - ε_base = 1e-4: minimum stability for well-conditioned regions
-        # - ε_scale = 1e-3: empirically tuned for typical score ranges
-        # - (1 - α_bar): noise level proxy (high noise → larger ε needed)
-        adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_value)
-        fisher = score * score + adaptive_eps  # FIXED: Use score^2, not |score|
->>>>>>> Stashed changes
+        adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_value)  # runtime computation based on 
+        fisher = wabs(score) + adaptive_eps
 
         tl.store(out_ptr + offsets, fisher, mask=mask)
 
