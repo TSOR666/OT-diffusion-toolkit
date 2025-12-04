@@ -509,16 +509,23 @@ class SchroedingerBridgeSolver:
                 linear_op, b, x0=f, max_iter=max_iter, tol=self.error_tolerance
             )
 
+            # Verify solution shape matches expected batch size
+            if f.shape != (batch_size,):
+                raise RuntimeError(
+                    f"Conjugate gradient solution shape mismatch: expected ({batch_size},), got {f.shape}"
+                )
+
             # Compute g from f with improved numerical stability
             Kf = kernel_op.apply(x, f)
-        # Use clamping to prevent numerical instability
-        if (Kf < 1e-10).any() or (Kf > 1e8).any():
-            self.logger.warning(
-                "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
-                float(Kf.min()),
-                float(Kf.max()),
-            )
-        g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
+
+            # Use clamping to prevent numerical instability
+            if (Kf < 1e-10).any() or (Kf > 1e8).any():
+                self.logger.warning(
+                    "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
+                    float(Kf.min()),
+                    float(Kf.max()),
+                )
+            g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
         else:
             # Traditional iterative approach
             # Initialize potentials
@@ -856,8 +863,18 @@ class SchroedingerBridgeSolver:
             else:
                 alpha_value = float(alpha_t)
             alpha_value = max(0.0, min(1.0, alpha_value))
-            scale_factor = math.sqrt(max(1e-3, 1.0 - alpha_value))
-            eps = max(self.epsilon / 100.0, self.epsilon * scale_factor)
+
+            # Handle edge case when alpha approaches 1.0
+            if alpha_value > 0.99:
+                self.logger.debug(
+                    "Alpha value %.4f very close to 1.0 at t=%.4f, using minimum epsilon",
+                    alpha_value, t_curr
+                )
+                # Use minimum epsilon to prevent numerical instability
+                eps = max(self.epsilon / 100.0, 1e-6)
+            else:
+                scale_factor = math.sqrt(max(1e-3, 1.0 - alpha_value))
+                eps = max(self.epsilon / 100.0, self.epsilon * scale_factor)
         
         # Select optimal kernel operator
         kernel_op = self._select_optimal_kernel_operator(x, eps)
