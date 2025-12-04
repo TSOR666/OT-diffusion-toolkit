@@ -166,8 +166,8 @@ class RFFKernelOperator(KernelOperator):
         target_shape = v.shape
         v_flat = v.reshape(v.shape[0], -1).to(features.dtype)
 
-        transformed = features.T @ v_flat
-        result = features @ transformed
+        transformed = features.T @ v_flat  # (f, n) @ (n, k) -> (f, k)
+        result = features @ transformed  # (n, f) @ (f, k) -> (n, k)
         return result.reshape(target_shape)
 
     def apply_transpose(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -186,4 +186,4 @@ class RFFKernelOperator(KernelOperator):
         """Compute approximate kernel matrix via shared feature space."""
         phi_x = self.compute_features(x)
         phi_y = self.compute_features(y)
-        return phi_x @ phi_y.T
+        return phi_x @ phi_y.T  # (n, f) @ (f, m) -> (n, m)

@@ -135,9 +135,9 @@ class NystromKernelOperator(KernelOperator):
         K_xl = self._compute_kernel(x, self.landmarks)
         if K_xl.dtype != features.dtype:
             features = features.to(K_xl.dtype)
-        rhs = K_xl.T @ features
+        rhs = K_xl.T @ features  # (m, n) @ (n, k) -> (m, k)
         solved = self._solve_landmark_system(rhs)
-        result = K_xl @ solved
+        result = K_xl @ solved  # (n, m) @ (m, k) -> (n, k)
         return result.reshape(v_in.shape)
 
     def apply_transpose(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

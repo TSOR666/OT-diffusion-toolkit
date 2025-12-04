@@ -27,7 +27,7 @@ class DirectKernelOperator(KernelOperator):
         """Compute squared Euclidean distance ||x - y||^2 with clamping for stability."""
         x_norm = (x_flat ** 2).sum(1, keepdim=True)
         y_norm = (y_flat ** 2).sum(1, keepdim=True)
-        xy = x_flat @ y_flat.t()
+        xy = x_flat @ y_flat.t()  # (n, d) @ (d, m) -> (n, m)
         dist_sq = x_norm + y_norm.t() - 2 * xy
         return torch.clamp(dist_sq, min=0.0)
 

@@ -217,14 +217,12 @@ class SchroedingerBridgeSolver:
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
         beta_raw = -alpha_prime / alpha_safe
-        # Noise schedules like Karras increase alpha over time; take the magnitude
-        # to keep the diffusion coefficient positive in those cases.
-        beta_t = torch.clamp(beta_raw, min=info.tiny)
-        if (beta_raw <= 0).any():
-            beta_t = torch.clamp(beta_raw.abs(), min=info.tiny)
+        beta_mag = torch.clamp(beta_raw.abs(), min=info.tiny)
+        beta_signed = torch.where(beta_raw >= 0, beta_mag, -beta_mag)
 
-        f_t = -0.5 * beta_t
-        g_sq_t = beta_t
+        # Drift keeps the sign of the schedule derivative; diffusion uses magnitude.
+        f_t = -0.5 * beta_signed
+        g_sq_t = beta_mag
 
         return f_t, torch.clamp(g_sq_t, min=0.0)
 
@@ -636,6 +634,13 @@ class SchroedingerBridgeSolver:
             )
 
             if (not denom_is_finite) or denom_abs < min_denom:
+                # Apply a small diagonal damping to avoid zero curvature without bailing early.
+                damping = torch.where(denom_is_finite, min_denom, min_denom)
+                denom = denom + damping
+                denom_abs = torch.abs(denom)
+                denom_is_finite = torch.isfinite(denom)
+
+            if (not denom_is_finite) or denom_abs < min_denom:
                 denom_value = float(denom.detach().cpu().item()) if denom_is_finite else float("nan")
                 self.logger.warning(
                     "Conjugate gradient restart at iteration %d due to unstable curvature (denominator %.3e).",
@@ -653,6 +658,10 @@ class SchroedingerBridgeSolver:
                 denom = torch.sum(p * Ap)
                 denom_is_finite = torch.isfinite(denom)
                 denom_abs = torch.abs(denom)
+
+                if denom_is_finite and denom_abs < min_denom:
+                    denom = denom + min_denom
+                    denom_abs = torch.abs(denom)
 
                 # If still problematic, return current best solution
                 if (not denom_is_finite) or denom_abs <= min_denom:
@@ -824,10 +833,10 @@ class SchroedingerBridgeSolver:
                 # Ensure weights form a proper stochastic matrix even if approximations
                 # produce small negative values.
                 weights = torch.clamp(weights, min=0.0)
-                P_zx = weights * fg.unsqueeze(0)
+                P_zx = weights * fg.unsqueeze(0)  # (batch_z, batch_x) * (batch_x,) -> (batch_z, batch_x)
                 row_sums = torch.clamp(P_zx.sum(dim=1, keepdim=True), min=1e-10)
                 P_zx_norm = P_zx / row_sums
-                z_next = P_zx_norm @ x_next_flat
+                z_next = P_zx_norm @ x_next_flat  # (batch_z, batch_x) @ (batch_x, d) -> (batch_z, d)
             elif isinstance(kernel_op, FFTKernelOperator):
                 alpha = 0.5  # Interpolation parameter
                 z_next = (1 - alpha) * z_flat + alpha * x_next_flat
