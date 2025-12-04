@@ -9,7 +9,7 @@ independent Python package with its own API surface, documentation, and license.
 |-------------|-------|------------|
 | **ATLAS** (`ATLAS/`) | Full‑stack diffusion toolkit (standalone) | Hierarchical samplers, kernel registry, CLIP guidance, CUDA graphs + tiling (1K–2K on 4090/5090) |
 | **FastSB-OT** (`FastSB-OT/`) | Solver library (requires score network) | Triton kernels, Fisher-aware momentum transport, deployment-friendly presets |
-| **SBDS** (`SBDS/`) | Research toolkit on Schrödinger bridges and kernel approximations | Multi-tier transport (full/RFF/Nystrom/FFT), adaptive timesteps, Hilbert Sinkhorn |
+| **SBDS** (`SBDS/`) | Schrödinger bridge solver (requires a pretrained score network) | Multi-tier transport (full/RFF/Nystrom/FFT), adaptive timesteps, Hilbert Sinkhorn |
 | **SPOT** (`SPOT/`) | Solver library (requires score network) | Patch OT, DPM-Solver++ integrators, deterministic modes, CLI validation |
 
 All projects follow a shared design philosophy:
@@ -35,13 +35,11 @@ All projects follow a shared design philosophy:
 
 ## Project Categories
 
-- `SPOT/` and `FastSB-OT/` are SOLVERS. They couple a trained score network with
-  Schrödinger-bridge/OT updates. You bring the score model; the solver handles the
-  transport and integrators.
-- `ATLAS/` and `SBDS/` are full‑stack DIFFUSION TOOLKITS. They ship end‑to‑end
-  sampling stacks (models, schedules, samplers). ATLAS also includes training
-  cookbooks and consumer‑GPU presets. SBDS focuses on research features around
-  Schrödinger bridges and kernel approximations.
+- `SPOT/`, `FastSB-OT/`, and `SBDS/` are SOLVERS. They couple a trained score network with
+  Schrödinger-bridge/OT updates. You bring the score model; the solver handles
+  transport, integrators, and the research-ready tiers in SBDS.
+- `ATLAS/` is a full-stack DIFFUSION TOOLKIT. It ships end-to-end sampling stacks
+  (models, schedules, samplers), training cookbooks, and consumer-GPU presets.
 
 ## Mathematical Background
 All four solvers rely on the same core ideas:

@@ -6,16 +6,42 @@
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-ATLAS is a modular, full‑stack high‑resolution diffusion toolkit. It ships model
-architectures, schedules, samplers, and examples so you can train and run
-inference end‑to‑end. It unifies score‑based models, Schrödinger‑bridge transport,
-and a flexible kernel registry.
+## What is ATLAS?
 
-**✨ New:** Auto-detects hardware capabilities, optimizes precision modes, and supports native 2K generation on RTX 4090/5090.
+ATLAS is a **complete toolkit for creating AI-generated images** using diffusion models (the same technology behind Stable Diffusion). With ATLAS, you can:
+
+- ✨ **Generate high-resolution images** (up to 2048×2048) on consumer GPUs
+- 🎨 **Train custom models** on your own datasets
+- ⚡ **Optimize for your hardware** (automatic GPU/CPU detection, mixed precision)
+- 🔧 **Extend and customize** every component (models, kernels, samplers, schedules)
+
+ATLAS is a **full-stack solution** - it includes everything you need: model architectures, training loops, sampling algorithms, and examples. It's built on mathematically rigorous foundations combining score-based models, Schrödinger-bridge transport, and flexible kernel operators.
+
+**✨ Latest Features:** Auto hardware detection, BF16/TF32 optimization, native 2K generation on RTX 4090/5090, CUDA graphs for 10-30% speedup.
+
+---
+
+## For Beginners
+
+**New to ATLAS or diffusion models?**
+
+👉 **Start here:** [Complete Beginner's Guide](docs/GETTING_STARTED.md)
+
+This guide explains:
+- What diffusion models are
+- How to install ATLAS on any platform
+- Where to get or train model checkpoints
+- How to generate your first images
+- Common beginner questions and troubleshooting
 
 ---
 
 ## Quick Start
+
+**Prerequisites:**
+- Python 3.10+, PyTorch 2.0+
+- A **trained checkpoint** (model file) - see [Getting Started Guide](docs/GETTING_STARTED.md) for how to obtain one
+- GPU recommended (8GB+ VRAM) but CPU works (slower)
 
 ```bash
 # 1. Install PyTorch with CUDA
@@ -27,17 +53,20 @@ pip install -e .[vision,clip]
 # 3. Check your hardware
 python -m atlas.check_hardware
 
-# 4. Generate images
+# 4. Generate images using a trained checkpoint
 python -c "
 from atlas.easy_api import create_sampler
+# Replace 'model.pt' with a checkpoint you trained/downloaded
 sampler = create_sampler(checkpoint='model.pt', gpu_memory='auto')
 images = sampler.generate(prompts=['a mountain landscape'], timesteps=50)
 "
 ```
 
-**📚 New to ATLAS?** See the [Quick Start Guide](docs/QUICKSTART.md) for detailed examples.
-
-**🧭 Need an end-to-end walkthrough?** Follow the [How to Train & Run Anywhere guide](docs/HOW_TO_TRAIN_AND_INFER.md) for OS-specific setup, CPU-only tips, and torch.compile troubleshooting.
+**📚 Guides for different experience levels:**
+- **Absolute beginner?** → [Complete Beginner's Guide](docs/GETTING_STARTED.md)
+- **Quick reference?** → [Quick Start Guide](docs/QUICKSTART.md)
+- **Detailed walkthrough?** → [How to Train & Run Anywhere](docs/HOW_TO_TRAIN_AND_INFER.md)
+- **All documentation** → [docs/README.md](docs/README.md)
 
 ---
 
@@ -66,45 +95,28 @@ See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for detailed requirements and c
 
 ---
 
-## Mathematical Foundations
+## Key Features
 
-### Score-Based Diffusion
-ATLAS adopts the variance-preserving SDE
-```
-dx = -0.5 * beta(t) * x * dt + sqrt(beta(t)) * dW_t
-```
-where the score network learns `s_theta(x, t) ~ grad_x log p_t(x)` via denoising score
-matching. The probability-flow ODE is
-```
-dx/dt = -0.5 * beta(t) * x - beta(t) * s_theta(x, t)
-```
-and is integrated with predictor-corrector schemes or higher-order samplers.
+### For All Users
+- **Easy API**: Simple `create_sampler()` interface for quick results
+- **Hardware Auto-Detection**: Automatically optimizes for your GPU/CPU
+- **Consumer GPU Support**: Runs on 6GB+ GPUs (RTX 3060 and up)
+- **Cross-Platform**: Works on Windows, Linux, macOS (including Apple Silicon)
+- **Production Ready**: Full test coverage, CI/CD, type hints
 
-### Schrodinger Bridge Updates
-To stabilise long trajectories the sampler inserts an entropic optimal transport solve
-at each step. Given model samples `x_t` and reference samples `y_t`, the bridge computes
-dual potentials `(u, v)` satisfying
-```
-pi(x, y) ~ exp(u(x)) * k(x, y) * exp(v(y))
-```
-where `k` is a kernel operator (Gaussian by default). The barycentric projection of
-`pi` supplies a transport map that complements the probability-flow update.
+### For Advanced Users
+- **Multiple Kernel Operators**: Direct, FFT, RFF, Nyström solvers
+- **CUDA Graph Acceleration**: 10-30% speedup for repeated sampling
+- **Ultra-High Resolution**: Native 2K generation with automatic tiling
+- **Mixed Precision**: BF16/FP16/TF32 support with automatic selection
+- **CLIP Conditioning**: Text-to-image generation
+- **Flexible Architecture**: Customize models, kernels, schedules, samplers
 
-### Kernel Operators
-ATLAS implements several kernel backends:
-- **Direct**: exact `O(n^2)` Gram matrices for small batches.
-- **FFT**: convolutional kernels for grid-structured data (images/volumes).
-- **Random Fourier Features (RFF)**: sub-quadratic approximations for point clouds.
-- **Nystrom**: low-rank sketches when memory budgets are tight.
-
-Bandwidths, feature counts, and approximations are configured via `KernelConfig`.
-
----
-
-## What It Is
-
-- Category: full‑stack DIFFUSION TOOLKIT — standalone training and inference.
-- Strengths: hierarchical samplers, kernel registry, CLIP guidance, consumer‑GPU presets.
+### Technical Strengths
+- **Hierarchical Samplers**: Multi-scale generation for high resolution
+- **Schrödinger Bridge Transport**: Stable, mathematically grounded sampling
+- **Kernel Registry**: Pluggable kernel operators with automatic tier selection
+- **LoRA Support**: Memory-efficient fine-tuning
 
 ## Training Guide
 
@@ -170,11 +182,14 @@ Bandwidths, feature counts, and approximations are configured via `KernelConfig`
    Or use the CLI shims that mirror the preset names:
 
    ```bash
+   python -m atlas.examples.cifar10_training --data-root ./data/cifar10  # Auto-downloads
    python -m atlas.examples.imagenet64_training --data-root /datasets/imagenet64
    python -m atlas.examples.ffhq128_training --data-root /datasets/ffhq
-   python -m atlas.examples.lsun256_training --data-root /datasets/lsun
+   python -m atlas.examples.lsun256_training --data-root /datasets/lsun/bedroom
    python -m atlas.examples.celeba1024_training --data-root /datasets/celeba_hq
    ```
+
+   **Dataset downloads:** CIFAR-10 auto-downloads. Other datasets require manual download - see [Dataset Downloads](docs/GETTING_STARTED.md#dataset-downloads).
 
 **Tips**
 - Enable gradient checkpointing for deep UNets (`model_cfg.use_checkpointing=True`).
@@ -353,6 +368,44 @@ atlas/
 - `pytest`
 - `python -m atlas.examples.basic_sampling`
 - Set `ATLAS_DISABLE_MEMORY_WARNINGS=1` to silence optional CUDA warnings.
+
+---
+
+## Mathematical Foundations
+
+**For researchers and advanced users:** ATLAS implements mathematically rigorous algorithms based on recent advances in diffusion models and optimal transport.
+
+### Score-Based Diffusion
+ATLAS adopts the variance-preserving SDE:
+```
+dx = -0.5 * beta(t) * x * dt + sqrt(beta(t)) * dW_t
+```
+where the score network learns `s_theta(x, t) ≈ grad_x log p_t(x)` via denoising score matching. The probability-flow ODE:
+```
+dx/dt = -0.5 * beta(t) * x - beta(t) * s_theta(x, t)
+```
+is integrated with predictor-corrector schemes or higher-order samplers.
+
+### Schrödinger Bridge Updates
+To stabilize long trajectories, the sampler inserts an entropic optimal transport solve at each step. Given model samples `x_t` and reference samples `y_t`, the bridge computes dual potentials `(u, v)` satisfying:
+```
+pi(x, y) ∝ exp(u(x)) * k(x, y) * exp(v(y))
+```
+where `k` is a kernel operator (Gaussian by default). The barycentric projection of `pi` supplies a transport map that complements the probability-flow update.
+
+### Kernel Operators
+ATLAS implements several kernel backends optimized for different scenarios:
+- **Direct**: Exact O(n²) Gram matrices for small batches
+- **FFT**: Convolutional kernels for grid-structured data (images/volumes)
+- **Random Fourier Features (RFF)**: Sub-quadratic approximations for point clouds
+- **Nyström**: Low-rank sketches when memory budgets are tight
+
+Bandwidths, feature counts, and approximations are configured via `KernelConfig`.
+
+**Further Reading:**
+- Score-based models: Song et al. (2021)
+- Schrödinger bridges: De Bortoli et al. (2021)
+- Optimal transport: Peyré & Cuturi (2019)
 
 ---
 

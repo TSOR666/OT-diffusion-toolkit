@@ -5,7 +5,7 @@ import math
 import threading
 import time
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -129,13 +129,9 @@ class ProductionSPOTSolver:
         self._original_tf32_cudnn = None
         self._original_matmul_prec = None
         self._tf32_enabled = False
-        
+
         if self.config.enable_tf32 and torch.cuda.is_available():
-            logger.warning(
-                "TF32 enabled: This modifies GLOBAL PyTorch backend settings and will affect "
-                "all operations in this process. Call cleanup() to restore original settings."
-            )
-            self._enable_tf32_internal()
+            logger.debug("TF32 opted in; will apply within tf32_context during sampling to avoid permanent global mutation")
         
         self.noise_schedule = noise_schedule or CosineSchedule(device=self.device, dtype=self.dtype)
 
@@ -1039,171 +1035,173 @@ class ProductionSPOTSolver:
         # Production release: Thread-safe Richardson flag (no config mutation)
         use_richardson = self.config.richardson_extrapolation and not self.config.deterministic
         
+        tf32_cm = self.tf32_context() if (self.config.enable_tf32 and torch.cuda.is_available()) else nullcontext()
+
         try:
-            with self._deterministic_context():
-                if self.config.deterministic and torch.cuda.is_available():
-                    assert torch.backends.cudnn.deterministic, "Deterministic context not active"
-                
-                if not hasattr(self._thread_local, 'richardson_state'):
-                    self._thread_local.richardson_state = {
-                        'prev_score': None,
-                        'score_change_history': deque(maxlen=10),
-                        'last_shape': None
-                    }
-                else:
-                    self._thread_local.richardson_state['prev_score'] = None
-                    self._thread_local.richardson_state['score_change_history'].clear()
-                    self._thread_local.richardson_state['last_shape'] = None
-                
-                timesteps = self.dpm_solver.get_timesteps(num_steps, device=torch.device('cpu'))
-                
-                if generator is not None:
-                    x_t = torch.randn(shape, device=self.device, dtype=self.dtype, generator=generator)
-                else:
-                    x_t = torch.randn(shape, device=self.device, dtype=self.dtype)
-                x_t = self._format_tensor(x_t)
-                
-                model_outputs = deque(maxlen=self.dpm_solver.order)
-                
-                iterator = tqdm(range(len(timesteps) - 1), desc=f"SPOT {__version__}") if verbose else range(len(timesteps) - 1)
-                
-                for i in iterator:
-                    if self.config.deterministic:
-                        ctx_active = False
-                        if torch.cuda.is_available() and torch.backends.cudnn.deterministic:
-                            ctx_active = True
-                        else:
-                            try:
-                                ctx_active = torch.are_deterministic_algorithms_enabled()
-                            except (AttributeError, RuntimeError):
-                                pass
-                        if ctx_active:
-                            self._det_ctx_steps += 1
+            with tf32_cm:
+                with self._deterministic_context():
+                    if self.config.deterministic and torch.cuda.is_available():
+                        assert torch.backends.cudnn.deterministic, "Deterministic context not active"
                     
-                    step_start = time.time()
+                    if not hasattr(self._thread_local, 'richardson_state'):
+                        self._thread_local.richardson_state = {
+                            'prev_score': None,
+                            'score_change_history': deque(maxlen=10),
+                            'last_shape': None
+                        }
+                    else:
+                        self._thread_local.richardson_state['prev_score'] = None
+                        self._thread_local.richardson_state['score_change_history'].clear()
+                        self._thread_local.richardson_state['last_shape'] = None
                     
-                    t_curr, t_next = timesteps[i], timesteps[i + 1]
-                    dt = abs(t_next - t_curr)
+                    timesteps = self.dpm_solver.get_timesteps(num_steps, device=torch.device('cpu'))
                     
-                    self._thread_local.step_context = StepContext(current_t=t_curr, current_dt=dt)
+                    if generator is not None:
+                        x_t = torch.randn(shape, device=self.device, dtype=self.dtype, generator=generator)
+                    else:
+                        x_t = torch.randn(shape, device=self.device, dtype=self.dtype)
+                    x_t = self._format_tensor(x_t)
                     
-                    score_start = time.time()
-                    with self.memory_profiler():
-                        score = self._compute_score_optimized(x_t, t_curr)
-                    model_outputs.append(score)
-                    self.timing_stats['score_eval'].append(time.time() - score_start)
+                    model_outputs = deque(maxlen=self.dpm_solver.order)
                     
-                    # Production release: Avoid redundant t_tensor computation
-                    def drift_fn(x, t):
-                        t_tensor = torch.full((1,), float(t), device=x.device, dtype=torch.float32)
-
-                        if abs(t - t_curr) < 1e-8:
-                            s = score
-                        else:
-                            s = self._compute_score_optimized(x, t)
-
-                        _, sigma_t = self.noise_schedule.alpha_sigma(t_tensor)
+                    iterator = tqdm(range(len(timesteps) - 1), desc=f"SPOT {__version__}") if verbose else range(len(timesteps) - 1)
+                    
+                    for i in iterator:
+                        if self.config.deterministic:
+                            ctx_active = False
+                            if torch.cuda.is_available() and torch.backends.cudnn.deterministic:
+                                ctx_active = True
+                            else:
+                                try:
+                                    ctx_active = torch.are_deterministic_algorithms_enabled()
+                                except (AttributeError, RuntimeError):
+                                    pass
+                            if ctx_active:
+                                self._det_ctx_steps += 1
                         
-                        with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
-                            sigma32 = sigma_t.float()
-                        return 0.5 * s * sigma32.to(x.dtype)
-                    
-                    def compute_eps_at(t_scalar):
-                        eps_base = self.config.eps
-                        if self.config.adaptive_eps and self.config.adaptive_eps_scale == 'sigma':
-                            t_tensor = torch.full((1,), float(t_scalar), device=self.device, dtype=torch.float32)
-                            _, sigma_curr = self.noise_schedule.alpha_sigma(t_tensor)
-                            return max(EPSILON_MIN, eps_base * (float(sigma_curr.float().item()) + EPSILON_CLAMP))
-                        return max(EPSILON_MIN, eps_base)
-                    
-                    integration_start = time.time()
-                    with self.memory_profiler():
-                        # Choose integrator
-                        if self.integrator is not None:
-                            # Use alternative integrator
-                            def score_fn_wrapper(x_val, t_val):
-                                return self._compute_score_optimized(x_val, t_val)
+                        step_start = time.time()
+                        
+                        t_curr, t_next = timesteps[i], timesteps[i + 1]
+                        dt = abs(t_next - t_curr)
+                        
+                        self._thread_local.step_context = StepContext(current_t=t_curr, current_dt=dt)
+                        
+                        score_start = time.time()
+                        with self.memory_profiler():
+                            score = self._compute_score_optimized(x_t, t_curr)
+                        model_outputs.append(score)
+                        self.timing_stats['score_eval'].append(time.time() - score_start)
+                        
+                        # Production release: Avoid redundant t_tensor computation
+                        def drift_fn(x, t):
+                            t_tensor = torch.full((1,), float(t), device=x.device, dtype=torch.float32)
 
-                            # Different integrators have different interfaces
-                            if isinstance(self.integrator, DDIMIntegrator):
-                                # DDIM needs generator for optional stochasticity
-                                y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper, generator)
-                            elif hasattr(self.integrator, 'step'):
-                                # All other integrators (Heun, Exponential, Adaptive) use standard step interface
-                                y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper)
+                            if abs(t - t_curr) < 1e-8:
+                                s = score
                             else:
-                                # Fallback to DPM-Solver++ if integrator doesn't have step method
-                                logger.warning(f"Integrator {type(self.integrator).__name__} lacks step() method, using DPM-Solver++")
-                                if len(model_outputs) >= self.dpm_solver.order and i > 0:
-                                    y_pred = self.dpm_solver.multistep_update(x_t, model_outputs, timesteps, i)
+                                s = self._compute_score_optimized(x, t)
+
+                            _, sigma_t = self.noise_schedule.alpha_sigma(t_tensor)
+                            beta_t = self.noise_schedule.beta(t_tensor).to(x.dtype)
+                            
+                            with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
+                                sigma_sq = (sigma_t.to(x.dtype)) ** 2
+                            # Probability-flow ODE drift to match HeunIntegrator
+                            return -0.5 * beta_t * x - beta_t * sigma_sq * s
+                        
+                        def compute_eps_at(t_scalar):
+                            eps_base = self.config.eps
+                            if self.config.adaptive_eps and self.config.adaptive_eps_scale == 'sigma':
+                                t_tensor = torch.full((1,), float(t_scalar), device=self.device, dtype=torch.float32)
+                                _, sigma_curr = self.noise_schedule.alpha_sigma(t_tensor)
+                                return max(EPSILON_MIN, eps_base * (float(sigma_curr.float().item()) + EPSILON_CLAMP))
+                            return max(EPSILON_MIN, eps_base)
+                        
+                        def _dpm_solver_predict(x_current):
+                            return self.dpm_solver.multistep_update(x_current, model_outputs, timesteps, i)
+
+                        integration_start = time.time()
+                        with self.memory_profiler():
+                            # Choose integrator
+                            if self.integrator is not None:
+                                # Use alternative integrator
+                                def score_fn_wrapper(x_val, t_val):
+                                    return self._compute_score_optimized(x_val, t_val)
+
+                                # Different integrators have different interfaces
+                                if isinstance(self.integrator, DDIMIntegrator):
+                                    # DDIM needs generator for optional stochasticity
+                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper, generator)
+                                elif hasattr(self.integrator, 'step'):
+                                    # All other integrators (Heun, Exponential, Adaptive) use standard step interface
+                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper)
                                 else:
-                                    y_pred = x_t + drift_fn(x_t, t_curr) * dt
-                        else:
-                            # Use default DPM-Solver++
-                            if len(model_outputs) >= self.dpm_solver.order and i > 0:
-                                y_pred = self.dpm_solver.multistep_update(x_t, model_outputs, timesteps, i)
+                                    # Fallback to DPM-Solver++ if integrator doesn't have step method
+                                    logger.warning(f"Integrator {type(self.integrator).__name__} lacks step() method, using DPM-Solver++")
+                                    y_pred = _dpm_solver_predict(x_t)
                             else:
-                                y_pred = x_t + drift_fn(x_t, t_curr) * dt
+                                # Use default DPM-Solver++
+                                y_pred = _dpm_solver_predict(x_t)
 
-                        # Apply optimal transport
-                        eps = compute_eps_at(t_curr)
-                        # Production release: Use thread-safe flag
-                        tm = (self._richardson_extrapolated_transport(x_t, y_pred, eps)
-                              if use_richardson and self._should_use_richardson(score)
-                              else self._standard_transport(x_t, y_pred, eps))
-                        x_t = tm(x_t)
+                            # Apply optimal transport
+                            eps = compute_eps_at(t_curr)
+                            # Production release: Use thread-safe flag
+                            tm = (self._richardson_extrapolated_transport(x_t, y_pred, eps)
+                                  if use_richardson and self._should_use_richardson(score)
+                                  else self._standard_transport(x_t, y_pred, eps))
+                            x_t = tm(x_t)
 
-                        # Apply corrector step if enabled
-                        if self.corrector is not None:
-                            def score_fn_wrapper(x_val, t_val):
-                                return self._compute_score_optimized(x_val, t_val)
+                            # Apply corrector step if enabled
+                            if self.corrector is not None:
+                                def score_fn_wrapper(x_val, t_val):
+                                    return self._compute_score_optimized(x_val, t_val)
 
-                            if isinstance(self.corrector, AdaptiveCorrector):
-                                # Adaptive corrector needs previous sample for error estimation
-                                x_prev = y_pred if i > 0 else None
-                                x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, x_prev, generator)
-                            else:
-                                # Regular corrector
-                                if isinstance(self.corrector, TweedieCorrector):
-                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper)
+                                if isinstance(self.corrector, AdaptiveCorrector):
+                                    # Adaptive corrector needs previous sample for error estimation
+                                    x_prev = y_pred if i > 0 else None
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, x_prev, generator)
                                 else:
-                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, generator)
+                                    # Regular corrector
+                                    if isinstance(self.corrector, TweedieCorrector):
+                                        x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper)
+                                    else:
+                                        x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, generator)
 
-                        x_t = self._format_tensor(x_t)
+                            x_t = self._format_tensor(x_t)
 
-                    self.timing_stats['integration'].append(time.time() - integration_start)
-                    self.timing_stats['total_step'].append(time.time() - step_start)
+                        self.timing_stats['integration'].append(time.time() - integration_start)
+                        self.timing_stats['total_step'].append(time.time() - step_start)
+                        
+                        if verbose and i % 3 == 0 and hasattr(iterator, 'set_postfix_str'):
+                            avg_step = np.mean(list(self.timing_stats['total_step']))
+                            eta = avg_step * (len(timesteps) - i - 1)
+                            iterator.set_postfix_str(f"t={t_next:.3f}, ETA={eta:.1f}s")
                     
-                    if verbose and i % 3 == 0 and hasattr(iterator, 'set_postfix_str'):
-                        avg_step = np.mean(list(self.timing_stats['total_step']))
-                        eta = avg_step * (len(timesteps) - i - 1)
-                        iterator.set_postfix_str(f"t={t_next:.3f}, ETA={eta:.1f}s")
-                
-                if output_dtype is not None:
-                    x_t = x_t.to(output_dtype)
-                x_t = self._format_tensor(x_t)
-                
-                stats = None
-                if return_stats or use_result_dataclass:
-                    # Production release: Surface Sinkhorn backend in stats
-                    stats = {
-                        'version': __version__,
-                        'steps': len(timesteps) - 1,
-                        'avg_score_time': np.mean(list(self.timing_stats['score_eval'])) if self.timing_stats['score_eval'] else 0,
-                        'avg_integration_time': np.mean(list(self.timing_stats['integration'])) if self.timing_stats['integration'] else 0,
-                        'total_time': sum(self.timing_stats['total_step']) if self.timing_stats['total_step'] else 0,
-                        'fallback_count': self.fallback_count,
-                        'memory_deltas': list(self.memory_stats) if self.config.profile_memory else None,
-                        'sinkhorn_backend': self.sinkhorn_kernel.last_backend_used
-                    }
-                
-                if use_result_dataclass:
-                    return SamplingResult(samples=x_t, stats=stats)
-                elif return_stats:
-                    return x_t, stats
-                else:
-                    return x_t
-                
+                    if output_dtype is not None:
+                        x_t = x_t.to(output_dtype)
+                    x_t = self._format_tensor(x_t)
+                    
+                    stats = None
+                    if return_stats or use_result_dataclass:
+                        # Production release: Surface Sinkhorn backend in stats
+                        stats = {
+                            'version': __version__,
+                            'steps': len(timesteps) - 1,
+                            'avg_score_time': np.mean(list(self.timing_stats['score_eval'])) if self.timing_stats['score_eval'] else 0,
+                            'avg_integration_time': np.mean(list(self.timing_stats['integration'])) if self.timing_stats['integration'] else 0,
+                            'total_time': sum(self.timing_stats['total_step']) if self.timing_stats['total_step'] else 0,
+                            'fallback_count': self.fallback_count,
+                            'memory_deltas': list(self.memory_stats) if self.config.profile_memory else None,
+                            'sinkhorn_backend': self.sinkhorn_kernel.last_backend_used
+                        }
+                    
+                    if use_result_dataclass:
+                        return SamplingResult(samples=x_t, stats=stats)
+                    elif return_stats:
+                        return x_t, stats
+                    else:
+                        return x_t
+                    
         finally:
             pass  # No config mutation to restore
     
@@ -1219,12 +1217,14 @@ class ProductionSPOTSolver:
         start_time = time.perf_counter()
         
         transport1 = self._standard_transport(x, y, eps1)
-        
+
         first_solve_time = time.perf_counter() - start_time
-        
+
         transport2 = self._standard_transport(x, y, eps2)
-        
+
         total_time = time.perf_counter() - start_time
+        # Overhead = (second_solve_time) / (first_solve_time)
+        # If second solve costs same as first, overhead = 100% (doubling the work)
         overhead = (total_time - first_solve_time) / max(first_solve_time, 1e-9)
         
         if overhead > self.config.richardson_max_overhead:

@@ -31,6 +31,10 @@ class MetricsLogger:
     def start_step(self) -> None:
         """Mark the start of a sampling step."""
 
+        if torch.cuda.is_available():
+            # Reset to capture per-step peaks and ensure prior work is finished
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
         self.step_start_time = time.time()
 
     def end_step(self, timestep: float, transport_cost: Optional[float] = None) -> None:
@@ -39,16 +43,18 @@ class MetricsLogger:
         if self.step_start_time is None:
             return
 
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         step_time = time.time() - self.step_start_time
-        self.metrics["step_times"].append(step_time)
-        self.metrics["timesteps"].append(timestep)
+        self.metrics["step_times"].append(float(step_time))
+        self.metrics["timesteps"].append(float(self._to_float(timestep)))
 
         if transport_cost is not None:
-            self.metrics["transport_costs"].append(transport_cost)
+            self.metrics["transport_costs"].append(float(self._to_float(transport_cost)))
 
         if torch.cuda.is_available():
             memory_used = torch.cuda.max_memory_allocated() / (1024 ** 3)
-            self.metrics["memory_usage"].append(memory_used)
+            self.metrics["memory_usage"].append(float(memory_used))
 
         self.step_start_time = None
 
@@ -58,12 +64,12 @@ class MetricsLogger:
         if module_name not in self.metrics["module_flops"]:
             self.metrics["module_flops"][module_name] = []
 
-        self.metrics["module_flops"][module_name].append(flops)
+        self.metrics["module_flops"][module_name].append(float(self._to_float(flops)))
 
     def log_convergence_rate(self, rate: float) -> None:
         """Log convergence rate for theoretical analysis."""
 
-        self.metrics["convergence_rates"].append(rate)
+        self.metrics["convergence_rates"].append(float(self._to_float(rate)))
 
     def save_metrics(self) -> None:
         """Save metrics to file if log_file was provided."""
@@ -72,8 +78,9 @@ class MetricsLogger:
             return
 
         try:
+            serializable = self._as_serializable()
             with open(self.log_file, "w", encoding="utf-8") as file:
-                json.dump(self.metrics, file)
+                json.dump(serializable, file)
         except Exception as exc:  # pragma: no cover - best effort logging
             warnings.warn(f"Failed to save metrics: {exc}")
 
@@ -99,3 +106,24 @@ class MetricsLogger:
             summary[f"{module}_avg_gflops"] = float(np.mean(flops_list) / 1e9)
 
         return summary
+
+    def _to_float(self, value: float | int | torch.Tensor | np.generic) -> float:
+        """Convert tensors/NumPy scalars to native float for safe logging."""
+        if isinstance(value, torch.Tensor):
+            return float(value.detach().cpu().item())
+        if isinstance(value, np.generic):
+            return float(value)
+        return float(value)
+
+    def _as_serializable(self) -> Dict[str, object]:
+        """Return metrics converted to JSON-serializable Python types."""
+        out: Dict[str, object] = {}
+        out["step_times"] = [self._to_float(v) for v in self.metrics["step_times"]]
+        out["timesteps"] = [self._to_float(v) for v in self.metrics["timesteps"]]
+        out["transport_costs"] = [self._to_float(v) for v in self.metrics["transport_costs"]]
+        out["memory_usage"] = [self._to_float(v) for v in self.metrics["memory_usage"]]
+        out["convergence_rates"] = [self._to_float(v) for v in self.metrics["convergence_rates"]]
+        out["module_flops"] = {
+            k: [self._to_float(v) for v in vals] for k, vals in self.metrics["module_flops"].items()
+        }
+        return out

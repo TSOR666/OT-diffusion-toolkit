@@ -18,29 +18,37 @@ from .constants import EPSILON_CLAMP
 from .logger import logger
 from .schedules import NoiseScheduleProtocol
 
-def _beta_from_schedule(schedule: NoiseScheduleProtocol, t: float, dt: float = 1e-3) -> float:
-    """Estimate beta(t) = -d/dt lambda(t) with a bounded finite difference."""
-    # Clamp t to valid range to avoid endpoint blow-ups
-    t0 = max(0.0, min(1.0, float(t)))
-    dt_eff = max(dt, 1e-4)
-    t_plus = min(1.0, t0 + dt_eff)
-    t_minus = max(0.0, t0 - dt_eff)
+def _beta_from_schedule(schedule: NoiseScheduleProtocol, t: float) -> float:
+    """Get beta(t) from schedule using analytical method.
 
-    # Use the schedule's log SNR to approximate derivative
-    lam_plus = float(schedule.lambda_(torch.tensor([t_plus])))
-    lam_minus = float(schedule.lambda_(torch.tensor([t_minus])))
-    denom = max(t_plus - t_minus, 1e-6)
-    beta = -(lam_plus - lam_minus) / denom
-    # Guard against negative/NaN betas from numerical noise
-    if not math.isfinite(beta) or beta < 0.0:
-        beta = 0.0
-    return beta
+    This replaces the previous finite-difference approximation with direct
+    analytical computation for numerical stability and efficiency.
+
+    Args:
+        schedule: Noise schedule with beta() method
+        t: Time point
+
+    Returns:
+        beta(t) as a Python float
+    """
+    # Use analytical beta() method for stability and efficiency
+    t_clamped = max(0.0, min(1.0, float(t)))
+    beta_tensor = schedule.beta(t_clamped)
+    beta_val = float(beta_tensor.item() if hasattr(beta_tensor, 'item') else beta_tensor)
+
+    # Sanity check
+    if not math.isfinite(beta_val) or beta_val < 0.0:
+        logger.warning(f"Invalid beta(t={t:.3f})={beta_val}, clamping to 0")
+        return 0.0
+
+    return beta_val
 
 __all__ = [
     "HeunIntegrator",
     "DDIMIntegrator",
     "AdaptiveIntegrator",
-    "ExponentialIntegrator",
+    "ExponentialIntegrator",  # DEPRECATED: Use EulerIntegrator
+    "EulerIntegrator",
 ]
 
 
@@ -109,6 +117,9 @@ class DDIMIntegrator:
     DDIM (Denoising Diffusion Implicit Models) provides deterministic sampling
     by removing the stochastic component. Can interpolate between DDPM (eta=1)
     and fully deterministic (eta=0).
+
+    IMPORTANT: This implementation assumes score_fn returns the SCORE ∇ log p_t(x),
+    NOT the noise prediction ε. The relationship is: ε = -σ * score.
     """
 
     def __init__(
@@ -135,11 +146,16 @@ class DDIMIntegrator:
     ) -> torch.Tensor:
         """Take one DDIM step.
 
+        Mathematical derivation:
+            Given x_t = α_t * x_0 + σ_t * ε, where ε = -σ_t * score
+            We have: x_t = α_t * x_0 - σ_t² * score
+            Therefore: x_0 = (x_t + σ_t² * score) / α_t
+
         Args:
             x: Current state
             t_curr: Current time
             t_next: Next time
-            score_fn: Function that computes score
+            score_fn: Function that computes score ∇ log p_t(x)
             generator: Optional random generator for stochastic component
 
         Returns:
@@ -156,21 +172,23 @@ class DDIMIntegrator:
         score = score_fn(x, t_curr)
 
         # Predict x0 (denoised sample)
+        # FIXED: Correct formula for score (not noise)
+        # x_0 = (x_t + σ_t² * score) / α_t
         with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
             sigma_curr_32 = sigma_curr.float()
+            sigma_curr_sq = sigma_curr_32 ** 2
             alpha_curr_32 = alpha_curr.float()
 
-            # x0_pred = (x - sigma * score) / alpha
-            pred_x0 = (x.float() - sigma_curr_32.to(x.device) * score.float()) / (alpha_curr_32.to(x.device) + EPSILON_CLAMP)
+            # Correct formula: x0 = (x + sigma^2 * score) / alpha
+            pred_x0 = (x.float() + sigma_curr_sq.to(x.device) * score.float()) / (alpha_curr_32.to(x.device) + EPSILON_CLAMP)
             pred_x0 = pred_x0.to(x.dtype)
 
         # Compute direction pointing to x_t
-        direction = score * sigma_curr.to(x.dtype)
+        # The noise component is ε = -σ * score
+        sigma_next_sq = (sigma_next.to(x.dtype) ** 2)
+        direction = -sigma_next_sq * score
 
-        # DDIM sampling formula
-        alpha_ratio = (alpha_next / (alpha_curr + EPSILON_CLAMP)).to(x.dtype)
-
-        # Deterministic component
+        # DDIM sampling formula: x_{t+1} = α_{t+1} * x_0 + σ_{t+1} * ε
         x_next = alpha_next.to(x.dtype) * pred_x0 + direction
 
         # Add stochastic component if eta > 0
@@ -357,12 +375,14 @@ class AdaptiveIntegrator:
         return x_next, error, dt_next
 
 
-class ExponentialIntegrator:
-    """Exponential integrator for stiff problems.
+class EulerIntegrator:
+    """Explicit Euler method (1st order) for probability-flow ODE.
 
-    Uses exact integration of the linear part of the ODE, which can provide
-    better stability for stiff systems. Particularly useful when sigma changes
-    rapidly.
+    This is the simplest numerical integrator: x_{i+1} = x_i + f(x_i, t_i) * dt
+    where f is the drift function of the probability-flow ODE.
+
+    Note: This is a 1st order method with O(dt²) local error. For better accuracy,
+    consider HeunIntegrator (2nd order) or AdaptiveIntegrator.
     """
 
     def __init__(self, schedule: NoiseScheduleProtocol):
@@ -375,19 +395,18 @@ class ExponentialIntegrator:
         t_next: float,
         score_fn: Callable[[torch.Tensor, float], torch.Tensor],
     ) -> torch.Tensor:
-        """Take one exponential integrator step.
+        """Take one explicit Euler step.
 
-        The method treats the linear part of the drift exactly and uses
-        a simple approximation for the nonlinear part.
+        Probability-flow ODE drift: f(x,t) = -0.5*β(t)*x - β(t)*σ²(t)*score(x,t)
 
         Args:
             x: Current state
             t_curr: Current time
             t_next: Next time
-            score_fn: Score function
+            score_fn: Score function ∇ log p_t(x)
 
         Returns:
-            Next state
+            Next state x_{t+1}
         """
         # Beta and sigma^2 at current time
         t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
@@ -398,8 +417,27 @@ class ExponentialIntegrator:
         # Compute score once (explicit Euler for PF-ODE)
         score = score_fn(x, t_curr)
 
+        # Explicit Euler update
         dt = t_next - t_curr
         drift = -0.5 * beta_curr * x - beta_curr * sigma_curr_sq * score
         x_next = x + drift * dt
 
         return x_next
+
+
+class ExponentialIntegrator(EulerIntegrator):
+    """DEPRECATED: This is actually Euler method, not an exponential integrator.
+
+    Use EulerIntegrator instead. This class is kept for backward compatibility
+    but will be removed in a future version.
+
+    An actual exponential integrator would use exact integration of the linear
+    part: exp(-0.5 * β * dt) * x, which this implementation does NOT do.
+    """
+
+    def __init__(self, schedule: NoiseScheduleProtocol):
+        logger.warning(
+            "ExponentialIntegrator is deprecated and misnamed (it's actually Euler method). "
+            "Use EulerIntegrator instead. This class will be removed in a future version."
+        )
+        super().__init__(schedule)

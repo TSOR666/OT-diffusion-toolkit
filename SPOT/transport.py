@@ -28,6 +28,7 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
 
     unfold_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.nn.Unfold] = {}
     fold_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.nn.Fold] = {}
+    # Store norm in fp32 to avoid precision loss when normalizing overlapping patches
     norm_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.Tensor] = {}
 
     def factory(x_img: torch.Tensor, y_img: torch.Tensor, eps: float):
@@ -68,6 +69,18 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
                 patch_size, ps, H, W
             )
 
+        # Heuristic memory guard: bail out if unfolding would exceed configured tensor budget
+        patch_dim_est = C * ps * ps
+        num_patches_est = ((H - ps) // st + 1) * ((W - ps) // st + 1)
+        total_elements_est = B * patch_dim_est * num_patches_est
+        if total_elements_est > solver.config.max_tensor_size_elements:
+            logger.debug(
+                "Patch transport unfolded tensor would have %d elements (cap=%d); using identity",
+                total_elements_est,
+                solver.config.max_tensor_size_elements,
+            )
+            return lambda z: z
+
         cache_key = (C, H, W, ps, st, x_img.device, x_img.dtype)
         if cache_key not in unfold_cache:
             unfold_cache[cache_key] = torch.nn.Unfold(kernel_size=ps, stride=st)
@@ -85,10 +98,11 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
             ps, st, H, W, num_patches
         )
 
-        if cache_key not in norm_cache:
-            ones = torch.ones((B, patch_dim, num_patches), device=x_img.device, dtype=x_img.dtype)
-            norm_cache[cache_key] = fold(ones).clamp_min(1e-6)
-        norm = norm_cache[cache_key]
+        norm_key = (C, H, W, ps, st, x_img.device, torch.float32)
+        if norm_key not in norm_cache:
+            ones = torch.ones((B, patch_dim, num_patches), device=x_img.device, dtype=torch.float32)
+            norm_cache[norm_key] = fold(ones).clamp_min(1e-6)
+        norm = norm_cache[norm_key]
 
         x_vec = patches_x.transpose(1, 2).reshape(-1, patch_dim)
         y_vec = patches_y.transpose(1, 2).reshape(-1, patch_dim)
@@ -116,7 +130,7 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
             patches_z = unfold(z)
             z_vec = patches_z.transpose(1, 2).reshape(-1, patch_dim)
             transported_vec = transport_map(z_vec).reshape(B, num_patches, patch_dim).transpose(1, 2)
-            transported = fold(transported_vec) / norm
+            transported = fold(transported_vec.to(norm.dtype)) / norm
             return transported.to(z.dtype)
 
         return apply_transport

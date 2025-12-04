@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to ATLAS will be documented in this file.
 
@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+_No changes yet._
+
+## [1.0.0-rc1] - 2025-11-25
+
+### Changed
+- Promoted ATLAS to release candidate `1.0.0-rc1` with the current toolkit baseline for broader adoption.
+- Synced packaging metadata and helper scripts to reflect the new semantic version.
+
+## [0.1.1] - 2025-11-25
+
+### Added
+- FFHQ 128x128 inference script (`atlas/examples/ffhq128_inference.py`)
+- ImageNet 64x64 inference script (`atlas/examples/imagenet64_inference.py`)
+- Examples README summarizing scripts and usage (`atlas/examples/README.md`)
+
+## [0.1.0] - 2025-11-20
 
 ### Added
 - Comprehensive documentation suite with 6 guides (QUICKSTART, DEPENDENCIES, GPU_CPU_BEHAVIOR, CUDA_GRAPHS_TILING, EXTENDING, docs index)
@@ -22,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CODE_OF_CONDUCT.md (Contributor Covenant 2.1)
 - Issue templates (bug report, feature request, documentation)
 - This CHANGELOG.md
+- Initial release of models and tooling
+- Score-based diffusion models
+- Schrodinger bridge transport
+- Multiple kernel operators (Direct, FFT, RFF, Nystrom)
+- Hierarchical sampler
+- CLIP conditioning support
+- GPU memory profiles (6GB-32GB)
+- Easy API for non-experts
 
 ### Changed
 - GPU profile detection now uses FREE memory instead of TOTAL memory
@@ -33,27 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **CRITICAL**: Missing closing triple-quote in `easy_api.py` module docstring (prevented compilation)
-- Invalid type annotation (`any` → `Any`) in `hardware.py`
+- Invalid type annotation (`any` vs `Any`) in `hardware.py`
 - FFT kernel `clear_cache()` now actually frees GPU memory
-- Kernel cache key collision risk in Schrödinger bridge solver
+- Kernel cache key collision risk in Schrodinger bridge solver
 - Numerical instability in conjugate gradient solver (dtype-aware epsilon)
-- max_kernel_cache_size validation (now rejects 0, minimum 1)
+- `max_kernel_cache_size` validation (now rejects 0, minimum 1)
 
 ### Security
 - Added dependency security scanning in CI
 - Added code quality checks (ruff, mypy)
-
-## [0.1.0] - YYYY-MM-DD (Template)
-
-### Added
-- Initial release
-- Score-based diffusion models
-- Schrödinger bridge transport
-- Multiple kernel operators (Direct, FFT, RFF, Nyström)
-- Hierarchical sampler
-- CLIP conditioning support
-- GPU memory profiles (6GB-32GB)
-- Easy API for non-experts
 
 ---
 

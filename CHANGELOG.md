@@ -1,5 +1,13 @@
 # Changelog
 
+## [2025-11-25] ATLAS Maintenance Release
+
+### Fixed
+- Corrected several blockers and minor errors across the codebase 
+- Updated versioning to 1.0.0-rc1
+- Added missing inference scripts for ffhq128 and imagenet64
+
+
 ## [2025-11-19] ATLAS Maintenance Release
 
 ### Fixed

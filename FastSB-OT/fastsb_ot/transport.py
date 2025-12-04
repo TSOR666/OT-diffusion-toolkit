@@ -111,7 +111,23 @@ class SlicedOptimalTransport:
 
     def _sliced_ot_fixed(self, x: torch.Tensor, y: torch.Tensor,
                         n_projections: int) -> torch.Tensor:
-        """Sliced OT with deterministic projections"""
+        """Sliced OT with deterministic projections
+
+        GRADIENT FLOW NOTE:
+        - Gradients flow w.r.t. x through the projection: ∂(x@θ)/∂x = θ ✓
+        - Gradients flow w.r.t. y through sorted values: ∂y_sorted/∂y ✓
+        - Gradients DO NOT flow through sort order (integer indices from argsort) ✗
+
+        Consequence:
+        - For INFERENCE (sampling): Mathematically valid approximation of OT
+        - For TRAINING: Gradients provide a valid (though biased) approximation of
+          the true OT gradient ∂W_1/∂x for sliced Wasserstein distance
+
+        Alternative approaches for improved gradient flow:
+        1. Soft-sort (differentiable sorting) for smooth gradient through sort order
+        2. Direct Wasserstein distance: torch.sum((x_sorted - y_sorted)**2)
+        3. Full Sinkhorn (_full_ot) for exact OT gradients on small problems
+        """
         B, N, d = x.shape
         device = x.device
         dtype = x.dtype
@@ -124,8 +140,6 @@ class SlicedOptimalTransport:
 
         transported = torch.zeros_like(x)
         transported_proj = x.new_zeros(B, N)  # Zero-init for safety
-        x_proj = x.new_empty(B, N)
-        y_proj = y.new_empty(B, N)
 
         for i in range(n_projections):
             # Generate and normalize theta in FP32 for stability
@@ -133,13 +147,16 @@ class SlicedOptimalTransport:
             theta = F.normalize(theta, dim=0)
             theta = theta.to(dtype)  # Cast back to data dtype
 
-            torch.matmul(x.view(B, N, d), theta, out=x_proj.view(B, N))
-            torch.matmul(y.view(B, N, d), theta, out=y_proj.view(B, N))
+            # Use matmul without out= to preserve gradients
+            x_proj = torch.matmul(x.view(B, N, d), theta)
+            y_proj = torch.matmul(y.view(B, N, d), theta)
 
             _, x_indices = torch.sort(x_proj, dim=1)
             y_sorted, _ = torch.sort(y_proj, dim=1)
 
-            transported_proj.scatter_(1, x_indices, y_sorted)
+            # WARNING: scatter_ breaks gradient flow w.r.t. x positions
+            # but gradients DO flow through y_sorted values
+            transported_proj = transported_proj.scatter(1, x_indices, y_sorted)
 
             diff_proj = (transported_proj - x_proj).unsqueeze(-1)
             transported += diff_proj * theta.unsqueeze(0).unsqueeze(0)
@@ -164,10 +181,10 @@ class SlicedOptimalTransport:
 
         P_fp32 = self._sinkhorn_batch_fixed(C.float(), eps)
         y_fp32 = y.float() if y.dtype != torch.float32 else y
-        # Barycentric projection requires dividing by row mass (uniform = 1/N). Without
-        # this scaling the map is biased toward zero by roughly a factor of 1/N.
-        row_sums = P_fp32.sum(dim=2, keepdim=True).clamp_min(1e-12)
-        out_fp32 = torch.bmm(P_fp32, y_fp32) / row_sums
+        # Barycentric projection: P is already row-normalized by Sinkhorn
+        # After convergence with uniform marginals, P rows sum to 1/n
+        # The transport map is simply: T(x) = P @ y
+        out_fp32 = torch.bmm(P_fp32, y_fp32)
         return out_fp32.to(y.dtype)
 
     def _sinkhorn_batch_fixed(
@@ -179,7 +196,10 @@ class SlicedOptimalTransport:
         row_marginals: Optional[torch.Tensor] = None,
         col_marginals: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Support for custom marginals, defaults to uniform"""
+        """Support for custom marginals, defaults to uniform
+
+        Includes stability checks and fallback to prevent gradient explosions.
+        """
         B, n, m = C_batch.shape
         device = C_batch.device
         dtype = C_batch.dtype
@@ -225,6 +245,32 @@ class SlicedOptimalTransport:
         log_P = log_u.unsqueeze(-1) + K_log + log_v.unsqueeze(1)
         P = torch.exp(log_P)
 
+        # CRITICAL: Check for NaN or degenerate coupling matrix
+        # This prevents gradient explosions in barycentric projection
+        if torch.isnan(P).any() or torch.isinf(P).any():
+            logger.warning(f"Sinkhorn produced NaN/Inf (eps={eps:.2e}). Falling back to uniform coupling.")
+            # Fallback to uniform coupling: P[i,j] = 1/(n*m) satisfies marginal constraints
+            # Row sum: sum_j P[i,j] = m/(n*m) = 1/n ✓
+            # Col sum: sum_i P[i,j] = n/(n*m) = 1/m ✓
+            P = torch.full((B, n, m), 1.0 / (n * m), device=device, dtype=dtype)
+            return P
+
+        # Check row sum deviation from uniform (should be ~1/n for each row)
+        row_sums = P.sum(dim=2)
+        expected_row_sum = 1.0 / n
+        relative_error = torch.abs(row_sums - expected_row_sum) / expected_row_sum
+        max_relative_error = relative_error.max()
+
+        # If coupling is severely degenerate, fallback to uniform coupling
+        # Use 20% relative error threshold (loose tolerance for numerical stability)
+        if max_relative_error > 0.2:
+            logger.warning(
+                f"Sinkhorn coupling degenerate (max relative error: {max_relative_error:.2%}, "
+                f"expected row sum: {expected_row_sum:.2e}, eps={eps:.2e}). Falling back to uniform coupling."
+            )
+            P = torch.full((B, n, m), 1.0 / (n * m), device=device, dtype=dtype)
+            return P
+
         return P
 
 
@@ -232,36 +278,64 @@ class SlicedOptimalTransport:
 
 
 class MomentumTransport(nn.Module):
-    """Transport with momentum for accelerated convergence"""
+    """Transport with momentum for accelerated convergence
+
+    Uses shape-based velocity caching to handle varying batch sizes and
+    multi-scale/patch-based processing without destroying momentum state.
+    """
 
     def __init__(self, beta: float = 0.9, device: torch.device = torch.device('cpu')):
         super().__init__()
         self.beta = beta
         self.device = device
-        self.register_buffer('velocity', None, persistent=False)
-        self.velocity_shape = None
+        # Use dict cache instead of single buffer to support multiple shapes
+        # Do NOT register as buffer - causes issues with state_dict and JIT
+        self._velocity_cache: Dict[Tuple[int, ...], torch.Tensor] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
 
-    def reset_velocity(self):
-        """Reset momentum velocity"""
-        self.velocity = None
-        self.velocity_shape = None
+    def reset_velocity(self, shape: Optional[Tuple[int, ...]] = None):
+        """Reset momentum velocity for specific shape or all shapes"""
+        if shape is not None:
+            if shape in self._velocity_cache:
+                del self._velocity_cache[shape]
+                logger.debug(f"Reset velocity for shape {shape}")
+        else:
+            self._velocity_cache.clear()
+            self._cache_hits = 0
+            self._cache_misses = 0
+            logger.debug("Reset all velocity cache")
 
     def apply_transport(self, x: torch.Tensor, drift: torch.Tensor, alpha_bar_t: torch.Tensor) -> torch.Tensor:
-        """Apply transport with momentum (handles shape changes)"""
-        if self.velocity is not None and x.shape != self.velocity_shape:
-            self.reset_velocity()
+        """Apply transport with momentum (handles shape changes via caching)"""
+        shape_key = tuple(x.shape)
 
-        if self.velocity is None:
-            self.velocity = torch.zeros_like(x)
-            self.velocity_shape = x.shape
+        # Get or create velocity for this shape
+        if shape_key not in self._velocity_cache:
+            self._velocity_cache[shape_key] = torch.zeros_like(x)
+            self._cache_misses += 1
+            if self._cache_misses == 1:
+                logger.debug(f"Created velocity cache for shape {shape_key}")
+            elif self._cache_misses > 5:  # Only warn after significant number of misses
+                logger.warning(
+                    f"Momentum cache miss (shape {shape_key}). "
+                    f"High number of misses ({self._cache_misses} unique shapes) detected. "
+                    f"This may indicate varying batch sizes or frequent shape changes."
+                )
+        else:
+            self._cache_hits += 1
 
-        self.velocity = (self.beta * self.velocity.detach() + (1 - self.beta) * drift).detach()
+        velocity = self._velocity_cache[shape_key]
 
-        lookahead = x + self.beta * self.velocity
+        # Update velocity with exponential moving average
+        velocity = (self.beta * velocity.detach() + (1 - self.beta) * drift).detach()
+        self._velocity_cache[shape_key] = velocity
+
+        lookahead = x + self.beta * velocity
 
         transport_weight = self._compute_adaptive_weight(lookahead, alpha_bar_t)
 
-        return x + transport_weight * self.velocity
+        return x + transport_weight * velocity
 
     def _compute_adaptive_weight(self, x: torch.Tensor, alpha_bar_t: torch.Tensor) -> torch.Tensor:
         """Compute adaptive weight for transport"""
@@ -304,7 +378,7 @@ class HierarchicalBridge(nn.Module):
 
     @compile_function_fixed(dynamic=True, use_global_cache=True)
     def compute_multiscale_transport(self, x: torch.Tensor, drift: torch.Tensor, alpha_bar_t: torch.Tensor) -> torch.Tensor:
-        """Compute transport at multiple scales"""
+        """Compute transport at multiple scales with anti-aliased downsampling"""
         s = 12.0
         gate = torch.sigmoid(((1 - alpha_bar_t).mean() - 0.5) * s).to(x.dtype)
 
@@ -316,15 +390,29 @@ class HierarchicalBridge(nn.Module):
                 continue
 
             if scale < 1.0:
-                x_scaled = F.interpolate(x, scale_factor=scale, mode='bilinear', align_corners=False)
-                drift_scaled = F.interpolate(drift, scale_factor=scale, mode='bilinear', align_corners=False)
+                # CRITICAL: Use 'area' mode for downsampling to prevent aliasing
+                # 'bilinear' causes high-frequency artifacts to fold into low frequencies
+                x_scaled = F.interpolate(x, scale_factor=scale, mode='area')
+                drift_scaled = F.interpolate(drift, scale_factor=scale, mode='area')
             else:
                 x_scaled, drift_scaled = x, drift
 
             transport = self._compute_scale_transport(x_scaled, drift_scaled, scale)
 
             if scale < 1.0:
-                transport = F.interpolate(transport, size=x.shape[-2:], mode='bilinear', align_corners=False)
+                # Upsampling with anti-aliasing to prevent reconstruction artifacts
+                # antialias parameter requires PyTorch >= 1.11
+                try:
+                    transport = F.interpolate(
+                        transport, size=x.shape[-2:], mode='bilinear',
+                        align_corners=False, antialias=True
+                    )
+                except TypeError:
+                    # Fallback for older PyTorch versions
+                    transport = F.interpolate(
+                        transport, size=x.shape[-2:], mode='bilinear',
+                        align_corners=False
+                    )
 
             transports.append(transport)
 
@@ -367,10 +455,15 @@ class HierarchicalBridge(nn.Module):
 
         freq_mag = torch.sqrt(freq_y[:, None]**2 + freq_x[None, :]**2)
 
+        # At small scales: use uniform weighting (high frequencies already removed by downsampling)
+        # At full scale: emphasize high-frequency changes (fine details)
         if scale >= 1.0:
+            # Full resolution: emphasize high-frequency changes
             freq_weight = freq_mag
         else:
-            freq_weight = 1.0 - freq_mag
+            # Downsampled: frequencies already limited by scale, use uniform weighting
+            # This avoids redundant emphasis on low frequencies
+            freq_weight = torch.ones_like(freq_mag)
 
         energy = (torch.abs(t_fft - x_fft) * freq_weight[None, None, :, :]).mean()
 

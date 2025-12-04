@@ -62,9 +62,14 @@ class OptimizedSinkhornKernel:
         x = x.to(device=self.device, dtype=self.dtype)
         y = y.to(device=self.device, dtype=self.dtype)
 
-        # Try Triton backend first for GPU acceleration (if available and not in deterministic mode)
+        # Try Triton backend for large problems where tiling provides benefits
+        # Triton is designed for medium-large problems (>= 1M elements) where GPU tiling helps
         use_triton = self.use_triton and not self.config.deterministic
-        if use_triton and x.size(0) * y.size(0) < 10_000_000:  # Triton good for medium-large problems
+        n_elements = x.size(0) * y.size(0)
+
+        # Use Triton for problems >= 1M elements (kernel launch overhead worth it)
+        # Upper bound enforced by max_tensor_size_elements check above
+        if use_triton and n_elements >= 1_000_000:
             try:
                 self.last_backend_used = "triton"
                 return self._sinkhorn_triton(x, y, eps, n_iter)
@@ -73,9 +78,11 @@ class OptimizedSinkhornKernel:
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug("Triton traceback:", exc_info=True)
 
+        # Try POT backend for small-medium problems (< 1M elements)
+        # POT has lower overhead but doesn't scale as well to large problems
         use_pot = self.use_pot and not self.config.deterministic
 
-        if use_pot and x.size(0) * y.size(0) < 1_000_000:
+        if use_pot and n_elements < 1_000_000:
             try:
                 self.last_backend_used = "pot"
                 return self._sinkhorn_pot(x, y, eps, n_iter)
@@ -88,6 +95,11 @@ class OptimizedSinkhornKernel:
         return self._sinkhorn_native(x, y, eps, n_iter)
 
     def _sinkhorn_native(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
+        """Native PyTorch Sinkhorn implementation with memory-efficient computation.
+
+        IMPORTANT: This method should only be called for problems that fit in memory.
+        The caller (sinkhorn_log_stabilized) enforces this via max_tensor_size_elements.
+        """
         N, M = x.size(0), y.size(0)
 
         # Handle degenerate case where N=0 or M=0
@@ -96,6 +108,16 @@ class OptimizedSinkhornKernel:
             log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)
             log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)
             return log_u, log_v
+
+        # Safety check: Verify we won't OOM on the cost matrix
+        # C is N×M fp32 matrix = 4 * N * M bytes
+        matrix_bytes = 4 * N * M
+        matrix_mb = matrix_bytes / (1024 ** 2)
+        if matrix_mb > 500:  # Warn if cost matrix > 500MB
+            logger.warning(
+                f"Large cost matrix ({N}×{M} = {matrix_mb:.0f}MB). "
+                f"Consider lowering max_tensor_size_elements to force blockwise mode earlier."
+            )
 
         if self.config.deterministic_cdist_cpu and self.device.type == "cuda":
             with torch.amp.autocast(device_type="cpu", enabled=False):
@@ -112,6 +134,9 @@ class OptimizedSinkhornKernel:
 
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=False):
+            # MEMORY OPTIMIZATION: We still materialize log_K here, but at least
+            # we've gated entry to this function via max_tensor_size_elements check.
+            # For truly large problems, the blockwise path should be taken.
             log_K = -C / float(eps)
 
             lu = torch.zeros(N, device=self.device, dtype=torch.float32)

@@ -68,6 +68,7 @@ class AdvancedHierarchicalDiffusionSampler:
         self.current_conditioning: Optional[Dict[str, Any]] = None
         self._conditioning_base_batch: Optional[int] = None
         self._wrappers_prepared = False
+        self._last_kernel_method: Optional[str] = None
 
     # ------------------------------------------------------------------
     def set_conditioner(self, conditioner: CLIPConditioningInterface) -> None:

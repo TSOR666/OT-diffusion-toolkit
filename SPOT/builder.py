@@ -81,7 +81,34 @@ class SolverBuilder:
         self.config.adaptive_eps_scale = mode
         return self
 
+    def with_sinkhorn_iterations(self, iterations: int):
+        """Set the number of Sinkhorn iterations for OT computation.
+
+        Args:
+            iterations: Number of Sinkhorn-Knopp iterations. Should be >= 20 for
+                       mathematically sound transport plans. Lower values (< 10)
+                       will fail to satisfy marginal constraints.
+        """
+        if iterations < 1:
+            raise ValueError(f"sinkhorn_iterations must be positive, got {iterations}")
+        self.config.sinkhorn_iterations = iterations
+        return self
+
+    def with_mixed_precision(self, enabled: bool):
+        """Enable mixed precision computation (FP16/BF16 on CUDA).
+
+        Args:
+            enabled: If True, use mixed precision for faster computation on CUDA.
+        """
+        self.config.use_mixed_precision = enabled
+        return self
+
     def build(self) -> ProductionSPOTSolver:
+        """Build the ProductionSPOTSolver with the configured parameters.
+
+        Note: If noise_schedule is not set via with_noise_schedule(), the solver
+        will default to CosineSchedule internally.
+        """
         return ProductionSPOTSolver(
             score_model=self.score_model,
             noise_schedule=self.noise_schedule,
@@ -91,16 +118,29 @@ class SolverBuilder:
         )
 
 
-def create_balanced_solver(score_model, device=None, compute_dtype=None) -> ProductionSPOTSolver:
-    """Create a solver with balanced speed/quality (recommended)."""
+def create_balanced_solver(score_model, noise_schedule=None, device=None, compute_dtype=None) -> ProductionSPOTSolver:
+    """Create a solver with balanced speed/quality (recommended).
 
+    Args:
+        score_model: Neural network score model
+        noise_schedule: Noise schedule (optional, defaults to CosineSchedule if None)
+        device: Compute device (optional, auto-detects if None)
+        compute_dtype: Compute precision (optional, defaults to fp32)
+
+    Returns:
+        ProductionSPOTSolver configured for balanced speed/quality trade-off
+    """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if compute_dtype is None:
         compute_dtype = torch.float32
 
+    builder = SolverBuilder(score_model)
+    if noise_schedule is not None:
+        builder = builder.with_noise_schedule(noise_schedule)
+
     return (
-        SolverBuilder(score_model)
+        builder
         .with_device(device)
         .with_compute_dtype(compute_dtype)
         .with_dpm_solver_order(DEFAULT_DPM_ORDER)
@@ -113,43 +153,74 @@ def create_balanced_solver(score_model, device=None, compute_dtype=None) -> Prod
     )
 
 
-def create_fast_solver(score_model, device=None) -> ProductionSPOTSolver:
-    """Create a fast solver with reduced quality."""
+def create_fast_solver(score_model, noise_schedule=None, device=None) -> ProductionSPOTSolver:
+    """Create a fast solver with reduced quality.
 
+    Args:
+        score_model: Neural network score model
+        noise_schedule: Noise schedule (optional, defaults to CosineSchedule if None)
+        device: Compute device (optional, auto-detects if None)
+
+    Returns:
+        ProductionSPOTSolver configured for speed (reduced quality)
+
+    Note:
+        Uses 30 Sinkhorn iterations (down from default 20 in config, but up from
+        the previous mathematically insufficient 5). While this is still on the
+        lower end, it provides a reasonable balance between speed and transport
+        quality. For production use, consider create_balanced_solver() instead.
+    """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    config = SolverConfig()
-    config.sinkhorn_iterations = 5
-    config.dpm_solver_order = 2
-    config.use_mixed_precision = device.type == "cuda"
-    config.deterministic = False
-    config.force_per_pixel_b1 = False
-    config.adaptive_eps_scale = "sigma"
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
 
-    return ProductionSPOTSolver(
-        score_model=score_model,
-        config=config,
-        device=device,
-        compute_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+    builder = SolverBuilder(score_model)
+    if noise_schedule is not None:
+        builder = builder.with_noise_schedule(noise_schedule)
+
+    return (
+        builder
+        .with_device(device)
+        .with_compute_dtype(dtype)
+        .with_mixed_precision(device.type == "cuda")
+        .with_dpm_solver_order(2)
+        .with_sinkhorn_iterations(30)  # Fixed: increased from 5 to 30 for mathematical soundness
+        .with_adaptive_eps_scale("sigma")
+        .with_deterministic(False)
+        .build()
     )
 
 
-def create_repro_solver(score_model, device=None) -> ProductionSPOTSolver:
-    """Create a reproducible solver with bit-exact determinism."""
+def create_repro_solver(score_model, noise_schedule=None, device=None) -> ProductionSPOTSolver:
+    """Create a reproducible solver with bit-exact determinism.
 
+    Args:
+        score_model: Neural network score model
+        noise_schedule: Noise schedule (optional, defaults to CosineSchedule if None)
+        device: Compute device (optional, auto-detects if None)
+
+    Returns:
+        ProductionSPOTSolver configured for reproducible, bit-exact deterministic sampling
+
+    Note:
+        Disables mixed precision, Richardson extrapolation, and uses CPU for cdist
+        operations to ensure bit-exact reproducibility across runs. This may be
+        slower than create_balanced_solver() or create_fast_solver().
+    """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    config = SolverConfig()
-    config.deterministic = True
-    config.deterministic_cdist_cpu = True
-    config.use_mixed_precision = False
-    config.richardson_extrapolation = False
+    builder = SolverBuilder(score_model)
+    if noise_schedule is not None:
+        builder = builder.with_noise_schedule(noise_schedule)
 
-    return ProductionSPOTSolver(
-        score_model=score_model,
-        config=config,
-        device=device,
-        compute_dtype=torch.float32,
+    return (
+        builder
+        .with_device(device)
+        .with_compute_dtype(torch.float32)
+        .with_deterministic(enabled=True, cdist_cpu=True)
+        .with_mixed_precision(False)
+        .with_richardson_extrapolation(False)
+        .build()
     )

@@ -1,6 +1,6 @@
 """FastSB-OT solver package."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0-rc1"
 
 from .cache import MemoryEfficientCacheFixed
 from .config import FastSBOTConfig, QualityPreset
