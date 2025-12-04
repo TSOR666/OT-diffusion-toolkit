@@ -131,9 +131,6 @@ class SchroedingerBridgeSolver:
         if self.max_kernel_cache_size <= 0:
             raise ValueError("max_kernel_cache_size must be positive")
 
-        # Initialize tracking attributes
-        self._last_kernel_method: Optional[str] = None
-
         # Numerical guard for conjugate gradient denominators (dtype-aware, computed dynamically)
         # We use a multiplier of eps to ensure numerical stability across different dtypes
         self._min_curvature_multiplier = 1000.0
