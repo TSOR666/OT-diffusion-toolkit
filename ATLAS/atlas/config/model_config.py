@@ -26,6 +26,7 @@ class HighResModelConfig:
     model_variant: str = "custom"
     conditional: bool = True
     cross_attention_levels: Tuple[int, ...] = (1, 2)
+    conditioning_dim: int = 768
     # Legacy fields retained for backward compatibility; kept in sync with conditioning config.
     use_clip_conditioning: bool = True
     context_dim: int = 768
@@ -111,17 +112,18 @@ class HighResModelConfig:
                 raise ValueError(
                     f"Channels at attention level {lvl} ({channels_at_level}) must be divisible by num_heads ({self.num_heads})."
                 )
+        if self.conditioning_dim < 0:
+            raise ValueError("conditioning_dim must be non-negative.")
         if self.conditional:
             if self.conditioning.context_dim <= 0:
                 raise ValueError("conditioning.context_dim must be positive when conditional=True.")
             if self.context_dim != self.conditioning.context_dim:
                 warnings.warn(
                     f"context_dim ({self.context_dim}) differs from conditioning.context_dim ({self.conditioning.context_dim}); "
-                    "using conditioning.context_dim.",
+                    "this may cause dimension mismatches.",
                     UserWarning,
                     stacklevel=2,
                 )
-                self.context_dim = self.conditioning.context_dim
             if self.use_clip_conditioning != self.conditioning.use_clip:
                 warnings.warn(
                     "use_clip_conditioning differs from conditioning.use_clip; using conditioning.use_clip.",
@@ -129,8 +131,11 @@ class HighResModelConfig:
                     stacklevel=2,
                 )
                 self.use_clip_conditioning = self.conditioning.use_clip
+            if self.conditioning_dim == 0:
+                self.conditioning_dim = self.context_dim
         else:
             self.use_clip_conditioning = False
+            self.conditioning_dim = 0
 
     @property
     def depth(self) -> int:
