@@ -141,8 +141,8 @@ class SamplerConfig:
             except Exception:
                 pass
 
-    def with_overrides(self, **kwargs):
+    def with_overrides(self, **kwargs: object) -> "SamplerConfig":
         """Return a copy with specific fields overridden."""
-        new_cfg = replace(self, **kwargs)
+        new_cfg = replace(self, **kwargs)  # type: ignore[arg-type]
         new_cfg.validate()
         return new_cfg

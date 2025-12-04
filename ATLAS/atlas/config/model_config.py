@@ -142,7 +142,7 @@ class HighResModelConfig:
 
     @property
     def total_downsampling(self) -> int:
-        return 2 ** self.depth
+        return int(2 ** self.depth)
 
     def __repr__(self) -> str:
         return (

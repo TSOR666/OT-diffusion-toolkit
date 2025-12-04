@@ -3,6 +3,8 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 
+__all__ = ["gaussian_blur", "separable_gaussian_blur"]
+
 
 try:
     from torch.nn.functional import gaussian_blur  # type: ignore
