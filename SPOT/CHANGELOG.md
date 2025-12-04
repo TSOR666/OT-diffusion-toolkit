@@ -155,3 +155,8 @@ No security implications - purely a correctness fix.
 **Status**: ✅ CRITICAL BUG FIXED
 **Tests**: 27/27 passing (1 skipped)
 **Production Ready**: YES ✅
+
+## [1.0.0-rc1] - 2025-11-21
+
+### Added
+- Declared the current Sinkhorn fix and tests as release candidate `1.0.0-rc1` to align with the updated package metadata.

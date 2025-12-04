@@ -1,6 +1,6 @@
 ﻿"""Score-Based Schrodinger Bridge Diffusion Solver package."""
 
-__version__ = "0.1.0"
+__version__ = "1.0.0-rc1"
 
 from .metrics import MetricsLogger
 from .utils import create_standard_timesteps, spectral_gradient

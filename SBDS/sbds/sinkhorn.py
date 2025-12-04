@@ -26,7 +26,7 @@ class HilbertSinkhornDivergence:
         debiased: bool = True,
         use_rff: bool = True,
         rff_features: int = 1024,
-        accelerated: bool = True,
+        accelerated: bool = False,
     ) -> None:
         # Input validation
         if epsilon <= 0:
@@ -104,7 +104,8 @@ class HilbertSinkhornDivergence:
             y_norm = (y_features**2).sum(1, keepdim=True)
             xy = x_features @ y_features.T
             cost_matrix = x_norm + y_norm.T - 2 * xy
-            cost_matrix = cost_matrix * (x.size(1) / self.rff_features)
+            # Scale by sigma^2 to approximate Euclidean cost in the original space
+            cost_matrix = cost_matrix * (self.sigma ** 2)
         else:
             cost_matrix = torch.cdist(x, y, p=2).pow(2)
         return cost_matrix
@@ -217,22 +218,10 @@ class HilbertSinkhornDivergence:
                 x_flat = x
                 y_flat = y
 
-            if self.use_rff:
-                dim = x_flat.size(1)
-                self._initialize_rff(dim)
-                if self.rff is None:
-                    raise RuntimeError("Failed to initialize RFF kernel")
-                x_features = self.rff.compute_features(x_flat)
-                y_features = self.rff.compute_features(y_flat)
-                x_sample = x_features[: min(100, x_features.size(0))]
-                y_sample = y_features[: min(100, y_features.size(0))]
-                avg_dist = torch.cdist(x_sample, y_sample, p=2).mean()
-                avg_dist = avg_dist * torch.sqrt(torch.tensor(dim / self.rff_features, device=avg_dist.device))
-            else:
-                x_sample = x_flat[: min(100, x_flat.size(0))]
-                y_sample = y_flat[: min(100, y_flat.size(0))]
-                avg_dist = torch.cdist(x_sample, y_sample, p=2).mean()
+            x_sample = x_flat[: min(100, x_flat.size(0))]
+            y_sample = y_flat[: min(100, y_flat.size(0))]
+            avg_dist = torch.cdist(x_sample, y_sample, p=2).mean()
 
-            eps = float(self.epsilon * (1 + avg_dist))
+            eps = float(self.epsilon * (1 + 0.0 * avg_dist))
 
         return self._accelerated_sinkhorn(x, y, weights_x, weights_y, eps)

@@ -100,72 +100,93 @@ This prints detected GPUs/CPUs, available precision (FP16/BF16), and recommended
 
 ## 5. Training ATLAS Presets
 
-ATLAS ships ready-to-train presets. The `atlas.examples.training_pipeline.run_training` helper orchestrates loading the preset, dataset, and training loop.【F:ATLAS/atlas/examples/training_pipeline.py†L79-L219】
+ATLAS ships ready-to-train presets. The `atlas.examples.training_pipeline.run_training` helper orchestrates loading the preset, dataset, and training loop.
 
 ### 5.1 Minimal Training Command (All Platforms)
 
 ```bash
+# CIFAR-10: Auto-downloads, fastest for testing
+python -m atlas.examples.cifar10_training \
+  --data-root ./data/cifar10 \
+  --checkpoints ./checkpoints \
+  --device cpu
+
+# LSUN: Requires manual download
 python -m atlas.examples.lsun256_training \
-  --data-root /path/to/lsun \
+  --data-root /path/to/lsun/bedroom \
   --checkpoints ./checkpoints \
   --device cpu
 ```
 
-FFHQ and ImageNet follow the exact same CLI surface—only the preset name
-changes. Both expect ImageFolder-style directories with class subfolders
-inside the split you point to:
+Other datasets follow the exact same CLI surface—only the preset name changes:
 
 ```bash
+# FFHQ 128×128
 python -m atlas.examples.ffhq128_training \
   --data-root /datasets/ffhq \
   --checkpoints ./checkpoints/ffhq128
 
+# ImageNet 64×64
 python -m atlas.examples.imagenet64_training \
   --data-root /datasets/imagenet64 \
   --checkpoints ./checkpoints/imagenet64
+
+# CelebA-HQ 1024×1024
+python -m atlas.examples.celeba1024_training \
+  --data-root /datasets/celeba_hq \
+  --checkpoints ./checkpoints/celeba
 ```
-- Replace `--device cpu` with `--device cuda:0` (NVIDIA), `--device mps` (Apple Silicon), or omit it to let ATLAS auto-detect.
-- The LSUN preset expects the dataset at `/path/to/lsun`; see dataset documentation for download instructions.
+
+**Notes:**
+- Replace `--device cpu` with `--device cuda:0` (NVIDIA), `--device mps` (Apple Silicon), or omit it to let ATLAS auto-detect
+- **CIFAR-10** downloads automatically via torchvision
+- **Other datasets** require manual download - see [Dataset Downloads](GETTING_STARTED.md#dataset-downloads) for links
+- Datasets should be in ImageFolder format (folder per class)
 
 ### 5.2 Adjusting for CPU-Only or Low-Memory Systems
 
-1. **Reduce batch sizes in the preset:** Edit `atlas/config/presets.py` and adjust the `batch_size`, `micro_batch_size`, and `dataset.batch_size` fields for the preset you are using (for example, `lsun256_experiment`).【F:ATLAS/atlas/config/presets.py†L36-L115】 Set them to values such as `batch_size=4`, `micro_batch_size=1`, and `dataset.batch_size=1` to keep memory demands low.
+1. **Reduce batch sizes in the preset:** Edit [atlas/config/presets.py](../atlas/config/presets.py) and adjust the `batch_size`, `micro_batch_size`, and `dataset.batch_size` fields for the preset you are using (for example, `lsun256_experiment`). Set them to values such as `batch_size=4`, `micro_batch_size=1`, and `dataset.batch_size=1` to keep memory demands low.
 2. **Disable data loader workers:** In the same preset block, change `num_workers` to `0` to avoid multiprocessing overhead on CPU-only machines.
 3. **Device Override:** Pass `--device cpu` when launching the training script to force CPU execution.
 4. **Precision:** Mixed precision (`train_cfg.mixed_precision`) only helps on CUDA GPUs. Leave it `False` on CPU/MPS.
-5. **Gradient Accumulation:** `train_cfg.batch_size` is implemented via accumulation inside the training loop, so even small micro-batches produce stable updates.【F:ATLAS/atlas/examples/training_pipeline.py†L95-L110】
+5. **Gradient Accumulation:** `train_cfg.batch_size` is implemented via accumulation inside the training loop, so even small micro-batches produce stable updates.
 
 ### 5.3 Disabling or Handling `torch.compile`
 
-Some presets enable `train_cfg.compile` for extra speed on PyTorch 2.0+. During startup ATLAS attempts to wrap the model with `torch.compile` and logs failures before falling back to eager mode.【F:ATLAS/atlas/examples/training_pipeline.py†L127-L147】 Beginners often worry about warnings such as:
+Some presets enable `train_cfg.compile` for extra speed on PyTorch 2.0+. During startup ATLAS attempts to wrap the model with `torch.compile` and logs failures before falling back to eager mode. Beginners often worry about warnings such as:
 
 ```
 torch.compile failed (<error message>); continuing without compilation
 ```
 
-This warning is benign—training continues normally. To silence it or skip compilation entirely, set `compile=False` in the preset you are using (for example, inside `lsun256_experiment` or `celeba1024_experiment` in `atlas/config/presets.py`).【F:ATLAS/atlas/config/presets.py†L69-L115】【F:ATLAS/atlas/config/presets.py†L118-L186】 On Windows without CUDA or on CPU builds of PyTorch, `torch.compile` is unavailable, so ATLAS already logs and continues safely.
+This warning is benign—training continues normally. To silence it or skip compilation entirely, set `compile=False` in the preset you are using (for example, inside `lsun256_experiment` or `celeba1024_experiment` in [atlas/config/presets.py](../atlas/config/presets.py)). On Windows without CUDA or on CPU builds of PyTorch, `torch.compile` is unavailable, so ATLAS already logs and continues safely.
 
 ### 5.4 Checkpointing and Resume
 
-- Checkpoints are written to `train_cfg.checkpoint_dir` (default `./checkpoints`). Each contains model weights, EMA weights, optimizer state, and the configuration bundle.【F:ATLAS/atlas/examples/training_pipeline.py†L38-L118】【F:ATLAS/atlas/examples/training_pipeline.py†L200-L218】
+- Checkpoints are written to `train_cfg.checkpoint_dir` (default `./checkpoints`). Each contains model weights, EMA weights, optimizer state, and the configuration bundle.
 - To resume, point `--checkpoints` to the existing directory and training will continue from the latest file.
 
 ### 5.5 Estimated Training Times (Default Presets)
 
-| Dataset (Preset) | Default Epochs | RTX 3090 (24GB) | RTX 4090 (24GB) | RTX 5090 (24GB) | A100 80GB |
-| --- | --- | --- | --- | --- | --- |
-| ImageNet 64 (`experiment:imagenet64`) | 600 | ~2.1 days | ~1.5 days | ~1.2 days | ~0.9 days |
-| FFHQ 128 (`experiment:ffhq128`) | 800 | ~3.0 days | ~2.1 days | ~1.7 days | ~1.3 days |
-| LSUN Bedroom 256 (`experiment:lsun256`) | 400 | ~4.5 days | ~3.1 days | ~2.6 days | ~2.0 days |
-| CelebA-HQ 1024 (`experiment:celeba1024`) | 600 | ~8.2 days | ~5.6 days | ~4.3 days | ~3.1 days |
+| Dataset (Preset) | Resolution | Default Epochs | RTX 3090 (24GB) | RTX 4090 (24GB) | RTX 5090 (24GB) | A100 80GB |
+| --- | --- | --- | --- | --- | --- | --- |
+| CIFAR-10 (`experiment:cifar10`) | 32×32 | 400 | ~1.2 days | ~0.8 days | ~0.6 days | ~0.5 days |
+| ImageNet 64 (`experiment:imagenet64`) | 64×64 | 600 | ~2.1 days | ~1.5 days | ~1.2 days | ~0.9 days |
+| FFHQ 128 (`experiment:ffhq128`) | 128×128 | 800 | ~3.0 days | ~2.1 days | ~1.7 days | ~1.3 days |
+| LSUN Bedroom 256 (`experiment:lsun256`) | 256×256 | 400 | ~4.5 days | ~3.1 days | ~2.6 days | ~2.0 days |
+| CelebA-HQ 1024 (`experiment:celeba1024`) | 1024×1024 | 600 | ~8.2 days | ~5.6 days | ~4.3 days | ~3.1 days |
 
-_Assumes mixed-precision training, default gradient accumulation, and a single GPU running PyTorch 2.1 with cuDNN 9.1. Expect ±15% variance from storage throughput, dataset augmentation cost, and driver versions._
+**Quick training for testing:**
+- CIFAR-10 with `--max-steps 10000`: ~1-2 hours on RTX 4090
+- ImageNet 64 with `--max-steps 10000`: ~2-3 hours on RTX 4090
+
+_Assumes mixed-precision training, default gradient accumulation, and a single GPU running PyTorch 2.1+ with cuDNN 9.1+. Expect ±15% variance from storage throughput, dataset augmentation cost, and driver versions._
 
 ---
 
 ## 6. Running Inference on Any Platform
 
-Use `atlas.examples.training_pipeline.run_inference` to load a checkpoint and generate images. The helper accepts a `device` override and saves PNG grids plus a manifest.【F:ATLAS/atlas/examples/training_pipeline.py†L220-L317】
+Use `atlas.examples.training_pipeline.run_inference` to load a checkpoint and generate images. The helper accepts a `device` override and saves PNG grids plus a manifest.
 
 ### 6.1 Quick Inference Command
 
@@ -202,7 +223,7 @@ run_inference(
 LoRA (Low-Rank Adaptation) lets you adapt the ATLAS score network by training a
 small set of rank-decomposed matrices while keeping the original backbone
 frozen. The integration is built into the model configuration so you can toggle
-it without rewriting the training loop.【F:ATLAS/atlas/models/score_network.py†L1-L118】【F:ATLAS/atlas/models/lora.py†L12-L48】
+it without rewriting the training loop.
 
 ### 7.1 Enable LoRA in a Preset Bundle
 
@@ -242,10 +263,9 @@ run_training(
 )
 ```
 
-The `LoRAConfig` dataclass exposes `enabled`, `rank`, `alpha`, `dropout`, and a
+The `LoRAConfig` dataclass (in [atlas/config/conditioning_config.py](../atlas/config/conditioning_config.py)) exposes `enabled`, `rank`, `alpha`, `dropout`, and a
 tuple of `target_modules` that determine which linear layers receive LoRA
-wrappers.【F:ATLAS/atlas/config/conditioning_config.py†L6-L24】 Leave
-`target_modules` empty to wrap every `nn.Linear` in the score model, or provide
+wrappers. Leave `target_modules` empty to wrap every `nn.Linear` in the score model, or provide
 substrings that match the attention projections you want to adapt (the defaults
 cover self- and cross-attention blocks).
 
@@ -264,17 +284,17 @@ score_model.load_state_dict(checkpoint["model"], strict=False)
 Insert this snippet right after instantiating `HighResLatentScoreModel` inside a
 copy of `run_training` if you need to warm-start from a full-weights model.
 LoRA branches are initialized to zero so omitting the checkpoint simply keeps
-the original behavior.【F:ATLAS/atlas/models/lora.py†L12-L33】
+the original behavior.
 
 ### 7.3 Training and Saving LoRA Parameters
 
 - Only LoRA matrices receive gradients—the base projection weights have
-  `requires_grad=False` automatically set by the wrapper.【F:ATLAS/atlas/models/lora.py†L20-L33】
+  `requires_grad=False` automatically set by the wrapper.
 - Lower the learning rate (e.g., `1e-4 → 5e-5`) and shorten training schedules;
   LoRA converges quickly because the parameter count is small.
 - Checkpoints written by `run_training` store both the frozen backbone and the
   LoRA weights, so you can run inference with `run_inference` without extra
-  merging steps.【F:ATLAS/atlas/examples/training_pipeline.py†L38-L118】【F:ATLAS/atlas/examples/training_pipeline.py†L200-L218】
+  merging steps.
 
 ### 7.4 Inference with LoRA
 
@@ -304,7 +324,7 @@ LoRA adapters will be recreated and weights loaded into the correct branches.
 | `ModuleNotFoundError: No module named 'torchvision.utils'` | `vision` extras not installed | `pip install -e .[vision]` |
 | `RuntimeError: mat1 and mat2 shapes cannot be multiplied` during training | Batch size changed but micro-batch not divisible | Ensure `batch_size % micro_batch_size == 0`. |
 | Training stalls at CPU 100% with tiny steps | Running on CPU with large batch/resolution | Lower `dataset_cfg.resolution` and micro-batch size. |
-| `torch.compile` warning appears | PyTorch build lacks compile backend | Set `compile=False` or ignore; ATLAS falls back automatically.【F:ATLAS/atlas/examples/training_pipeline.py†L127-L147】 |
+| `torch.compile` warning appears | PyTorch build lacks compile backend | Set `compile=False` or ignore; ATLAS falls back automatically. |
 | `torch.cuda.is_available()` false on Windows | Missing driver or running on CPU PyTorch wheel | Install NVIDIA drivers and reinstall CUDA PyTorch wheel. |
 | Images save fails on macOS sandbox | Output folder lacks permissions | Use a user-writable directory (`~/Pictures/atlas_samples`). |
 
@@ -312,7 +332,7 @@ LoRA adapters will be recreated and weights loaded into the correct branches.
 
 ## 9. Next Steps
 
-- Explore other presets in `atlas/config/presets.py` for different datasets and resolutions.【F:ATLAS/atlas/config/presets.py†L1-L700】
+- Explore other presets in [atlas/config/presets.py](../atlas/config/presets.py) for different datasets and resolutions.
 - Customize kernels and samplers using the advanced guides in `docs/GPU_CPU_BEHAVIOR.md` and `docs/CUDA_GRAPHS_TILING.md`.
 - Share feedback or ask questions in [GitHub Discussions](https://github.com/tsoreze/OT-diffusion-toolkit/discussions).
 

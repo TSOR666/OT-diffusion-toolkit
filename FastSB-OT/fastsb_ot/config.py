@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, List, Optional, Literal
@@ -16,6 +17,7 @@ logger = common.logger
 Version = common.Version
 NUMPY_AVAILABLE = common.NUMPY_AVAILABLE
 _CACHED_DEVICE_PROPERTIES = common._CACHED_DEVICE_PROPERTIES
+_DEVICE_CACHE_LOCK = threading.Lock()
 np = getattr(common, "np", None)
 
 __all__ = ["QualityPreset", "FastSBOTConfig"]
@@ -71,7 +73,7 @@ class FastSBOTConfig:
     legacy_transport_mode: bool = False
 
     # Quality enhancements
-    corrector_steps: int = field(init=False)
+    corrector_steps: Optional[int] = None
     corrector_snr: float = 0.25
     freq_weighting: bool = True
 
@@ -154,9 +156,10 @@ class FastSBOTConfig:
     _sinkhorn_iterations: int = field(init=False, default=50)
 
     def __post_init__(self) -> None:
-        """Set parameters based on quality preset and apply seed"""
+        """Set parameters based on quality preset, validate, and apply seed"""
         self._apply_quality_preset()
         self._apply_hardware_config()
+        self._validate_config()
         self._apply_seed()
 
     def _apply_quality_preset(self) -> None:
@@ -168,10 +171,10 @@ class FastSBOTConfig:
             "extreme": (2, 100)
         }
 
-        if self.quality in presets:
-            self.corrector_steps, sinkhorn_iterations = presets[self.quality]
-        else:
-            self.corrector_steps, sinkhorn_iterations = presets["balanced"]
+        default_corrector, sinkhorn_iterations = presets.get(self.quality, presets["balanced"])
+
+        if self.corrector_steps is None:
+            self.corrector_steps = default_corrector
 
         self._sinkhorn_iterations = sinkhorn_iterations
 
@@ -179,10 +182,10 @@ class FastSBOTConfig:
         """Apply hardware-specific adjustments with memory limits"""
         if torch.cuda.is_available():
             device_id = torch.cuda.current_device()
-            if device_id not in _CACHED_DEVICE_PROPERTIES:
-                _CACHED_DEVICE_PROPERTIES[device_id] = torch.cuda.get_device_properties(device_id)
-
-            props = _CACHED_DEVICE_PROPERTIES[device_id]
+            with _DEVICE_CACHE_LOCK:
+                if device_id not in _CACHED_DEVICE_PROPERTIES:
+                    _CACHED_DEVICE_PROPERTIES[device_id] = torch.cuda.get_device_properties(device_id)
+                props = _CACHED_DEVICE_PROPERTIES[device_id]
             capability = props.major, props.minor
             total_memory = props.total_memory
 
@@ -213,6 +216,53 @@ class FastSBOTConfig:
         else:
             self.use_channels_last = False
             self.legacy_transport_mode = True
+
+    def _validate_config(self) -> None:
+        """Validate configuration parameter ranges and consistency."""
+        if not (0 <= self.ddim_eta <= 1):
+            raise ValueError(
+                f"ddim_eta must be in [0, 1], got {self.ddim_eta}. "
+                "Use 0 for deterministic DDIM, 1 for DDPM-like sampling."
+            )
+
+        if not (0.5 < self.dynamic_thresholding_percentile < 1.0):
+            raise ValueError(
+                f"dynamic_thresholding_percentile must be in (0.5, 1.0), got {self.dynamic_thresholding_percentile}. "
+                "Values below 0.5 clip below median, values at 1.0 disable clipping."
+            )
+
+        if self.guidance_scale < 0:
+            raise ValueError(f"guidance_scale must be non-negative, got {self.guidance_scale}")
+        if self.guidance_scale > 5.0:
+            logger.warning(
+                f"guidance_scale ({self.guidance_scale}) is unusually high. "
+                "Recommended range: 1.0-2.0 for score scaling (this is NOT CFG)."
+            )
+
+        if self.training_max_patch_size is not None:
+            if self.training_max_patch_size < 64:
+                raise ValueError(
+                    f"training_max_patch_size ({self.training_max_patch_size}) is too small. "
+                    "Minimum recommended: 64 pixels."
+                )
+            if self.training_max_patch_size > self.max_patch_size * 2:
+                logger.warning(
+                    f"training_max_patch_size ({self.training_max_patch_size}) is much larger than "
+                    f"max_patch_size ({self.max_patch_size}). This may cause distribution shift during inference. "
+                    "Consider increasing max_patch_size."
+                )
+
+        if self.eps <= 0:
+            raise ValueError(f"eps must be positive, got {self.eps}")
+
+        if not (0 < self.corrector_snr <= 1.0):
+            logger.warning(
+                f"corrector_snr ({self.corrector_snr}) is outside typical range (0, 1]. "
+                "This may cause instability in corrector steps."
+            )
+
+        if not (0 <= self.momentum_beta < 1.0):
+            raise ValueError(f"momentum_beta must be in [0, 1), got {self.momentum_beta}")
 
     def _apply_seed(self) -> None:
         """Apply seed for reproducibility with optional deterministic RNG"""

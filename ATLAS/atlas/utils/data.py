@@ -83,6 +83,19 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
             download=config.download,
             target_type=target_type,
         )
+    if name in {"cifar10"}:
+        if datasets is None:
+            raise ImportError(
+                "torchvision is required for CIFAR10. Install torchvision to continue."
+            ) from _TORCHVISION_ERROR
+        split_name = str(split).lower()
+        is_train = split_name not in {"test", "val", "validation"}
+        return datasets.CIFAR10(
+            root=str(root),
+            train=is_train,
+            transform=transform,
+            download=config.download,
+        )
     if name in {"ffhq", "ffhq128", "imagenet", "imagenet64"}:
         if datasets is None:
             raise ImportError(
@@ -126,7 +139,7 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
 
     raise ValueError(
         f"Unsupported dataset '{config.name}'. "
-        "Supported options: lsun, celeba, ffhq, imagenet, fake"
+        "Supported options: lsun, celeba, cifar10, ffhq, imagenet, fake"
     )
 
 
