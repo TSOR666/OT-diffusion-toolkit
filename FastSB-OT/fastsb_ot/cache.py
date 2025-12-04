@@ -21,18 +21,19 @@ class MemoryEfficientCacheFixed:
 
     def __init__(self, max_size_mb: int = 1024, max_entries: int = 100,
                  cuda_flush_watermark: float = 0.8, flush_threshold_mb: int = 32):
-        self.cache = OrderedDict()
-        self.max_size_bytes = max_size_mb * 1024 * 1024
-        self.max_entries = max_entries
-        self.current_size = 0
-        self.hits = 0
-        self.misses = 0
-        self.cuda_flush_watermark = cuda_flush_watermark
-        self.flush_threshold_bytes = flush_threshold_mb * 1024 * 1024
-        self._lock = threading.Lock()
-        self._last_cuda_flush = 0
-        self._pending_flush_bytes = 0
-        self._adaptive_resize_attempts = 0
+        # TYPE SAFETY FIX: Add explicit type annotations for cache
+        self.cache: OrderedDict[Any, torch.Tensor] = OrderedDict()
+        self.max_size_bytes: int = max_size_mb * 1024 * 1024
+        self.max_entries: int = max_entries
+        self.current_size: int = 0
+        self.hits: int = 0
+        self.misses: int = 0
+        self.cuda_flush_watermark: float = cuda_flush_watermark
+        self.flush_threshold_bytes: int = flush_threshold_mb * 1024 * 1024
+        self._lock: threading.Lock = threading.Lock()
+        self._last_cuda_flush: float = 0.0
+        self._pending_flush_bytes: int = 0  # TYPE FIX: Explicit int type
+        self._adaptive_resize_attempts: int = 0
 
     def get(self, key: Any, clone: bool = False) -> Optional[torch.Tensor]:
         """Get from cache with optional cloning for immutability"""
@@ -45,7 +46,7 @@ class MemoryEfficientCacheFixed:
             self.misses += 1
             return None
 
-    def put(self, key: Any, value: torch.Tensor):
+    def put(self, key: Any, value: torch.Tensor) -> None:
         """Put tensor in cache with proper cleanup"""
         if value.requires_grad:
             value = value.detach()
@@ -82,7 +83,7 @@ class MemoryEfficientCacheFixed:
             self.current_size += value_size
             self._maybe_downscale_cache()
 
-    def _conditional_cuda_flush(self):
+    def _conditional_cuda_flush(self) -> None:
         """Only flush when significant unused memory is reserved, reset counter properly"""
         if not torch.cuda.is_available():
             self._pending_flush_bytes = 0
@@ -125,7 +126,7 @@ class MemoryEfficientCacheFixed:
             self._last_cuda_flush = current_time
             self._pending_flush_bytes = 0
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear cache and free GPU memory"""
         with self._lock:
             for value in self.cache.values():
@@ -139,11 +140,11 @@ class MemoryEfficientCacheFixed:
                 torch.cuda.empty_cache()
                 self._maybe_downscale_cache(force=True)
 
-    def reset(self):
+    def reset(self) -> None:
         """Alias for clear() for backward compatibility"""
         self.clear()
 
-    def _maybe_downscale_cache(self, force: bool = False):
+    def _maybe_downscale_cache(self, force: bool = False) -> None:
         """Adapt cache limits to available GPU memory to reduce manual tuning."""
         if not torch.cuda.is_available():
             return

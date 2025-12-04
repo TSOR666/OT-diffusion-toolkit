@@ -334,9 +334,12 @@ class HierarchicalBridge(nn.Module):
         if not transports:
             multiscale = x + drift
         else:
-            weights = torch.stack(weights, dim=0)
-            weights = F.softmax(weights / 0.1, dim=0).to(x.dtype)
-            multiscale = sum(w * tr for w, tr in zip(weights, transports))
+            # CRITICAL FIX: Explicit type handling to prevent confusion between list and tensor
+            weights_tensor = torch.stack(weights, dim=0)
+            weights_tensor = F.softmax(weights_tensor / 0.1, dim=0).to(x.dtype)
+            # Unstack back to list for weighted sum (more explicit than zip iteration)
+            weights_list = [weights_tensor[i] for i in range(len(transports))]
+            multiscale = sum(w * tr for w, tr in zip(weights_list, transports))
 
         return (1 - gate) * (x + drift) + gate * multiscale
 

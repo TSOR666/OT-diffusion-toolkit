@@ -153,13 +153,13 @@ class FastSBOTConfig:
     # Internal fields
     _sinkhorn_iterations: int = field(init=False, default=50)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Set parameters based on quality preset and apply seed"""
         self._apply_quality_preset()
         self._apply_hardware_config()
         self._apply_seed()
 
-    def _apply_quality_preset(self):
+    def _apply_quality_preset(self) -> None:
         """Apply quality preset settings"""
         presets = {
             "draft": (0, 10),
@@ -175,7 +175,7 @@ class FastSBOTConfig:
 
         self._sinkhorn_iterations = sinkhorn_iterations
 
-    def _apply_hardware_config(self):
+    def _apply_hardware_config(self) -> None:
         """Apply hardware-specific adjustments with memory limits"""
         if torch.cuda.is_available():
             device_id = torch.cuda.current_device()
@@ -214,12 +214,12 @@ class FastSBOTConfig:
             self.use_channels_last = False
             self.legacy_transport_mode = True
 
-    def _apply_seed(self):
+    def _apply_seed(self) -> None:
         """Apply seed for reproducibility with optional deterministic RNG"""
         if self.seed is not None:
             random.seed(self.seed)
-            # Only seed NumPy if it's available
-            if NUMPY_AVAILABLE:
+            # CRITICAL FIX: Only seed NumPy if it's available and not None
+            if NUMPY_AVAILABLE and np is not None:
                 np.random.seed(self.seed)
             torch.manual_seed(self.seed)
 

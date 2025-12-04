@@ -66,6 +66,11 @@ class NoisePredictorToScoreWrapper(nn.Module):
 
     # ------------------------------------------------------------------
     def _sigma_from_t(self, t: Union[torch.Tensor, float], ref: torch.Tensor) -> torch.Tensor:
+        """Compute sigma with improved numerical stability.
+
+        CRITICAL FIX: Compute 1 - alpha in FP64 to avoid catastrophic cancellation
+        when alpha_bar ≈ 1 (near t=0, clean samples).
+        """
         device = ref.device
         dtype = torch.float32
 
@@ -76,9 +81,11 @@ class NoisePredictorToScoreWrapper(nn.Module):
 
         flat = t_tensor.reshape(-1)
         alpha_vals = [float(self.schedule(float(v))) for v in flat]
-        alpha_tensor = torch.tensor(alpha_vals, device=device, dtype=dtype).reshape(t_tensor.shape)
+        alpha_tensor = torch.tensor(alpha_vals, device=device, dtype=torch.float64).reshape(t_tensor.shape)
 
-        sigma = torch.sqrt(torch.clamp(1.0 - alpha_tensor, min=self.clamp))
+        # Compute 1 - alpha in FP64 to preserve precision near alpha=1
+        one_minus_alpha = torch.clamp(1.0 - alpha_tensor, min=self.clamp)
+        sigma = torch.sqrt(one_minus_alpha).to(torch.float32)
 
         return sigma.to(ref.dtype if ref.dtype.is_floating_point else torch.float32)
 

@@ -91,8 +91,13 @@ def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = N
     if generator is not None:
         try:
             return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
-        except Exception:
-            # Device mismatch or unsupported generator  fall back deterministically if possible
+        except Exception as e:
+            # CRITICAL FIX: Log warning when RNG fallback breaks determinism
+            logger.warning(
+                f"Generator-device mismatch detected: {e}. "
+                f"Falling back to non-deterministic random generation. "
+                f"This will break reproducibility. Ensure generator device matches tensor device."
+            )
             return torch.randn_like(x)
     else:
         return torch.randn_like(x)
