@@ -44,4 +44,4 @@ def karras_noise_schedule(
         sigma_max_root = sigma_max ** (1.0 / rho)
         sigma = (sigma_max_root + t * (sigma_min_root - sigma_max_root)) ** rho
         alpha_bar = 1.0 / (1.0 + sigma ** 2)
-        return alpha_bar
+        return float(alpha_bar)

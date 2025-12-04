@@ -1,5 +1,5 @@
 import math
-from typing import List, Tuple
+from typing import List, Tuple, cast
 import warnings
 import logging
 import torch
@@ -36,12 +36,12 @@ class LoRALinear(nn.Module):
         nn.init.zeros_(self.lora_up.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base_out = self.base(x)
+        base_out = cast(torch.Tensor, self.base(x))
         lora_hidden = self.lora_down(x)
         if self.dropout is not None:
             lora_hidden = self.dropout(lora_hidden)
         lora_out = self.lora_up(lora_hidden) * self.scale
-        return base_out + lora_out
+        return cast(torch.Tensor, base_out + lora_out)
 
     def merge_lora_weights(self) -> None:
         """Merge LoRA weights into the base layer for inference."""
