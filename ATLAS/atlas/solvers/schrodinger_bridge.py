@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 try:
     from torch.cuda.amp import autocast
 except Exception:  # pragma: no cover - autocast optional
@@ -217,7 +216,13 @@ class SchroedingerBridgeSolver:
 
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
-        beta_t = torch.clamp(-alpha_prime / alpha_safe, min=0.0)
+        beta_raw = -alpha_prime / alpha_safe
+        # Noise schedules like Karras increase alpha over time; take the magnitude
+        # to keep the diffusion coefficient positive in those cases.
+        beta_t = torch.clamp(beta_raw, min=info.tiny)
+        if (beta_raw <= 0).any():
+            beta_t = torch.clamp(beta_raw.abs(), min=info.tiny)
+
         f_t = -0.5 * beta_t
         g_sq_t = beta_t
 
@@ -626,7 +631,9 @@ class SchroedingerBridgeSolver:
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
             dtype_info = torch.finfo(denom.dtype)
-            min_denom = torch.sqrt(torch.tensor(dtype_info.eps, dtype=denom.dtype))
+            min_denom = torch.tensor(
+                dtype_info.tiny * self._min_curvature_multiplier, dtype=denom.dtype
+            )
 
             if (not denom_is_finite) or denom_abs < min_denom:
                 denom_value = float(denom.detach().cpu().item()) if denom_is_finite else float("nan")
@@ -813,7 +820,11 @@ class SchroedingerBridgeSolver:
                     pairwise_weights = None
 
             if pairwise_weights is not None:
-                P_zx = pairwise_weights.to(fg.dtype) * fg.unsqueeze(0)
+                weights = pairwise_weights.to(fg.dtype)
+                # Ensure weights form a proper stochastic matrix even if approximations
+                # produce small negative values.
+                weights = torch.clamp(weights, min=0.0)
+                P_zx = weights * fg.unsqueeze(0)
                 row_sums = torch.clamp(P_zx.sum(dim=1, keepdim=True), min=1e-10)
                 P_zx_norm = P_zx / row_sums
                 z_next = P_zx_norm @ x_next_flat

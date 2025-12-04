@@ -7,9 +7,6 @@ Run with: python -m atlas.check_hardware
 """
 
 import sys
-from typing import Optional
-
-import torch
 
 
 def check_hardware(verbose: bool = True) -> dict:
@@ -171,7 +168,7 @@ def _print_recommendations(recs: dict) -> None:
     print()
     print("sampler = create_sampler(")
     print("    checkpoint='model.pt',")
-    print(f"    gpu_memory='auto',  # Or specify: '8GB', '16GB', '24GB'")
+    print("    gpu_memory='auto',  # Or specify: '8GB', '16GB', '24GB'")
     print(f"    resolution={recs['resolution']},")
     print(f"    batch_size={recs['batch_size']},")
     if recs["enable_cuda_graphs"]:

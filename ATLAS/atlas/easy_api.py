@@ -32,7 +32,7 @@ GPU Memory Presets:
 import torch
 import warnings
 from pathlib import Path
-from typing import Union, List, Optional, Dict, Any, Tuple, Mapping
+from typing import Union, List, Optional, Tuple, Mapping
 from dataclasses import dataclass, replace
 
 from atlas.models.score_network import HighResLatentScoreModel
@@ -677,7 +677,6 @@ def create_sampler(
         detect_hardware_capabilities,
         enable_optimal_precision,
         gate_expensive_feature,
-        adjust_config_for_hardware,
     )
 
     hw_caps = detect_hardware_capabilities()
@@ -938,7 +937,7 @@ def create_sampler(
                 sampler=sampler,
             )
 
-    print(f"[ATLAS] Sampler ready! Configuration summary:")
+    print("[ATLAS] Sampler ready! Configuration summary:")
     print(f"  - Resolution: {profile.resolution}x{profile.resolution}")
     print(f"  - Max batch size: {profile.batch_size}")
     print(f"  - Mixed precision: {profile.use_mixed_precision}")

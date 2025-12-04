@@ -105,7 +105,6 @@ def detect_hardware_capabilities() -> HardwareCapabilities:
 
 def _detect_cuda_capabilities() -> HardwareCapabilities:
     """Detect CUDA GPU capabilities."""
-    device_props = torch.cuda.get_device_properties(0)
     device_name = torch.cuda.get_device_name(0)
     compute_cap = torch.cuda.get_device_capability(0)
 
@@ -313,23 +312,24 @@ def print_hardware_info() -> None:
         print(f"Compute Capability: {major}.{minor}")
 
     if info['total_memory_gb'] > 0:
-        print(f"\nMemory:")
+        print("\nMemory:")
         print(f"  Total: {info['total_memory_gb']:.1f} GB")
         print(f"  Free:  {info['free_memory_gb']:.1f} GB")
 
-    bool_to_text = lambda flag: "Yes" if flag else "No"
+    def bool_to_text(flag: bool) -> str:
+        return "Yes" if flag else "No"
 
-    print(f"\nPrecision Support:")
+    print("\nPrecision Support:")
     print(f"  FP16:  {bool_to_text(info['fp16_supported'])}")
     print(f"  BF16:  {bool_to_text(info['bf16_supported'])}")
     print(f"  TF32:  {bool_to_text(info['tf32_available'])} (enabled: {info['tf32_enabled']})")
 
-    print(f"\nAdvanced Features:")
+    print("\nAdvanced Features:")
     print(f"  CUDA Graphs: {bool_to_text(info['cuda_graphs_supported'])}")
     if info['cuda_version']:
         print(f"  CUDA Version: {info['cuda_version']}")
 
-    print(f"\nRecommendations:")
+    print("\nRecommendations:")
     print(f"  Precision: {info['recommended_precision'].upper()}")
     print(f"  Mixed Precision: {'Enabled' if info['mixed_precision'] else 'Disabled'}")
     print(f"  Max Batch Size: {info['max_batch_size']}")
