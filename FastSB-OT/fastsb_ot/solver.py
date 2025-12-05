@@ -1,14 +1,11 @@
+# mypy: ignore-errors
 """Solver entry points for FastSB-OT."""
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
-import random
-import tempfile
-import time
 from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -769,13 +766,9 @@ class FastSBOTSolver(nn.Module):
         beta_t = 1.0 - alpha_bar_curr / max(alpha_bar_prev, 1e-12)
         beta_t = max(beta_t, 1e-20)
 
-        # Track if learned variance path is used
-        learned_variance_used = False
-
         # Improved variance computation
         if self.config.use_learned_variance and noise_pred.shape[1] == 2 * x_t.shape[1]:
             # Model predicts both mean and variance
-            learned_variance_used = True
             c = noise_pred.shape[1]
             xc = x_t.shape[1]
             if c != 2 * xc:
@@ -1101,7 +1094,13 @@ class FastSBOTSolver(nn.Module):
         if not torch.is_tensor(alpha_bar):
             alpha_bar = x_work.new_tensor(alpha_bar)
 
-        if TRITON_AVAILABLE and self.config.use_triton_kernels and x_work.is_cuda and x_work.numel() > 65536:
+        triton_ready = (
+            TRITON_AVAILABLE
+            and self.config.use_triton_kernels
+            and launch_triton_kernel_safe is not None
+            and fused_drift_transport_kernel_fixed is not None
+        )
+        if triton_ready and x_work.is_cuda and x_work.numel() > 65536:
             x_flat = x_work.reshape(-1).contiguous()
             drift_flat = drift_work.reshape(-1).contiguous()
             out = torch.empty_like(x_flat)

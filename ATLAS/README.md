@@ -229,7 +229,7 @@ from atlas.solvers import AdvancedHierarchicalDiffusionSampler
 from atlas.schedules import karras_noise_schedule
 
 model = HighResLatentScoreModel(HighResModelConfig()).to("cuda").eval()
-state = torch.load("checkpoints/atlas_latest.pt", map_location="cuda")
+state = torch.load("checkpoints/atlas_latest.pt", map_location="cuda", weights_only=True)
 model.load_state_dict(state["model"])
 
 kernel_cfg = KernelConfig(kernel_type="gaussian", epsilon=0.1, solver_type="rff")

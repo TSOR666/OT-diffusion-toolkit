@@ -151,7 +151,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = HighResLatentScoreModel(model_config).to(device).eval()
 
 # Load checkpoint
-checkpoint = torch.load("model.pt", map_location=device)
+checkpoint = torch.load("model.pt", map_location=device, weights_only=True)
 model.load_state_dict(checkpoint["model"])
 
 # Configure sampler

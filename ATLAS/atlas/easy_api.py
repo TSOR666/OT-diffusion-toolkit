@@ -46,6 +46,22 @@ from atlas.utils.hardware import safe_cuda_mem_get_info
 from atlas.utils.memory import get_peak_memory_mb
 
 
+def _safe_torch_load(path: Union[str, Path], map_location=None):
+    """
+    Load a checkpoint with weights_only=True when supported to avoid unsafe pickle execution.
+    Falls back to standard torch.load if the installed PyTorch version lacks the flag.
+    """
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    load_kwargs = {"map_location": map_location}
+    try:
+        return torch.load(checkpoint_path, weights_only=True, **load_kwargs)  # type: ignore[call-arg]
+    except TypeError:
+        return torch.load(checkpoint_path, **load_kwargs)
+
+
 _CLIP_MODEL_CONTEXT_DIMS = {
     "vit-b-32": 512,
     "vit-b-16": 512,
@@ -847,7 +863,7 @@ def create_sampler(
 
         print(f"[ATLAS] Loading checkpoint: {checkpoint}")
         try:
-            state_dict = torch.load(checkpoint, map_location=device)
+            state_dict = _safe_torch_load(checkpoint, map_location=device)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load checkpoint from {checkpoint}: {e}\n"

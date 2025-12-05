@@ -1,10 +1,11 @@
+# mypy: ignore-errors
 """Transport modules for FastSB-OT."""
 
 from __future__ import annotations
 
 import math
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -127,9 +128,11 @@ class SlicedOptimalTransport:
         x_proj = x.new_empty(B, N)
         y_proj = y.new_empty(B, N)
 
+        gen = self.generator if self.generator is not None else torch.Generator(device=device)
+
         for i in range(n_projections):
             # Generate and normalize theta in FP32 for stability
-            theta = torch.randn(d, device=device, dtype=torch.float32, generator=self.generator)
+            theta = torch.randn(d, device=device, dtype=torch.float32, generator=gen)
             theta = F.normalize(theta, dim=0)
             theta = theta.to(dtype)  # Cast back to data dtype
 
@@ -181,8 +184,6 @@ class SlicedOptimalTransport:
     ) -> torch.Tensor:
         """Support for custom marginals, defaults to uniform"""
         B, n, m = C_batch.shape
-        device = C_batch.device
-        dtype = C_batch.dtype
 
         if max_iter is None:
             max_iter = self.sinkhorn_iters

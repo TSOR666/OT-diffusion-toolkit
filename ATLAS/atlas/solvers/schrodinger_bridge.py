@@ -72,6 +72,10 @@ class SchroedingerBridgeSolver:
             sampler_config = SamplerConfig()
             
         # Extract configuration parameters
+        if not (1e-10 <= kernel_config.epsilon <= 1e2):
+            raise ValueError(
+                f"epsilon must be in [1e-10, 1e2], got {kernel_config.epsilon}"
+            )
         self.epsilon = kernel_config.epsilon
         self.adaptive_epsilon = kernel_config.adaptive_epsilon
         self.solver_type = kernel_config.solver_type
@@ -83,7 +87,15 @@ class SchroedingerBridgeSolver:
                 f"Supported types are: {sorted(_VALID_KERNEL_TYPES)}"
             )
         self.kernel_type = kernel_type
+        if not (1 <= kernel_config.rff_features <= 100_000):
+            raise ValueError(
+                f"rff_features must be in [1, 100000], got {kernel_config.rff_features}"
+            )
         self.rff_features = kernel_config.rff_features
+        if not (1 <= kernel_config.n_landmarks <= 10_000):
+            raise ValueError(
+                f"n_landmarks must be in [1, 10000], got {kernel_config.n_landmarks}"
+            )
         self.n_landmarks = kernel_config.n_landmarks
 
         self.sb_iterations = sampler_config.sb_iterations
@@ -104,9 +116,19 @@ class SchroedingerBridgeSolver:
         else:
             self._amp_context = nullcontext
 
+        # Initialize logger early for validation warnings
+        self.logger = logging.getLogger("SchroedingerBridgeSolver")
+        self.logger.setLevel(logging.INFO if sampler_config.verbose_logging else logging.WARNING)
+
         # Set random seed if provided
         if self.seed is not None:
             set_seed(self.seed)
+            if self.device.type == "cuda":
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+                self.logger.info(
+                    "Deterministic CUDA kernels enabled due to fixed seed; this may reduce performance."
+                )
         
         # Initialize performance tracking
         self.perf_stats = {
@@ -119,11 +141,7 @@ class SchroedingerBridgeSolver:
             'mean_weights': [],
             'hierarchy': [],
         }
-        
-        # Initialize logger
-        self.logger = logging.getLogger("SchroedingerBridgeSolver")
-        self.logger.setLevel(logging.INFO if sampler_config.verbose_logging else logging.WARNING)
-        
+
         # Initialize kernel operator cache
         self.kernel_operators: "OrderedDict[Tuple[Any, ...], KernelOperator]" = OrderedDict()
         self.max_kernel_cache_size = int(kernel_config.max_kernel_cache_size)
@@ -191,28 +209,30 @@ class SchroedingerBridgeSolver:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
         alpha_t = self._schedule_to_tensor(t, reference)
-        delta = 1e-3
-        t_upper = min(1.0, t + delta)
-        t_lower = max(0.0, t - delta)
 
-        if t_upper == t_lower:
-            delta = 1e-4
-            t_upper = min(1.0, t + delta)
-            t_lower = max(0.0, t - delta)
-            if t_upper == t_lower:
-                zero = torch.zeros_like(alpha_t)
-                return zero, zero
+        # Use an adaptive step size to remain stable near the boundaries.
+        base_h = min(1e-3, max(1e-6, min(t, 1.0 - t) / 2.0))
 
-        alpha_upper = self._schedule_value_to_tensor(
-            self.noise_schedule(t_upper), reference
-        )
-        alpha_lower = self._schedule_value_to_tensor(
-            self.noise_schedule(t_lower), reference
-        )
+        def _finite_difference(h_val: float) -> torch.Tensor:
+            """Centered difference with boundary safety."""
+            t_plus = min(1.0, t + h_val)
+            t_minus = max(0.0, t - h_val)
+            if t_plus == t_minus:
+                return torch.zeros_like(alpha_t)
 
-        denom = max(t_upper - t_lower, 1e-6)
-        denom_tensor = alpha_t.new_tensor(denom)
-        alpha_prime = (alpha_upper - alpha_lower) / denom_tensor
+            alpha_plus = self._schedule_value_to_tensor(
+                self.noise_schedule(t_plus), reference
+            )
+            alpha_minus = self._schedule_value_to_tensor(
+                self.noise_schedule(t_minus), reference
+            )
+            denom = max(t_plus - t_minus, 1e-12)
+            return (alpha_plus - alpha_minus) / alpha_t.new_tensor(denom)
+
+        # Richardson extrapolation for a higher-order derivative estimate.
+        D_h = _finite_difference(base_h)
+        D_h2 = _finite_difference(base_h / 2.0)
+        alpha_prime = (4 * D_h2 - D_h) / 3.0
 
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
@@ -465,8 +485,10 @@ class SchroedingerBridgeSolver:
                     if hasattr(evicted_operator, "clear_cache"):
                         try:
                             evicted_operator.clear_cache()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            self.logger.error(
+                                "Failed to clear cache for %s due to %s", evicted_key, exc
+                            )
                     self.logger.debug(f"Evicted kernel operator cache entry {evicted_key}")
         
         self.perf_stats['kernel_time'] += time.time() - kernel_start_time
@@ -499,6 +521,14 @@ class SchroedingerBridgeSolver:
             # Light SB approach: solve (I - K)f = 1 directly
             # Initialize with ones
             f = torch.ones(batch_size, device=self.device)
+
+            # Proactively check conditioning to avoid CG on nearly singular systems.
+            cond_estimate = self._check_system_conditioning(kernel_op, x)
+            if cond_estimate > 1e4:
+                self.logger.warning(
+                    "Estimated condition number of (I - K) is high (%.2e); CG may converge slowly.",
+                    cond_estimate,
+                )
 
             # Set up linear operator for conjugate gradient
             def linear_op(v):
@@ -534,7 +564,7 @@ class SchroedingerBridgeSolver:
             # Initialize potentials
             f = torch.ones(batch_size, device=self.device)
             g = torch.ones_like(f)
-            
+
             # Iterative updates
             for i in range(max_iter):
                 f_prev = f.clone()
@@ -560,12 +590,64 @@ class SchroedingerBridgeSolver:
                         float(KTf.max()),
                     )
                 g = 1.0 / torch.clamp(KTf, min=1e-8, max=1e8)
-                
+
                 # Check convergence
-                if torch.max(torch.abs(f - f_prev)) < self.error_tolerance:
+                Kg_check = kernel_op.apply(x, g)
+                convergence_error = torch.max(torch.abs(f * Kg_check - 1.0))
+                if convergence_error < self.error_tolerance:
                     break
-        
+
+        Kg_final = kernel_op.apply(x, g)
+        convergence_error = torch.max(torch.abs(f * Kg_final - 1.0))
+        if convergence_error > self.error_tolerance:
+            self.logger.warning(
+                "Sinkhorn iteration did not meet tolerance: error=%.3e",
+                float(convergence_error),
+            )
+
+        marginal_error = torch.abs(f * Kg_final - 1.0).max()
+        if marginal_error > 1e-3:
+            raise RuntimeError(
+                f"Marginal constraint violated: max error {float(marginal_error):.3e}"
+            )
+
         return f, g
+
+    def _check_system_conditioning(
+        self, kernel_op: KernelOperator, x: torch.Tensor, sample_size: int = 100
+    ) -> float:
+        """
+        Estimate the conditioning of (I - K) via power iteration on K.
+
+        Returns an estimate of 1 / (1 - lambda_max), where lambda_max is the
+        largest eigenvalue magnitude of K. Raises if the system is nearly singular.
+        """
+        sample = min(sample_size, x.size(0))
+        if sample <= 1:
+            return 1.0
+
+        with torch.no_grad():
+            v = torch.randn(sample, device=self.device)
+            norm = torch.norm(v)
+            if norm > 0:
+                v = v / norm
+
+            for _ in range(20):
+                v_new = kernel_op.apply(x[:sample], v)
+                new_norm = torch.norm(v_new)
+                if new_norm < 1e-12:
+                    break
+                v = v_new / new_norm
+
+            lambda_max = torch.dot(v, kernel_op.apply(x[:sample], v))
+            lambda_max_val = float(lambda_max)
+
+        if lambda_max_val >= 0.99:
+            raise RuntimeError(
+                f"System (I - K) is nearly singular: λ_max(K) = {lambda_max_val:.6f}"
+            )
+
+        return float(1.0 / max(1e-6, 1.0 - lambda_max_val))
     
     def _conjugate_gradient(
         self,
@@ -803,7 +885,11 @@ class SchroedingerBridgeSolver:
         # Use more conservative bounds to prevent numerical overflow in downstream operations
         fg_raw = torch.nan_to_num(f * g, nan=1e-10, posinf=1e6, neginf=1e-10)
         fg = torch.clamp(fg_raw, min=1e-10, max=1e6)  # [batch_size]
-        
+        if fg.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Potential vector shape mismatch: expected ({batch_size},), got {tuple(fg.shape)}"
+            )
+
         def transport_map(z: torch.Tensor) -> torch.Tensor:
             """
             Apply the optimal transport map to new points z.
@@ -835,9 +921,23 @@ class SchroedingerBridgeSolver:
                 # Ensure weights form a proper stochastic matrix even if approximations
                 # produce small negative values.
                 weights = torch.clamp(weights, min=0.0)
-                P_zx = weights * fg.unsqueeze(0)  # (batch_z, batch_x) * (batch_x,) -> (batch_z, batch_x)
-                row_sums = torch.clamp(P_zx.sum(dim=1, keepdim=True), min=1e-10)
+                if weights.shape != (z_flat.size(0), batch_size):
+                    raise RuntimeError(
+                        f"Kernel weights shape mismatch: expected {(z_flat.size(0), batch_size)}, got {tuple(weights.shape)}"
+                    )
+                fg_broadcasted = fg.unsqueeze(0)
+                P_zx = weights * fg_broadcasted  # (batch_z, batch_x)
+                row_sums = P_zx.sum(dim=1, keepdim=True)
+                if not torch.all(row_sums > 0):
+                    raise RuntimeError("Transport map has zero-weight rows; cannot normalize.")
+                row_sums = torch.clamp(row_sums, min=1e-10)
                 P_zx_norm = P_zx / row_sums
+                row_sum_check = P_zx_norm.sum(dim=1)
+                if not torch.allclose(row_sum_check, torch.ones_like(row_sum_check), atol=1e-4):
+                    self.logger.warning(
+                        "Row-stochasticity drift detected in transport map: max deviation %.3e",
+                        float(torch.max(torch.abs(row_sum_check - 1.0))),
+                    )
                 z_next = P_zx_norm @ x_next_flat  # (batch_z, batch_x) @ (batch_x, d) -> (batch_z, d)
             elif isinstance(kernel_op, FFTKernelOperator):
                 alpha = 0.5  # Interpolation parameter

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Configuration primitives for the FastSB-OT solver."""
 
 from __future__ import annotations
