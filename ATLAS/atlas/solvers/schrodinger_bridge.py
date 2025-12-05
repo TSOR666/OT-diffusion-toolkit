@@ -630,7 +630,9 @@ class SchroedingerBridgeSolver:
             denom_abs = torch.abs(denom)
             dtype_info = torch.finfo(denom.dtype)
             min_denom = torch.tensor(
-                dtype_info.tiny * self._min_curvature_multiplier, dtype=denom.dtype
+                dtype_info.tiny * self._min_curvature_multiplier,
+                dtype=denom.dtype,
+                device=denom.device  # (n,) @ (n,) -> scalar, ensure device consistency
             )
 
             if (not denom_is_finite) or denom_abs < min_denom:
