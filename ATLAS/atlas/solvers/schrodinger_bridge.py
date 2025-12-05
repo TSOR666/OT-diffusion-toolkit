@@ -258,9 +258,8 @@ class SchroedingerBridgeSolver:
         if x.ndim == 0:
             raise ValueError("Input tensor must include a batch dimension for scoring.")
 
-        with torch.no_grad():
-            with self._amp_context():
-                noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
+        with self._amp_context():
+            noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
         noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
