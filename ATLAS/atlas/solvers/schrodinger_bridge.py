@@ -528,6 +528,8 @@ class SchroedingerBridgeSolver:
         batch_size = x.size(0)
         
         used_linear = False
+        # Default initial potentials in solver dtype/device for use as CG warm start
+        f_init = torch.ones(batch_size, device=self.device, dtype=x.dtype)
 
         # Choose between Light SB approach (linear system) or traditional iteration
         if self.use_linear_solver:
@@ -559,11 +561,15 @@ class SchroedingerBridgeSolver:
                         return v - 0.5 * (Kv + Kt)
 
                     # Right-hand side is vector of ones
-                    b = torch.ones(batch_size, device=self.device)
+                    b = torch.ones(batch_size, device=self.device, dtype=x.dtype)
 
                     # Solve using conjugate gradient
                     f_linear, convergence = self._conjugate_gradient(
-                        linear_op, b, x0=f, max_iter=max_iter, tol=self.error_tolerance
+                        linear_op,
+                        b,
+                        x0=f_init,
+                        max_iter=max_iter,
+                        tol=self.error_tolerance,
                     )
 
                     # Verify solution shape matches expected batch size
@@ -602,7 +608,7 @@ class SchroedingerBridgeSolver:
         if not used_linear:
             # Traditional iterative approach
             # Initialize potentials
-            f = torch.ones(batch_size, device=self.device)
+            f = torch.ones(batch_size, device=self.device, dtype=x.dtype)
             g = torch.ones_like(f)
 
             # Iterative updates

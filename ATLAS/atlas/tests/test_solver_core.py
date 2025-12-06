@@ -91,3 +91,21 @@ def test_conjugate_gradient_flags_singular_system():
     b = torch.ones(5)
     _, converged = solver._conjugate_gradient(singular_A, b, max_iter=5, tol=1e-6)
     assert not converged, "CG should not report convergence on singular system"
+
+
+def test_linear_solver_branch_produces_valid_potentials():
+    torch.manual_seed(0)
+    solver = _make_solver(use_linear_solver=True)
+    x = torch.randn(5, 3, 4, 4)
+
+    kernel_op = solver._select_optimal_kernel_operator(x, epsilon=solver.epsilon)
+    f, g = solver._solve_Schrodinger_bridge(kernel_op, x, max_iter=10)
+
+    assert f.shape == (x.size(0),)
+    assert g.shape == (x.size(0),)
+    assert torch.isfinite(f).all()
+    assert torch.isfinite(g).all()
+
+    Kg = kernel_op.apply(x, g)
+    residual = torch.abs(f * Kg - 1.0).max()
+    assert residual < 1e-2, f"Linear solver marginals violated: {float(residual):.3e}"
