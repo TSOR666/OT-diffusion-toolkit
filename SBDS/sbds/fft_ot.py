@@ -99,7 +99,10 @@ class FFTOptimalTransport:
         return resized.reshape(restored_shape)
 
     def _is_grid_structured(self, x: torch.Tensor) -> Tuple[bool, Optional[List[int]]]:
-        if x.dim() > 2:
+        # Treat channel dimensions as leading axes; only spatial axes define the grid.
+        if x.dim() >= 4:
+            return True, list(x.shape[2:])
+        if x.dim() == 3:
             return True, list(x.shape[1:])
 
         if x.dim() == 2:

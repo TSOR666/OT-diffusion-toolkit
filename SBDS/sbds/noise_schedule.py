@@ -63,7 +63,16 @@ class EnhancedAdaptiveNoiseSchedule:
             return torch.cumprod(alphas, dim=0)
         if self.schedule_type == "cosine":
             s_val = 0.008
-            return torch.cos((t_values + s_val) / (1 + s_val) * np.pi / 2).pow(2)
+            # Normalized cosine: alpha_bar(0)=1 by construction
+            numerator = torch.cos((t_values + s_val) / (1 + s_val) * np.pi / 2)
+            denom = torch.cos(
+                torch.tensor(
+                    s_val / (1 + s_val) * np.pi / 2,
+                    device=t_values.device,
+                    dtype=t_values.dtype,
+                )
+            )
+            return (numerator / denom).pow(2)
         if self.schedule_type == "quadratic":
             betas = self.beta_start + t_values**2 * (self.beta_end - self.beta_start)
             alphas = 1.0 - betas
@@ -80,10 +89,12 @@ class EnhancedAdaptiveNoiseSchedule:
         if self.schedule_type == "cosine":
             s_val = 0.008
             arg = (t_clamped + s_val) / (1 + s_val) * np.pi / 2
+            norm = np.cos(s_val / (1 + s_val) * np.pi / 2)
             # tan tends to infinity as arg -> pi/2; clamp to a safe maximum
             tan_val = np.tan(arg)
             tan_val = np.clip(tan_val, -1e6, 1e6)
-            return float(2 * tan_val * np.pi / (2 * (1 + s_val)))
+            # Account for normalization constant in alpha_bar
+            return float((2 * tan_val / (1 + s_val)) / (norm * norm))
 
         alpha_t = max(self(t_clamped), 1e-6)
         alpha_t_dt = max(self(max(0.0, t_clamped - dt)), 1e-6)
