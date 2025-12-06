@@ -393,8 +393,16 @@ class FastSBOTSolver(nn.Module):
             else:
                 t_val = float(t)
             t_key = f"{t_val:.6f}"
+            # Content-aware fingerprint prevents stale score reuse across different x_t
+            fp = x.reshape(-1)
+            if fp.numel() >= 4:
+                sample = torch.stack([fp[0], fp[fp.numel() // 3], fp[2 * fp.numel() // 3], fp[-1]]).float()
+                chk = float(sample.sum().item())
+            else:
+                chk = float(fp.float().sum().item())
+            fingerprint = f"ptr{int(x.data_ptr())}_chk{chk:.6e}"
             cache_key = self._normalize_cache_key(
-                f"{cache_key}_t{t_key}", x.shape, x.device, x.dtype
+                f"{cache_key}_t{t_key}_{fingerprint}", x.shape, x.device, x.dtype
             )
 
             clone_cache = os.environ.get("FASTSBOT_CLONE_CACHE", "1") == "1"  # Default to True for safety

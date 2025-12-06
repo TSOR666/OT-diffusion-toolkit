@@ -167,7 +167,6 @@ class KernelModule(nn.Module):
         return weights
 
     @compile_function_fixed(dynamic=True, use_global_cache=True)
-    @torch.no_grad()
     def estimate_fisher_diagonal(self, x: torch.Tensor, score: torch.Tensor, t: float, alpha: Optional[float] = None) -> torch.Tensor:
         """Estimate diagonal Fisher information matrix with proper precision handling
 
@@ -265,7 +264,9 @@ class KernelModule(nn.Module):
         # after dtype conversion and clamping (required for transport stability)
         fisher = torch.clamp(fisher, min=1e-6)
 
-        self.fisher_cache.put(cache_key, fisher)
+        # Only cache inference results; caching autograd-connected tensors would leak graphs
+        if not fisher.requires_grad:
+            self.fisher_cache.put(cache_key, fisher)
 
         return fisher
 

@@ -133,7 +133,7 @@ class SlicedOptimalTransport:
         for i in range(n_projections):
             # Generate and normalize theta in FP32 for stability
             theta = torch.randn(d, device=device, dtype=torch.float32, generator=gen)
-            theta = F.normalize(theta, dim=0)
+            theta = F.normalize(theta, dim=0, eps=1e-8)
             theta = theta.to(dtype)  # Cast back to data dtype
 
             torch.matmul(x.view(B, N, d), theta, out=x_proj.view(B, N))
