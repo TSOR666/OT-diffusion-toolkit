@@ -196,5 +196,37 @@ class TestSinkhornDeterminism:
         torch.testing.assert_close(log_v1, log_v2)
 
 
+class TestSinkhornDispatch:
+    """Dispatch logic and backend selection."""
+
+    def test_blockwise_triggered_when_cost_matrix_exceeds_limit(self, device):
+        cfg = SolverConfig(
+            deterministic=True,
+            max_dense_matrix_elements=1_000,  # tiny threshold to force blockwise
+            max_tensor_size_elements=50_000_000,
+        )
+        kernel = OptimizedSinkhornKernel(device, torch.float32, cfg)
+
+        invoked = {"blockwise": False}
+
+        def _fake_blockwise(x, y, eps, n_iter):
+            invoked["blockwise"] = True
+            return torch.zeros(x.size(0), device=x.device), torch.zeros(y.size(0), device=x.device)
+
+        kernel._sinkhorn_blockwise = _fake_blockwise  # type: ignore[assignment]
+
+        x = torch.randn(128, 3, device=device)
+        y = torch.randn(128, 3, device=device)
+
+        kernel.sinkhorn_log_stabilized(x, y, eps=0.1, n_iter=5)
+        assert invoked["blockwise"]
+
+    def test_pot_backend_disabled_in_deterministic_mode(self):
+        cfg = SolverConfig(deterministic=True, use_pot_library=True)
+        kernel = OptimizedSinkhornKernel(torch.device("cpu"), torch.float32, cfg)
+        assert not kernel.use_pot
+        assert "pot" not in kernel.backends
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

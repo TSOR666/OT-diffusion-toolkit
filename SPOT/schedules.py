@@ -135,18 +135,22 @@ class LinearSchedule:
         return out
 
     def beta(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
-        """Analytical beta(t) for linear schedule.
-
-        For LinearSchedule, beta(t) = beta_start + (beta_end - beta_start) * t
+        """Analytical -dλ/dt for linear schedule.
 
         Returns:
-            beta(t) as float32 tensor
+            beta(t) = -(d/dt) lambda(t) where lambda(t) = log(alpha^2 / sigma^2)
         """
         t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
         beta_t = self.beta_start + (self.beta_end - self.beta_start) * t32
 
-        if __debug__:
-            assert beta_t.dtype == torch.float32, f"beta(t) must be fp32, got {beta_t.dtype}"
+        # Relation for VP-style schedules: -d lambda/dt = beta(t) / (1 - alpha_bar(t))
+        alpha, _ = self.alpha_sigma(t32)
+        alpha_bar = (alpha.float() * alpha.float()).clamp(0.0, 1.0)
+        denom = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)
+        beta_lambda = beta_t / denom
 
-        return beta_t
+        if __debug__:
+            assert beta_lambda.dtype == torch.float32, f"beta(t) must be fp32, got {beta_lambda.dtype}"
+
+        return beta_lambda
 

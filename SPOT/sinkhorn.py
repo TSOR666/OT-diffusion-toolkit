@@ -46,16 +46,34 @@ class OptimizedSinkhornKernel:
         except ImportError:  # pragma: no cover - optional dependency
             self.use_pot = False
 
+        # Deterministic mode must not use POT (non-deterministic CPU/GPU kernels)
+        if getattr(config, "deterministic", False):
+            self.use_pot = False
+            if "pot" in self.backends:
+                self.backends.remove("pot")
+
     def sinkhorn_log_stabilized(
         self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int = 10
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return Sinkhorn dual variables in log-space for numerical stability."""
 
+        N, M = x.size(0), y.size(0)
+        required_cost_elems = N * M
+
         max_elements = self.config.max_tensor_size_elements
-        if x.numel() > max_elements or y.numel() > max_elements:
+        max_dense_elems = self.config.max_dense_matrix_elements
+
+        if (
+            x.numel() > max_elements
+            or y.numel() > max_elements
+            or required_cost_elems > max_dense_elems
+        ):
             logger.debug(
-                "Sinkhorn input too large for dense solve (%.2fM elements); entering blockwise streaming mode",
-                max(x.numel(), y.numel()) / 1e6,
+                "Sinkhorn input too large for dense solve (features=%s/%s, cost=%s > %s); entering blockwise streaming mode",
+                x.numel(),
+                y.numel(),
+                required_cost_elems,
+                max_dense_elems,
             )
             return self._sinkhorn_blockwise(x, y, eps, n_iter)
 
