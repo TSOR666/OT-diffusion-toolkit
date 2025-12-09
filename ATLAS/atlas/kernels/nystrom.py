@@ -128,6 +128,7 @@ class NystromKernelOperator(KernelOperator):
         if x.shape[0] != v.shape[0]:
             raise ValueError("Input data and vector must share the same batch dimension.")
 
+        self._validate_device(self.landmarks)
         x = x.to(self.device)
         v_in = v.to(self.device)
         features = v_in.reshape(v_in.shape[0], -1)

@@ -233,6 +233,8 @@ class SchroedingerBridgeSolver:
         D_h = _finite_difference(base_h)
         D_h2 = _finite_difference(base_h / 2.0)
         alpha_prime = (4 * D_h2 - D_h) / 3.0
+        if not torch.isfinite(alpha_prime).all():
+            alpha_prime = D_h2
 
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
@@ -260,10 +262,11 @@ class SchroedingerBridgeSolver:
 
         with self._amp_context():
             noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
-        noise_pred = noise_pred.to(x.dtype)
+        if noise_pred.dtype != x.dtype:
+            noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
-        sigma_t = self._compute_sigma(alpha_t)
+        sigma_t = torch.clamp(self._compute_sigma(alpha_t), min=1e-6)
         score = -noise_pred / sigma_t
         return score
 
@@ -493,13 +496,15 @@ class SchroedingerBridgeSolver:
                 while len(self.kernel_operators) > self.max_kernel_cache_size:
                     evicted_key, evicted_operator = self.kernel_operators.popitem(last=False)
                     self.perf_stats["kernel_cache_evictions"] += 1
-                    if hasattr(evicted_operator, "clear_cache"):
-                        try:
+                    try:
+                        if hasattr(evicted_operator, "clear_cache"):
                             evicted_operator.clear_cache()
-                        except Exception as exc:
-                            self.logger.error(
-                                "Failed to clear cache for %s due to %s", evicted_key, exc
-                            )
+                    except Exception as exc:
+                        self.logger.error(
+                            "Failed to clear cache for %s due to %s", evicted_key, exc
+                        )
+                    finally:
+                        del evicted_operator
                     self.logger.debug(f"Evicted kernel operator cache entry {evicted_key}")
         
         self.perf_stats['kernel_time'] += time.time() - kernel_start_time
@@ -582,12 +587,14 @@ class SchroedingerBridgeSolver:
                     Kf = kernel_op.apply(x, f_linear)
 
                     # Use clamping to prevent numerical instability
-                    if (Kf < 1e-10).any() or (Kf > 1e8).any():
-                        self.logger.warning(
-                            "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
-                            float(Kf.min()),
-                            float(Kf.max()),
-                        )
+                    if self.logger.isEnabledFor(logging.WARNING):
+                        kf_min, kf_max = Kf.aminmax()
+                        if (kf_min < 1e-10) or (kf_max > 1e8):
+                            self.logger.warning(
+                                "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
+                                kf_min.item(),
+                                kf_max.item(),
+                            )
                     g_linear = torch.ones_like(f_linear) / torch.clamp(Kf, min=1e-8, max=1e8)
 
                     if convergence:
@@ -607,40 +614,52 @@ class SchroedingerBridgeSolver:
 
         if not used_linear:
             # Traditional iterative approach
-            # Initialize potentials
-            f = torch.ones(batch_size, device=self.device, dtype=x.dtype)
-            g = torch.ones_like(f)
+            min_kernel_value = 1e-8
+            max_kernel_value = 1e8
 
-            # Iterative updates
+            log_f = torch.zeros(batch_size, device=self.device, dtype=x.dtype)
+            log_g = torch.zeros_like(log_f)
+
             for i in range(max_iter):
 
-                # Update f: f = 1 / (K @ g) with numerical stability
-                Kg = kernel_op.apply(x, g)
-                if (Kg < 1e-10).any() or (Kg > 1e8).any():
-                    self.logger.warning(
-                        "Schrodinger bridge iteration %d: Kg out of range [%.2e, %.2e]",
-                        i,
-                        float(Kg.min()),
-                        float(Kg.max()),
-                    )
-                f = 1.0 / torch.clamp(Kg, min=1e-8, max=1e8)
+                # Update f in the log domain: log_f = -log(K @ g)
+                g_vec = torch.exp(log_g)
+                Kg = kernel_op.apply(x, g_vec)
+                if self.logger.isEnabledFor(logging.WARNING):
+                    k_min, k_max = Kg.aminmax()
+                    if (k_min < min_kernel_value) or (k_max > max_kernel_value):
+                        self.logger.warning(
+                            "Schrodinger bridge iteration %d: Kg out of range [%.2e, %.2e]",
+                            i,
+                            k_min.item(),
+                            k_max.item(),
+                        )
+                log_f = -torch.log(torch.clamp(Kg, min=min_kernel_value))
+                log_f = log_f - log_f.mean()
+                f_vec = torch.exp(log_f)
 
-                # Update g: g = 1 / (K^T @ f) with numerical stability
-                KTf = kernel_op.apply_transpose(x, f)
-                if (KTf < 1e-10).any() or (KTf > 1e8).any():
-                    self.logger.warning(
-                        "Schrodinger bridge iteration %d: KTf out of range [%.2e, %.2e]",
-                        i,
-                        float(KTf.min()),
-                        float(KTf.max()),
-                    )
-                g = 1.0 / torch.clamp(KTf, min=1e-8, max=1e8)
+                # Update g in the log domain: log_g = -log(K^T @ f)
+                KTf = kernel_op.apply_transpose(x, f_vec)
+                if self.logger.isEnabledFor(logging.WARNING):
+                    kt_min, kt_max = KTf.aminmax()
+                    if (kt_min < min_kernel_value) or (kt_max > max_kernel_value):
+                        self.logger.warning(
+                            "Schrodinger bridge iteration %d: KTf out of range [%.2e, %.2e]",
+                            i,
+                            kt_min.item(),
+                            kt_max.item(),
+                        )
+                log_g = -torch.log(torch.clamp(KTf, min=min_kernel_value))
+                log_g = log_g - log_g.mean()
 
                 # Check convergence
-                Kg_check = kernel_op.apply(x, g)
-                convergence_error = torch.max(torch.abs(f * Kg_check - 1.0))
+                Kg_check = kernel_op.apply(x, torch.exp(log_g))
+                convergence_error = torch.max(torch.abs(torch.exp(log_f) * Kg_check - 1.0))
                 if convergence_error < self.error_tolerance:
                     break
+
+            f = torch.exp(log_f)
+            g = torch.exp(log_g)
 
         Kg_final = kernel_op.apply(x, g)
         convergence_error = torch.max(torch.abs(f * Kg_final - 1.0))
@@ -829,7 +848,7 @@ class SchroedingerBridgeSolver:
                 return _finalize(True, rsnorm)
 
             # If the residual is increasing or unstable, exit early
-            if rsnew > rsold * 1.02:
+            if rsnew > rsold * 1.10:
                 prev_residual = torch.sqrt(rsold).detach().cpu().item()
                 self.logger.warning(
                     "Conjugate gradient residual increased at iteration %d (%.3e -> %.3e); returning partial solution.",
@@ -983,7 +1002,8 @@ class SchroedingerBridgeSolver:
                 row_sums = torch.clamp(row_sums, min=1e-10)
                 P_zx_norm = P_zx / row_sums
                 row_sum_check = P_zx_norm.sum(dim=1)
-                if not torch.allclose(row_sum_check, torch.ones_like(row_sum_check), atol=1e-4):
+                atol = 1e-3 if P_zx_norm.dtype == torch.float16 else 1e-4
+                if not torch.allclose(row_sum_check, torch.ones_like(row_sum_check), atol=atol):
                     self.logger.warning(
                         "Row-stochasticity drift detected in transport map: max deviation %.3e",
                         float(torch.max(torch.abs(row_sum_check - 1.0))),

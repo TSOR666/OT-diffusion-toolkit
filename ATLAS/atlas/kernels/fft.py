@@ -196,18 +196,19 @@ class FFTKernelOperator(KernelOperator):
         batch_shape = reshaped.shape[:-spatial_dims]
         v_batches = reshaped.reshape(-1, *self.grid_shape)
 
-        results = []
-        for sample in v_batches:
-            if self.multi_scale:
-                result_grid = torch.zeros_like(sample)
-                for weight, kernel_fft in zip(self.weights, self.kernel_ffts):
-                    scale_result = self._apply_kernel_fft(sample, kernel_fft)
-                    result_grid += weight * scale_result
-            else:
-                result_grid = self._apply_kernel_fft(sample, self.kernel_fft)
-            results.append(result_grid)
+        fft_dims = tuple(range(-spatial_dims, 0))
+        v_fft = torch.fft.rfftn(v_batches, dim=fft_dims)
 
-        stacked = torch.stack(results, dim=0)
+        if self.multi_scale:
+            stacked = torch.zeros_like(v_batches)
+            for weight, kernel_fft in zip(self.weights, self.kernel_ffts):
+                result_fft = v_fft * kernel_fft.unsqueeze(0)
+                scale_result = torch.fft.irfftn(result_fft, s=v_batches.shape[-spatial_dims:])
+                stacked = stacked + weight * scale_result
+        else:
+            result_fft = v_fft * self.kernel_fft
+            stacked = torch.fft.irfftn(result_fft, s=v_batches.shape[-spatial_dims:])
+
         stacked = stacked.reshape(*batch_shape, *self.grid_shape)
 
         if needs_reduction:

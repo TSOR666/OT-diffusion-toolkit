@@ -37,6 +37,7 @@ def karras_noise_schedule(
         sigma_max_root = torch.tensor(sigma_max, device=device, dtype=dtype) ** (1.0 / rho)
         sigma = (sigma_max_root + t * (sigma_min_root - sigma_max_root)) ** rho
         alpha_bar = 1.0 / (1.0 + sigma ** 2)
+        alpha_bar = torch.clamp(alpha_bar, min=torch.finfo(alpha_bar.dtype).tiny)
         return alpha_bar
     else:
         t = float(max(0.0, min(1.0, t)))
@@ -44,4 +45,5 @@ def karras_noise_schedule(
         sigma_max_root = sigma_max ** (1.0 / rho)
         sigma = (sigma_max_root + t * (sigma_min_root - sigma_max_root)) ** rho
         alpha_bar = 1.0 / (1.0 + sigma ** 2)
+        alpha_bar = max(alpha_bar, torch.finfo(torch.float32).tiny)
         return float(alpha_bar)

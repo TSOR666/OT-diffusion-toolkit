@@ -66,6 +66,18 @@ class RFFKernelOperator(KernelOperator):
         self._initialise_features()
 
     # ------------------------------------------------------------------
+    def _ensure_device_consistency(self) -> None:
+        """Ensure generator and cached parameters stay on the configured device."""
+        if self.rng.device != self.device:
+            self.rng = torch.Generator(device=self.device)
+            if self.seed is not None:
+                self.rng.manual_seed(self.seed)
+
+        if any(weight.device != self.device for weight in self.weights):
+            self.weights = [weight.to(self.device) for weight in self.weights]
+        if any(offset.device != self.device for offset in self.offsets):
+            self.offsets = [offset.to(self.device) for offset in self.offsets]
+
     def _base_scale(self) -> float:
         if self.kernel_type == "gaussian":
             return 1.0 / self.epsilon
@@ -127,6 +139,7 @@ class RFFKernelOperator(KernelOperator):
         return None  # Disabled: data_ptr-based caching is unsafe; implement content-based caching if needed.
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
+        self._ensure_device_consistency()
         x = x.to(self.device)
         # Ensure the tensor has a well-defined storage layout for caching.
         x = x.contiguous()
