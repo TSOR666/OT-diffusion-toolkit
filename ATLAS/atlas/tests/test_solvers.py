@@ -1,19 +1,24 @@
+from __future__ import annotations
+
+from typing import cast, overload
+
 import torch
 import torch.nn as nn
 
 import pytest
-
-from typing import List
 
 from atlas.config import KernelConfig, SamplerConfig
 from atlas.solvers import (
     AdvancedHierarchicalDiffusionSampler,
     SchroedingerBridgeSolver,
 )
+from atlas.types import ConditioningPayload
 
 
 class _ZeroScore(nn.Module):
-    def forward(self, x: torch.Tensor, t: torch.Tensor, conditioning=None) -> torch.Tensor:  # type: ignore[override]
+    def forward(
+        self, x: torch.Tensor, t: torch.Tensor, conditioning: ConditioningPayload | None = None
+    ) -> torch.Tensor:
         return torch.zeros_like(x)
 
 
@@ -22,11 +27,21 @@ class _TrackTrainingStateModel(nn.Module):
         super().__init__()
         self.net = nn.Linear(4, 4)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, conditioning=None) -> torch.Tensor:  # type: ignore[override]
-        return self.net(x)
+    def forward(
+        self, x: torch.Tensor, t: torch.Tensor, conditioning: ConditioningPayload | None = None
+    ) -> torch.Tensor:
+        return cast(torch.Tensor, self.net(x))
 
 
-def _constant_noise(t):
+@overload
+def _constant_noise(t: float) -> float: ...
+
+
+@overload
+def _constant_noise(t: torch.Tensor) -> torch.Tensor: ...
+
+
+def _constant_noise(t: float | torch.Tensor) -> float | torch.Tensor:
     if isinstance(t, torch.Tensor):
         return torch.full_like(t, 0.9)
     return 0.9
@@ -105,7 +120,7 @@ def test_validate_timesteps_sorts_and_checks_spacing(solver: SchroedingerBridgeS
     ],
 )
 def test_validate_timesteps_rejects_invalid_sequences(
-    solver: SchroedingerBridgeSolver, values: List[float]
+    solver: SchroedingerBridgeSolver, values: list[float]
 ) -> None:
     with pytest.raises(ValueError):
         solver.validate_timesteps(values)

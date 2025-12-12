@@ -29,10 +29,13 @@ GPU Memory Presets:
 - "24GB": Professional (RTX 4090, A5000)
 - "32GB": Flagship GPUs (RTX 5090 / 5090 Ti, 4090 Ti)
 """
+
+from __future__ import annotations
+
 import torch
 import warnings
 from pathlib import Path
-from typing import Union, List, Optional, Tuple, Mapping
+from typing import Any, List, Literal, Mapping, Optional, Tuple, Union, overload
 from dataclasses import dataclass, replace
 
 from atlas.models.score_network import HighResLatentScoreModel
@@ -46,7 +49,7 @@ from atlas.utils.hardware import safe_cuda_mem_get_info
 from atlas.utils.memory import get_peak_memory_mb
 
 
-def _safe_torch_load(path: Union[str, Path], map_location=None):
+def _safe_torch_load(path: Union[str, Path], map_location: Any | None = None) -> Any:
     """
     Load a checkpoint with weights_only=True when supported to avoid unsafe pickle execution.
     Falls back to standard torch.load if the installed PyTorch version lacks the flag.
@@ -57,7 +60,7 @@ def _safe_torch_load(path: Union[str, Path], map_location=None):
 
     load_kwargs = {"map_location": map_location}
     try:
-        return torch.load(checkpoint_path, weights_only=True, **load_kwargs)  # type: ignore[call-arg]
+        return torch.load(checkpoint_path, weights_only=True, **load_kwargs)
     except TypeError:
         return torch.load(checkpoint_path, **load_kwargs)
 
@@ -393,6 +396,30 @@ class EasySampler:
         self.model_config = model_config
         self._clip_enabled = profile.enable_clip
 
+    @overload
+    def generate(
+        self,
+        prompts: Optional[Union[str, List[str]]] = None,
+        negative_prompts: Optional[Union[str, List[str]]] = None,
+        num_samples: int = 1,
+        timesteps: int = 50,
+        guidance_scale: float = 7.5,
+        seed: Optional[int] = None,
+        return_intermediates: Literal[False] = False,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def generate(
+        self,
+        prompts: Optional[Union[str, List[str]]] = None,
+        negative_prompts: Optional[Union[str, List[str]]] = None,
+        num_samples: int = 1,
+        timesteps: int = 50,
+        guidance_scale: float = 7.5,
+        seed: Optional[int] = None,
+        return_intermediates: Literal[True] = True,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]: ...
+
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
@@ -402,7 +429,7 @@ class EasySampler:
         guidance_scale: float = 7.5,
         seed: Optional[int] = None,
         return_intermediates: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """
         Generate samples using ATLAS.
 
@@ -492,7 +519,7 @@ class EasySampler:
         print(f"[ATLAS] Using batch_size={batch_size}, resolution={self.profile.resolution}")
 
         all_samples: List[torch.Tensor] = []
-        all_intermediates = [] if return_intermediates else None
+        all_intermediates: list[list[torch.Tensor]] = []
         samples_generated = 0
 
         # Loop to generate all requested samples
@@ -504,11 +531,18 @@ class EasySampler:
             while True:
                 shape = (attempt_batch, 4, latent_size, latent_size)
                 try:
-                    result = self.sampler.sample(
-                        shape=shape,
-                        timesteps=timesteps,
-                        return_intermediates=return_intermediates,
-                    )
+                    if return_intermediates:
+                        batch_samples, batch_intermediates = self.sampler.sample(
+                            shape=shape,
+                            timesteps=timesteps,
+                            return_intermediates=True,
+                        )
+                    else:
+                        batch_samples = self.sampler.sample(
+                            shape=shape,
+                            timesteps=timesteps,
+                            return_intermediates=False,
+                        )
                     break
                 except RuntimeError as exc:
                     message = str(exc).lower()
@@ -532,11 +566,10 @@ class EasySampler:
 
             # Handle return format
             if return_intermediates:
-                batch_samples, batch_intermediates = result  # type: ignore[assignment]
                 all_samples.append(batch_samples)
-                all_intermediates.append(batch_intermediates)  # type: ignore[arg-type]
+                all_intermediates.append(batch_intermediates)
             else:
-                all_samples.append(result)  # type: ignore[arg-type]
+                all_samples.append(batch_samples)
 
             samples_generated += attempt_batch
 
@@ -551,6 +584,7 @@ class EasySampler:
         print(f"[ATLAS] Generation complete! Peak memory: {peak_memory:.1f} MB")
 
         if return_intermediates:
+            intermediates: list[torch.Tensor]
             if len(all_intermediates) == 1:
                 intermediates = all_intermediates[0]
             else:
@@ -564,7 +598,7 @@ class EasySampler:
             return samples, intermediates
         return samples
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Clear kernel operator cache to free memory."""
         self.sampler.clear_kernel_cache()
         if torch.cuda.is_available():
@@ -586,15 +620,9 @@ def _disable_clip_conditioning(
     """Disable CLIP across profile, configs, and sampler in a single place."""
 
     profile.enable_clip = False
-    if conditioning_config is not None:
-        conditioning_config.use_clip = False
-        conditioning_config.context_dim = 0
-
+    _ = conditioning_config
     if hasattr(sampler, "score_model"):
         setattr(sampler.score_model, "use_context", False)
-        if hasattr(sampler.score_model, "conditioning_config"):
-            sampler.score_model.conditioning_config.use_clip = False
-
     return None
 
 
@@ -629,7 +657,7 @@ def create_sampler(
     resolution: Optional[int] = None,
     batch_size: Optional[int] = None,
     enable_clip: Optional[bool] = None,
-    **kwargs
+    **kwargs: Any,
 ) -> EasySampler:
     """
     Create a simple-to-use ATLAS sampler with automatic configuration.
@@ -711,7 +739,7 @@ def create_sampler(
         profile.enable_clip = enable_clip
 
     # Estimate free memory for the selected device
-    available_memory_mb = profile.memory_mb
+    available_memory_mb: float = float(profile.memory_mb)
     if device.type == "cuda" and torch.cuda.is_available():
         device_index = device.index if device.index is not None else torch.cuda.current_device()
         torch.cuda.set_device(device_index)
@@ -1005,7 +1033,7 @@ def quick_sample(
     )
 
 
-def list_profiles():
+def list_profiles() -> None:
     """Print all available GPU profiles with descriptions."""
     print("Available GPU Memory Profiles:")
     print("=" * 80)

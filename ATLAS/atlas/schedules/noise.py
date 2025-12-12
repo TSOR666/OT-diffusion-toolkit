@@ -1,14 +1,35 @@
-from typing import Union
+from __future__ import annotations
+
+from typing import overload
 
 import torch
+from torch import Tensor
 
 
+@overload
 def karras_noise_schedule(
-    t: Union[float, torch.Tensor],
+    t: float,
     sigma_min: float = 0.002,
     sigma_max: float = 80.0,
     rho: float = 7.0,
-) -> Union[float, torch.Tensor]:
+) -> float: ...
+
+
+@overload
+def karras_noise_schedule(
+    t: Tensor,
+    sigma_min: float = 0.002,
+    sigma_max: float = 80.0,
+    rho: float = 7.0,
+) -> Tensor: ...
+
+
+def karras_noise_schedule(
+    t: float | Tensor,
+    sigma_min: float = 0.002,
+    sigma_max: float = 80.0,
+    rho: float = 7.0,
+) -> float | Tensor:
     """
     Continuous noise schedule from Karras et al. (2022).
 

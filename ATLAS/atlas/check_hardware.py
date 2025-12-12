@@ -6,10 +6,13 @@ Check hardware capabilities and get recommendations for ATLAS configuration.
 Run with: python -m atlas.check_hardware
 """
 
+from __future__ import annotations
+
 import sys
+from typing import Any
 
 
-def check_hardware(verbose: bool = True) -> dict:
+def check_hardware(verbose: bool = True) -> dict[str, Any]:
     """
     Check hardware capabilities and return recommendations.
 
@@ -49,9 +52,9 @@ def check_hardware(verbose: bool = True) -> dict:
     }
 
 
-def _generate_recommendations(caps) -> dict:
+def _generate_recommendations(caps: Any) -> dict[str, Any]:
     """Generate configuration recommendations based on hardware."""
-    recs = {
+    recs: dict[str, Any] = {
         "resolution": 512,
         "batch_size": 1,
         "kernel_solver": "rff",
@@ -134,7 +137,7 @@ def _generate_recommendations(caps) -> dict:
     return recs
 
 
-def _print_recommendations(recs: dict) -> None:
+def _print_recommendations(recs: dict[str, Any]) -> None:
     """Print formatted recommendations."""
     print("\n" + "=" * 60)
     print("ATLAS Configuration Recommendations")
@@ -181,7 +184,7 @@ def _print_recommendations(recs: dict) -> None:
     print("=" * 60 + "\n")
 
 
-def main():
+def main() -> None:
     """Main entry point for CLI."""
     import argparse
 
@@ -219,4 +222,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

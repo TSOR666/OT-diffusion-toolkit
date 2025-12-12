@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Tuple
 from collections import OrderedDict
 import warnings
 
@@ -62,17 +61,25 @@ class TiledModelWrapper(nn.Module):
             )
         self.blending = blending
         self.max_cache_size = max_cache_size
-        self._window_cache: "OrderedDict[Tuple, torch.Tensor]" = OrderedDict()
+        self._window_cache: "OrderedDict[tuple[object, ...], torch.Tensor]" = OrderedDict()
         self.predicts_score = getattr(model, "predicts_score", True)
         self.predicts_noise = getattr(model, "predicts_noise", False)
 
+    def _forward_model(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        out = self.model(x, t)
+        if not isinstance(out, torch.Tensor):
+            raise TypeError(
+                f"Wrapped model must return torch.Tensor, got {type(out)}"
+            )
+        return out
+
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         if self.tile_size is None:
-            return self.model(x, t)
+            return self._forward_model(x, t)
 
         b, c, h, w = x.shape
         if self.tile_size >= min(h, w):
-            return self.model(x, t)
+            return self._forward_model(x, t)
 
         tile_h = min(self.tile_size, h)
         tile_w = min(self.tile_size, w)
@@ -97,7 +104,7 @@ class TiledModelWrapper(nn.Module):
                 x_start = max(0, x_end - tile_w)
 
                 tiles = x[:, :, y_start:y_end, x_start:x_end]
-                scores = self.model(tiles, t)
+                scores = self._forward_model(tiles, t)
                 scores_f32 = scores.to(dtype=torch.float32)
 
                 window = self._get_window(y_end - y_start, x_end - x_start, x.device, torch.float32)

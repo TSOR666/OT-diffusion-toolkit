@@ -1,6 +1,9 @@
 """Core solver tests for the Schrödinger Bridge implementation."""
 
+from __future__ import annotations
+
 import torch
+from typing import overload
 
 from atlas.config.kernel_config import KernelConfig
 from atlas.config.model_config import HighResModelConfig
@@ -9,7 +12,15 @@ from atlas.models.score_network import build_highres_score_model
 from atlas.solvers.schrodinger_bridge import SchroedingerBridgeSolver
 
 
-def _linear_schedule(t):
+@overload
+def _linear_schedule(t: float) -> float: ...
+
+
+@overload
+def _linear_schedule(t: torch.Tensor) -> torch.Tensor: ...
+
+
+def _linear_schedule(t: float | torch.Tensor) -> float | torch.Tensor:
     if isinstance(t, torch.Tensor):
         return torch.ones_like(t) * 0.9
     return 0.9
@@ -55,7 +66,7 @@ def _make_solver(use_linear_solver: bool = False) -> SchroedingerBridgeSolver:
     )
 
 
-def test_sinkhorn_enforces_marginals():
+def test_sinkhorn_enforces_marginals() -> None:
     torch.manual_seed(0)
     solver = _make_solver(use_linear_solver=False)
     x = torch.randn(6, 3, 4, 4)
@@ -68,7 +79,7 @@ def test_sinkhorn_enforces_marginals():
     assert marginal_error < 5e-2, f"Marginal constraint violated: {float(marginal_error):.3e}"
 
 
-def test_conjugate_gradient_converges_on_diagonal_system():
+def test_conjugate_gradient_converges_on_diagonal_system() -> None:
     solver = _make_solver(use_linear_solver=True)
 
     def A(v: torch.Tensor) -> torch.Tensor:
@@ -83,7 +94,7 @@ def test_conjugate_gradient_converges_on_diagonal_system():
     assert torch.allclose(x, torch.full_like(b, 0.5), atol=1e-3)
 
 
-def test_conjugate_gradient_flags_singular_system():
+def test_conjugate_gradient_flags_singular_system() -> None:
     solver = _make_solver(use_linear_solver=True)
 
     def singular_A(v: torch.Tensor) -> torch.Tensor:
@@ -94,7 +105,7 @@ def test_conjugate_gradient_flags_singular_system():
     assert not converged, "CG should not report convergence on singular system"
 
 
-def test_linear_solver_branch_produces_valid_potentials():
+def test_linear_solver_branch_produces_valid_potentials() -> None:
     torch.manual_seed(0)
     solver = _make_solver(use_linear_solver=True)
     x = torch.randn(5, 3, 4, 4)

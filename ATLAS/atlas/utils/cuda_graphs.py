@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
 import logging
-from typing import Tuple
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ class CUDAGraphModelWrapper(nn.Module):
         self.model = model
         self.warmup_iters = int(max(0, warmup_iters))
         self.max_cache_size = int(max(1, max_cache_size))
-        self._graphs: "OrderedDict[Tuple, _GraphHandle]" = OrderedDict()
+        self._graphs: "OrderedDict[tuple[object, ...], _GraphHandle]" = OrderedDict()
         self._cuda_available = torch.cuda.is_available()
         self._graphs_supported = self._cuda_available and hasattr(torch.cuda, "CUDAGraph")
         self._graphs_disabled = False
@@ -75,6 +75,14 @@ class CUDAGraphModelWrapper(nn.Module):
         except (ValueError, TypeError):
             pass
 
+    def _forward_model(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        out = self.model(x, t)
+        if not isinstance(out, torch.Tensor):
+            raise TypeError(
+                f"Wrapped model must return torch.Tensor, got {type(out)}"
+            )
+        return out
+
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         if (
             not self._graphs_supported
@@ -82,7 +90,7 @@ class CUDAGraphModelWrapper(nn.Module):
             or x.device.type != "cuda"
             or t.device.type != "cuda"
         ):
-            return self.model(x, t)
+            return self._forward_model(x, t)
 
         key = (
             tuple(x.shape),
@@ -104,7 +112,7 @@ class CUDAGraphModelWrapper(nn.Module):
                 )
                 self._graphs_disabled = True
                 self._graphs.clear()
-                return self.model(x, t)
+                return self._forward_model(x, t)
             self._graphs[key] = handle
             # LRU eviction: remove oldest entry if cache exceeds max size
             while len(self._graphs) > self.max_cache_size:
@@ -134,16 +142,16 @@ class CUDAGraphModelWrapper(nn.Module):
         # Warmup to populate caches for deterministic graph capture
         if self.warmup_iters > 0:
             for _ in range(self.warmup_iters):
-                _ = self.model(static_x, static_t)
+                _ = self._forward_model(static_x, static_t)
             torch.cuda.synchronize(device_index)
 
-        static_out = self.model(static_x, static_t).clone()
+        static_out = self._forward_model(static_x, static_t).clone()
         graph = torch.cuda.CUDAGraph()
 
         torch.cuda.synchronize(device_index)
         try:
             with torch.cuda.graph(graph):
-                static_out.copy_(self.model(static_x, static_t))
+                static_out.copy_(self._forward_model(static_x, static_t))
         except RuntimeError as exc:
             raise RuntimeError(
                 f"CUDA graph capture failed: {exc}. Ensure the model graph is static and CUDA-only."
@@ -169,7 +177,7 @@ class CUDAGraphModelWrapper(nn.Module):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def __getattr__(self, name: str):
+    def __getattr__(self, name: str) -> Any:
         # Forward attribute lookups to wrapped model when not found on wrapper
         try:
             return super().__getattribute__(name)

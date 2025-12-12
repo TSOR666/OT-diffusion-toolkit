@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from torch.utils.data import DataLoader, Dataset
+
+from ..config.training_config import DatasetConfig
+
+_TORCHVISION_ERROR: ModuleNotFoundError | None
 
 try:  # pragma: no cover - optional dependency guard
     from torchvision import datasets, transforms
@@ -17,8 +21,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - executed when torchvisi
 else:  # pragma: no cover - import path when torchvision available
     _TORCHVISION_ERROR = None
 
-from ..config.training_config import DatasetConfig
-
 
 def _build_transform(config: DatasetConfig) -> transforms.Compose:
     if transforms is None:
@@ -26,7 +28,7 @@ def _build_transform(config: DatasetConfig) -> transforms.Compose:
             "torchvision is required for dataset transforms. Install torchvision or "
             "provide a custom pipeline."
         ) from _TORCHVISION_ERROR
-    ops = [
+    ops: list[Any] = [
         transforms.Resize(
             (config.resolution, config.resolution),
             interpolation=transforms.InterpolationMode.BICUBIC,
@@ -49,7 +51,7 @@ def _build_transform(config: DatasetConfig) -> transforms.Compose:
     return transforms.Compose(ops)
 
 
-def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Dataset:
+def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Dataset[Any]:
     """Instantiate a dataset based on the provided configuration."""
 
     split = split or config.extra.get("split", "train")
@@ -150,7 +152,7 @@ def create_dataloader(
     shuffle: bool = True,
     split: Optional[str] = None,
     drop_last: Optional[bool] = None,
-) -> DataLoader:
+) -> DataLoader[Any]:
     """Build a PyTorch DataLoader respecting the dataset configuration."""
 
     dataset = build_dataset(config, split=split)

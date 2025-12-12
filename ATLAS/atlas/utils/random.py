@@ -1,15 +1,28 @@
 import os
 import random
 import warnings
-from typing import Dict
+from typing import Any, TypedDict
 
 import numpy as np
+from numpy.typing import NDArray
 import torch
 
 
 class PerformanceWarning(UserWarning):
     """Warning about performance impact."""
     pass
+
+
+PythonRandomState = tuple[Any, ...]
+NumpyLegacyState = tuple[str, NDArray[Any], int, int, float]
+NumpyRandomState = dict[str, Any] | NumpyLegacyState
+
+
+class RandomState(TypedDict, total=False):
+    python_random: PythonRandomState
+    numpy_random: NumpyRandomState
+    torch_cpu: torch.Tensor
+    torch_cuda: list[torch.Tensor]
 
 
 def set_seed(
@@ -84,9 +97,9 @@ def disable_deterministic_mode() -> None:
             pass
 
 
-def get_random_state() -> Dict[str, object]:
+def get_random_state() -> RandomState:
     """Capture current random states for reproducibility."""
-    state: Dict[str, object] = {
+    state: RandomState = {
         "python_random": random.getstate(),
         "numpy_random": np.random.get_state(),
         "torch_cpu": torch.get_rng_state(),
@@ -99,16 +112,23 @@ def get_random_state() -> Dict[str, object]:
     return state
 
 
-def restore_random_state(state: Dict[str, object]) -> None:
+def restore_random_state(state: RandomState) -> None:
     """Restore random states previously captured by get_random_state()."""
-    if "python_random" in state:
-        random.setstate(state["python_random"])
-    if "numpy_random" in state:
-        np.random.set_state(state["numpy_random"])
-    if "torch_cpu" in state:
-        torch.set_rng_state(state["torch_cpu"])
-    if torch.cuda.is_available() and "torch_cuda" in state:
-        for device, rng_state in enumerate(state["torch_cuda"]):  # type: ignore[index]
+    python_state = state.get("python_random")
+    if python_state is not None:
+        random.setstate(python_state)
+
+    numpy_state = state.get("numpy_random")
+    if numpy_state is not None:
+        np.random.set_state(numpy_state)
+
+    torch_cpu_state = state.get("torch_cpu")
+    if torch_cpu_state is not None:
+        torch.set_rng_state(torch_cpu_state)
+
+    torch_cuda_state = state.get("torch_cuda")
+    if torch_cuda_state is not None and torch.cuda.is_available():
+        for device, rng_state in enumerate(torch_cuda_state):
             torch.cuda.set_rng_state(rng_state, device)
 
 

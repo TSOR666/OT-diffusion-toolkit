@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import OrderedDict
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence
 
 import torch
 
@@ -63,7 +63,7 @@ class RFFKernelOperator(KernelOperator):
 
         self.weights: List[torch.Tensor] = []
         self.offsets: List[torch.Tensor] = []
-        self._feature_cache: "OrderedDict[Tuple, torch.Tensor]" = OrderedDict()
+        self._feature_cache: "OrderedDict[tuple[object, ...], torch.Tensor]" = OrderedDict()
 
         self._initialise_features()
 
@@ -147,7 +147,7 @@ class RFFKernelOperator(KernelOperator):
         while len(self._feature_cache) > self.max_cached_batch_size:
             self._feature_cache.popitem(last=False)
 
-    def _cache_key(self, x: torch.Tensor) -> Optional[Tuple]:
+    def _cache_key(self, x: torch.Tensor) -> Optional[tuple[object, ...]]:
         """
         Build a lightweight, content-based cache key.
 

@@ -5,21 +5,15 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any, Optional, cast
 
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
-try:  # pragma: no cover - optional dependency for image IO
-    from torchvision.utils import save_image
-except ModuleNotFoundError as exc:  # pragma: no cover
-    save_image = None  # type: ignore[assignment]
-    _TORCHVISION_UTILS_ERROR = exc
-else:  # pragma: no cover
-    _TORCHVISION_UTILS_ERROR = None
 
 from atlas.config import presets
 from atlas.config.training_config import DatasetConfig, InferenceConfig, TrainingConfig
@@ -28,17 +22,30 @@ from atlas.schedules import karras_noise_schedule
 from atlas.solvers import AdvancedHierarchicalDiffusionSampler
 from atlas.utils import create_dataloader, set_seed
 
+save_image: Callable[..., Any] | None
+_TORCHVISION_UTILS_ERROR: ModuleNotFoundError | None
+
+try:  # pragma: no cover - optional dependency for image IO
+    from torchvision.utils import save_image as _save_image
+except ModuleNotFoundError as exc:  # pragma: no cover
+    save_image = None
+    _TORCHVISION_UTILS_ERROR = exc
+else:  # pragma: no cover
+    save_image = _save_image
+    _TORCHVISION_UTILS_ERROR = None
+
 
 logger = logging.getLogger(__name__)
 
 
-def _safe_torch_load(path: str | Path, map_location=None):
+def _safe_torch_load(path: str | Path, map_location: Any | None = None) -> Any:
     """Load checkpoints defensively with weights_only when supported."""
-    load_kwargs = {"map_location": map_location}
+    load_kwargs: dict[str, Any] = {"map_location": map_location}
+    torch_load = cast(Any, torch.load)
     try:
-        return torch.load(path, weights_only=True, **load_kwargs)  # type: ignore[call-arg]
+        return torch_load(path, weights_only=True, **load_kwargs)
     except TypeError:
-        return torch.load(path, **load_kwargs)
+        return torch_load(path, **load_kwargs)
 
 
 def _expand_alpha(alpha: torch.Tensor) -> torch.Tensor:
@@ -80,16 +87,22 @@ def _save_checkpoint(
     optimizer: torch.optim.Optimizer,
     step: int,
     epoch: int,
-    bundle: Dict[str, object],
+    bundle: Mapping[str, object],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_payload: dict[str, object] = {}
+    for key, value in bundle.items():
+        if is_dataclass(value):
+            bundle_payload[key] = asdict(cast(Any, value))
+        else:
+            bundle_payload[key] = value
     payload = {
         "model": model.state_dict(),
         "ema": ema_model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "step": step,
         "epoch": epoch,
-        "bundle": {key: asdict(value) if hasattr(value, "__dataclass_fields__") else value for key, value in bundle.items()},
+        "bundle": bundle_payload,
     }
     torch.save(payload, path)
 
@@ -137,15 +150,15 @@ def run_training(
     if len(dataloader) == 0:
         raise ValueError("Dataloader returned zero batches. Check dataset configuration.")
 
-    score_model = HighResLatentScoreModel(model_cfg).to(actual_device)
-    ema_model = copy.deepcopy(score_model).to(actual_device)
+    score_model: torch.nn.Module = HighResLatentScoreModel(model_cfg).to(actual_device)
+    ema_model: torch.nn.Module = copy.deepcopy(score_model).to(actual_device)
     for param in ema_model.parameters():
         param.requires_grad_(False)
 
     if train_cfg.compile:
         if hasattr(torch, "compile"):
             try:
-                score_model = torch.compile(score_model)  # type: ignore[attr-defined]
+                score_model = cast(torch.nn.Module, torch.compile(score_model))
             except Exception as exc:  # pragma: no cover - torch.compile fallback
                 logger.warning(
                     "torch.compile failed (%s); continuing without compilation",
@@ -238,6 +251,7 @@ def run_training(
 
             with autocast_ctx():
                 pred_noise = score_model(noisy, t)
+                assert isinstance(pred_noise, torch.Tensor)
                 loss = F.mse_loss(pred_noise, noise)
 
             last_loss = float(loss.detach().item())
@@ -245,7 +259,7 @@ def run_training(
             if use_amp:
                 scaler.scale(loss).backward()
             else:
-                loss.backward()
+                cast(Callable[[], None], loss.backward)()
 
             steps_since_update += 1
 
@@ -271,14 +285,18 @@ def run_training(
         epoch=train_cfg.epochs,
         bundle={"model": model_cfg, "dataset": dataset_cfg, "training": train_cfg},
     )
+
+
 def _apply_model_state(
     model: torch.nn.Module,
-    checkpoint: Dict[str, object],
+    checkpoint: Mapping[str, object],
     *,
     use_ema: bool,
 ) -> None:
     state = checkpoint.get("ema") if use_ema and "ema" in checkpoint else checkpoint["model"]
-    model.load_state_dict(state)
+    if not isinstance(state, Mapping):
+        raise TypeError("Checkpoint state_dict must be a mapping.")
+    model.load_state_dict(cast(Mapping[str, Any], state))
 
 
 def run_inference(

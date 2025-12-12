@@ -16,22 +16,26 @@ Usage:
     python easy_start.py --checkpoint model.pt --num_samples 4
 """
 
+from __future__ import annotations
+
 import argparse
+import importlib
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 # Defer Pillow import until needed
-PIL_Image = None
+PIL_Image: Any | None = None
 
 
-def _ensure_pil():
+def _ensure_pil() -> Any:
     """Lazily import Pillow to allow --help without dependency."""
     global PIL_Image
     if PIL_Image is None:
         try:
-            from PIL import Image as PIL_Image_import  # type: ignore
+            PIL_Image_import = importlib.import_module("PIL.Image")
         except ImportError as exc:  # pragma: no cover - user environment guard
             print("Error: Pillow is required. Install with `pip install Pillow`.")
             raise SystemExit(1) from exc
@@ -44,7 +48,10 @@ parent_dir = Path(__file__).parent.parent
 sys.path.append(str(parent_dir))
 
 try:
-    import easy_api as atlas
+    if TYPE_CHECKING:
+        from atlas import easy_api as atlas
+    else:
+        import easy_api as atlas
 except ImportError as exc:  # pragma: no cover - user environment guard
     print("Error: Could not import ATLAS easy_api. Make sure you've installed the package or run the example from the repo root.")
     raise SystemExit(1) from exc

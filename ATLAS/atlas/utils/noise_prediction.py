@@ -3,7 +3,8 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Mapping
-from typing import Any, Optional, Union
+from collections.abc import Callable
+from typing import Any, Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -20,11 +21,12 @@ class NoisePredictionAdapter:
 
     def __init__(self, model: nn.Module) -> None:
         self.model = model
-        self._forward_fn = getattr(model, "forward", None) or model
-        if not callable(self._forward_fn):
+        forward_fn = getattr(model, "forward", None) or model
+        if not callable(forward_fn):
             raise TypeError(
                 f"Model must be callable or implement forward(); got {type(model)}"
             )
+        self._forward_fn = cast(Callable[..., torch.Tensor], forward_fn)
         self._signature = self._safe_signature()
         self._params = (
             self._signature.parameters if self._signature is not None else None
@@ -180,7 +182,12 @@ class NoisePredictionAdapter:
         if not kwargs:
             return None
         try:
-            return self._forward_fn(x, t_tensor, **kwargs)
+            result = self._forward_fn(x, t_tensor, **kwargs)
+            if not isinstance(result, torch.Tensor):
+                raise TypeError(
+                    f"Noise predictor must return torch.Tensor, got {type(result)}"
+                )
+            return result
         except TypeError as exc:
             message = str(exc)
             if "unexpected keyword argument" in message or "positional arguments" in message:

@@ -1,6 +1,10 @@
 """Gradient flow validation tests."""
 
+from __future__ import annotations
+
+from collections.abc import Callable
 import math
+from typing import cast, overload
 
 import pytest
 import torch
@@ -12,11 +16,23 @@ from atlas.models.score_network import build_highres_score_model
 from atlas.solvers.schrodinger_bridge import SchroedingerBridgeSolver
 
 
-def _linear_schedule(t):
+@overload
+def _linear_schedule(t: float) -> float: ...
+
+
+@overload
+def _linear_schedule(t: torch.Tensor) -> torch.Tensor: ...
+
+
+def _linear_schedule(t: float | torch.Tensor) -> float | torch.Tensor:
     """Simple alpha schedule in (0, 1] for testing."""
     if isinstance(t, torch.Tensor):
         return torch.ones_like(t) * 0.9
     return 0.9
+
+
+def _backward(tensor: torch.Tensor) -> None:
+    cast(Callable[[], None], tensor.backward)()
 
 
 def _tiny_config() -> HighResModelConfig:
@@ -59,7 +75,7 @@ def _build_solver(model: torch.nn.Module) -> SchroedingerBridgeSolver:
     )
 
 
-def test_score_model_gradient_flow():
+def test_score_model_gradient_flow() -> None:
     torch.manual_seed(0)
     model = build_highres_score_model(_tiny_config())
 
@@ -67,8 +83,9 @@ def test_score_model_gradient_flow():
     t = torch.rand(2)
 
     output = model(x, t)
+    assert isinstance(output, torch.Tensor)
     loss = output.mean()
-    loss.backward()
+    _backward(loss)
 
     allowed_missing = {"mid_attention.context_proj.weight", "mid_attention.context_proj.bias"}
     params_without_grad = [
@@ -87,16 +104,17 @@ def test_score_model_gradient_flow():
         assert torch.isfinite(param.grad).all(), f"Non-finite gradient in {name}"
 
 
-def test_solver_score_gradient_flow():
+def test_solver_score_gradient_flow() -> None:
     torch.manual_seed(0)
     model = build_highres_score_model(_tiny_config())
     solver = _build_solver(model)
 
     x = torch.randn(2, 3, 8, 8, requires_grad=True)
     x_next = solver.solve_once(x, t_curr=0.8, t_next=0.7)
+    assert isinstance(x_next, torch.Tensor)
 
     loss = (x_next ** 2).mean()
-    loss.backward()
+    _backward(loss)
 
     assert x.grad is not None and torch.isfinite(x.grad).all(), "No gradient or non-finite gradient on input"
 
@@ -113,7 +131,7 @@ def test_solver_score_gradient_flow():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for mixed-precision test")
-def test_mixed_precision_gradient_stability():
+def test_mixed_precision_gradient_stability() -> None:
     torch.manual_seed(0)
     device = torch.device("cuda")
     model = build_highres_score_model(_tiny_config()).to(device)
@@ -123,9 +141,10 @@ def test_mixed_precision_gradient_stability():
 
     with torch.cuda.amp.autocast(dtype=torch.float16):
         output = model(x, t)
+        assert isinstance(output, torch.Tensor)
 
     loss = output.float().mean()
-    loss.backward()
+    _backward(loss)
 
     grad_magnitudes = [
         param.grad.abs().max().item()
@@ -137,14 +156,15 @@ def test_mixed_precision_gradient_stability():
     assert max(grad_magnitudes) > 0.0, "Gradients underflowed to zero"
 
 
-def test_no_gradient_detachment():
+def test_no_gradient_detachment() -> None:
     torch.manual_seed(0)
     model = build_highres_score_model(_tiny_config())
 
     x = torch.randn(2, 3, 8, 8, requires_grad=True)
     t = torch.rand(2)
     output = model(x, t)
+    assert isinstance(output, torch.Tensor)
 
     assert output.requires_grad, "Model output was detached from computation graph"
-    output.mean().backward()
+    _backward(output.mean())
     assert x.grad is not None and torch.isfinite(x.grad).all(), "Input gradient missing or non-finite"

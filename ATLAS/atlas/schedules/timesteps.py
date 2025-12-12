@@ -1,4 +1,4 @@
-from typing import Iterable
+from typing import Any, Iterable, cast
 
 import numpy as np
 
@@ -7,7 +7,7 @@ def linear_timesteps(
     num_steps: int,
     start: float = 1.0,
     end: float = 0.01,
-    dtype=np.float32,
+    dtype: Any = np.float32,
 ) -> np.ndarray:
     """
     Monotonically decreasing linear time points (high → low noise).
@@ -26,7 +26,7 @@ def linear_timesteps(
         raise ValueError(f"start and end must be within [0, 1]; got start={start}, end={end}.")
 
     schedule = np.linspace(start, end, num_steps, dtype=dtype)
-    return schedule
+    return cast(np.ndarray, schedule)
 
 
 def cosine_timesteps(
@@ -34,7 +34,7 @@ def cosine_timesteps(
     start: float = 1.0,
     end: float = 0.0,
     offset: float = 0.008,
-    dtype=np.float32,
+    dtype: Any = np.float32,
 ) -> np.ndarray:
     """
     Cosine schedule matching Nichol & Dhariwal (2021), descending from start to end.
@@ -48,10 +48,10 @@ def cosine_timesteps(
     f = np.cos(((steps + offset) / (1.0 + offset)) * np.pi / 2.0) ** 2
     f = f / f[0]  # normalize to start value
     schedule = np.clip(f * start, end, start)
-    return schedule
+    return cast(np.ndarray, schedule)
 
 
-def custom_timesteps(values: Iterable[float], dtype=np.float32) -> np.ndarray:
+def custom_timesteps(values: Iterable[float], dtype: Any = np.float32) -> np.ndarray:
     """
     Normalize, deduplicate, and sort a custom iterable of timesteps in descending order.
     """

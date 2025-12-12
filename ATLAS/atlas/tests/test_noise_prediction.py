@@ -20,8 +20,8 @@ class _GuidedNoiseModel(nn.Module):
         self,
         x: torch.Tensor,
         t: torch.Tensor,
-        condition: Optional[Any] = None,  # type: ignore[override]
-        conditioning: Optional[Any] = None,  # type: ignore[override]
+        condition: Optional[Any] = None,
+        conditioning: Optional[Any] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         if condition == "cond":
@@ -55,6 +55,7 @@ def test_karras_noise_schedule_is_valid() -> None:
         alpha = karras_noise_schedule(t)
         assert 0.0 < alpha <= 1.0
     tensor_alpha = karras_noise_schedule(torch.tensor(0.5))
+    assert isinstance(tensor_alpha, torch.Tensor)
     assert torch.isfinite(tensor_alpha).item()
     alpha_value = float(tensor_alpha)
     assert 0.0 < alpha_value <= 1.0

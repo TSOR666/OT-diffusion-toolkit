@@ -513,9 +513,9 @@ def select_optimal_kernel_solver(
 
 
 def adjust_config_for_hardware(
-    config: dict,
+    config: dict[str, Any],
     target_resolution: int,
-) -> dict:
+) -> dict[str, Any]:
     """
     Adjust configuration parameters based on hardware capabilities.
 
@@ -611,4 +611,3 @@ def check_requirements(
         raise RuntimeError("BF16 precision required but not supported")
 
     return True
-

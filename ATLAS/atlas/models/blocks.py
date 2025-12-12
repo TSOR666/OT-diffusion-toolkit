@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, cast
 import warnings
 
 import torch
@@ -51,6 +51,7 @@ class ResnetBlock2D(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.dropout = nn.Dropout(dropout)
 
+        self.skip: nn.Identity | nn.Conv2d
         if in_channels != out_channels:
             self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1)
         else:
@@ -64,7 +65,7 @@ class ResnetBlock2D(nn.Module):
                 f"Batch size mismatch between x ({x.shape[0]}) and time_emb ({time_emb.shape[0]})."
             )
 
-        residual = self.skip(x)
+        residual = cast(torch.Tensor, self.skip(x))
 
         h = self.norm1(x)
         h = self.act(h)
@@ -78,7 +79,7 @@ class ResnetBlock2D(nn.Module):
         h = self.dropout(h)
         h = self.conv2(h)
 
-        return h + residual
+        return cast(torch.Tensor, h + residual)
 
 
 class DownsampleBlock(nn.Module):
@@ -165,7 +166,7 @@ class UpsampleBlock(nn.Module):
             raise ValueError(f"num_res_blocks must be positive, got {num_res_blocks}")
         self.skip_channels = skip_channels
         if upsample:
-            self.upsample = nn.Sequential(
+            self.upsample: Optional[nn.Sequential] = nn.Sequential(
                 nn.Upsample(scale_factor=2, mode="nearest"),
                 nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             )
