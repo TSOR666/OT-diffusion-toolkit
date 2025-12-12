@@ -148,8 +148,7 @@ class FFTKernelOperator(KernelOperator):
         dims = tuple(range(-spatial_dims, 0))
         u_fft = torch.fft.rfftn(u, dim=dims)
         result_fft = u_fft * kernel_fft
-        result = torch.fft.irfftn(result_fft, s=self.grid_shape, dim=dims)
-        return result
+        return torch.fft.irfftn(result_fft, s=self.grid_shape, dim=dims)
     
     def apply(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -249,14 +248,14 @@ class FFTKernelOperator(KernelOperator):
         return 1.0 / min_res
 
     def clear_cache(self) -> None:
-        """Clear any cached computations to free memory."""
-        # Clear precomputed FFT kernels to free GPU memory
+        """Clear any cached computations to free memory.
+
+        Note: After clearing, the operator must be reinitialized before use.
+        """
         if self.multi_scale:
             self.kernel_ffts.clear()
             if hasattr(self, "weights"):
-                del self.weights
-                self.weights = None
+                self.weights = torch.empty(0, device=self.device)
         else:
             if hasattr(self, "kernel_fft"):
-                del self.kernel_fft
-                self.kernel_fft = None
+                self.kernel_fft = torch.empty(0, device=self.device)
