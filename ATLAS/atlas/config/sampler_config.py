@@ -8,8 +8,9 @@ class SamplerConfig:
     """Configuration for the diffusion sampler pipeline."""
 
     # General sampling parameters
-    sb_iterations: int = 3
+    sb_iterations: int = 20  # Increased from 3 for robust Sinkhorn convergence
     error_tolerance: float = 1e-4
+    marginal_constraint_threshold: float = 1e-2  # Threshold for marginal constraint violation (raise error if exceeded)
     use_linear_solver: bool = True
     use_mixed_precision: bool = True
     memory_efficient: bool = True
@@ -56,6 +57,15 @@ class SamplerConfig:
             raise ValueError(f"sb_iterations must be positive, got {self.sb_iterations}")
         if self.error_tolerance <= 0:
             raise ValueError(f"error_tolerance must be positive, got {self.error_tolerance}")
+        if self.marginal_constraint_threshold <= 0:
+            raise ValueError(f"marginal_constraint_threshold must be positive, got {self.marginal_constraint_threshold}")
+        if self.marginal_constraint_threshold < self.error_tolerance:
+            warnings.warn(
+                f"marginal_constraint_threshold ({self.marginal_constraint_threshold}) is less than "
+                f"error_tolerance ({self.error_tolerance}); this may cause unnecessary failures.",
+                UserWarning,
+                stacklevel=2,
+            )
         if self.guidance_scale < 0:
             raise ValueError(f"guidance_scale must be non-negative, got {self.guidance_scale}")
         if self.guidance_scale < 1.0:

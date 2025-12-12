@@ -15,7 +15,7 @@ from .base import KernelOperator
 class RFFKernelOperator(KernelOperator):
     """Approximate kernels with random Fourier features."""
 
-    _SUPPORTED_KERNELS = {"gaussian", "laplacian"}
+    _SUPPORTED_KERNELS = {"gaussian", "laplacian", "cauchy"}
 
     def __init__(
         self,
@@ -105,7 +105,17 @@ class RFFKernelOperator(KernelOperator):
                 weights = torch.randn(self.input_dim, num_features, device=self.device, generator=self.rng)
             elif self.kernel_type == "laplacian":
                 u = torch.rand(self.input_dim, num_features, device=self.device, generator=self.rng)
+                # Clamp away from 0 and 1 to prevent tan() from producing ±inf
+                u = torch.clamp(u, min=1e-7, max=1.0 - 1e-7)
                 weights = torch.tan(math.pi * (u - 0.5))
+            elif self.kernel_type == "cauchy":
+                # Cauchy kernel RFF: sample from standard Cauchy distribution
+                # Cauchy(0,1) = Normal(0,1) / Normal(0,1) (ratio of independent normals)
+                numer = torch.randn(self.input_dim, num_features, device=self.device, generator=self.rng)
+                denom = torch.randn(self.input_dim, num_features, device=self.device, generator=self.rng)
+                # Clamp denominator away from zero to prevent inf
+                denom = torch.sign(denom) * torch.clamp(denom.abs(), min=1e-7)
+                weights = numer / denom
             else:
                 raise ValueError(f"Unsupported kernel type for sampling: {self.kernel_type}")
         return weights * scale
@@ -192,7 +202,7 @@ class RFFKernelOperator(KernelOperator):
         norm_factor = math.sqrt(2.0 / self.feature_dim)
         for weights, offsets in zip(self.weights, self.offsets):
             proj = x @ weights + offsets
-            if self.kernel_type in {"gaussian", "laplacian"}:
+            if self.kernel_type in {"gaussian", "laplacian", "cauchy"}:
                 features = torch.cos(proj)
             else:
                 raise ValueError(f"Unsupported kernel: {self.kernel_type}")
