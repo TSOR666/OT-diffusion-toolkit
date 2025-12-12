@@ -360,8 +360,10 @@ class SchroedingerBridgeSolver:
         score = self._compute_score(x, t, conditioning=conditioning)
         f_t, g_sq_t = self._compute_sde_coefficients(t, score)
 
-        # Probability flow ODE drift: f(t) * x + g(t)^2 * score / 2
-        drift = f_t * x + 0.5 * g_sq_t * score
+        # Probability flow ODE drift (VP SDE):
+        # dx/dt = f(t) * x - g(t)^2 * score
+        # with f(t) = -0.5 * beta(t), g(t)^2 = beta(t)
+        drift = f_t * x - g_sq_t * score
 
         return drift * dt
     
@@ -443,8 +445,14 @@ class SchroedingerBridgeSolver:
         # Set method based on theoretical error bounds or specific request
         if self.solver_type != 'auto':
             method = self.solver_type
-        elif is_grid and len(grid_shape) <= 3:
-            # Grid data is best handled by FFT
+        elif (
+            is_grid
+            and grid_shape is not None
+            and len(grid_shape) <= 3
+            and batch_size == int(np.prod(grid_shape))
+        ):
+            # Only use FFT when the batch indexes grid points (i.e. n == prod(grid_shape)).
+            # For typical image batches (B, C, H, W), FFT does not represent a Gram operator.
             method = 'fft'
         elif batch_size <= 1000:
             # Small problems: use direct method
@@ -473,11 +481,19 @@ class SchroedingerBridgeSolver:
         # Create and return the appropriate kernel operator
         kernel_start_time = time.time()
         
-        # Check for special case: FFT requested but data is not grid-structured
-        if method == 'fft' and (not is_grid or not grid_shape):
-            self.logger.warning("Data is not grid-structured, falling back to RFF")
-            # Use RFF instead of recursively calling this function
-            method = 'rff'
+        # Check for special case: FFT requested but the batch does not represent grid points.
+        if method == 'fft':
+            if (not is_grid) or (not grid_shape):
+                self.logger.warning("Data is not grid-structured, falling back to RFF")
+                method = 'rff'
+            elif batch_size != int(np.prod(grid_shape)):
+                self.logger.warning(
+                    "FFT kernel requires batch_size == prod(grid_shape); got batch_size=%d, grid_shape=%s. "
+                    "Falling back to RFF.",
+                    batch_size,
+                    grid_shape,
+                )
+                method = 'rff'
         
         cacheable = method != 'nystrom'
         cache_key = None
@@ -530,8 +546,7 @@ class SchroedingerBridgeSolver:
                     landmarks=landmarks,
                     kernel_type=self.kernel_type,
                     epsilon=epsilon,
-                    device=self.device,
-                    seed=self.seed
+                    device=self.device
                 )
             elif method == 'fft':
                 operator = FFTKernelOperator(
@@ -719,7 +734,7 @@ class SchroedingerBridgeSolver:
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
             dtype_info = torch.finfo(denom.dtype)
-            min_denom = torch.sqrt(torch.tensor(dtype_info.eps, dtype=denom.dtype))
+            min_denom = denom_abs.new_tensor(math.sqrt(dtype_info.eps))
 
             if (not denom_is_finite) or denom_abs < min_denom:
                 denom_value = float(denom.detach().cpu().item()) if denom_is_finite else float("nan")

@@ -848,7 +848,10 @@ def create_sampler(
 
         print(f"[ATLAS] Loading checkpoint: {checkpoint}")
         try:
-            state_dict = torch.load(checkpoint, map_location=device)
+            try:
+                state_dict = torch.load(checkpoint, map_location=device, weights_only=True)
+            except TypeError:
+                state_dict = torch.load(checkpoint, map_location=device)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load checkpoint from {checkpoint}: {e}\n"
@@ -999,4 +1002,3 @@ def list_profiles():
         print(f"  Mixed precision: {profile.use_mixed_precision}")
         print(f"  CLIP enabled: {profile.enable_clip}")
         print(f"  Kernel solver: {profile.kernel_solver}")
-

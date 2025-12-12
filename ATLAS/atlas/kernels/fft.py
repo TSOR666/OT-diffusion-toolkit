@@ -137,17 +137,18 @@ class FFTKernelOperator(KernelOperator):
         Returns:
             Result of kernel convolution
         """
-        if list(u.shape) != self.grid_shape:
-            raise ValueError(f"Input grid shape {tuple(u.shape)} does not match configured grid_shape {tuple(self.grid_shape)}")
-        # Compute FFT of u
-        u_fft = torch.fft.rfftn(u)
-        
-        # Apply kernel in Fourier domain (pointwise multiplication)
+        spatial_dims = len(self.grid_shape)
+        if spatial_dims == 0:
+            raise ValueError("grid_shape must contain at least one spatial dimension")
+        if tuple(u.shape[-spatial_dims:]) != tuple(self.grid_shape):
+            raise ValueError(
+                f"Input grid shape {tuple(u.shape)} does not match configured grid_shape {tuple(self.grid_shape)}"
+            )
+
+        dims = tuple(range(-spatial_dims, 0))
+        u_fft = torch.fft.rfftn(u, dim=dims)
         result_fft = u_fft * kernel_fft
-        
-        # Transform back to spatial domain
-        result = torch.fft.irfftn(result_fft, s=u.shape)
-        
+        result = torch.fft.irfftn(result_fft, s=self.grid_shape, dim=dims)
         return result
     
     def apply(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -196,18 +197,16 @@ class FFTKernelOperator(KernelOperator):
         batch_shape = reshaped.shape[:-spatial_dims]
         v_batches = reshaped.reshape(-1, *self.grid_shape)
 
-        results = []
-        for sample in v_batches:
-            if self.multi_scale:
-                result_grid = torch.zeros_like(sample)
-                for weight, kernel_fft in zip(self.weights, self.kernel_ffts):
-                    scale_result = self._apply_kernel_fft(sample, kernel_fft)
-                    result_grid += weight * scale_result
-            else:
-                result_grid = self._apply_kernel_fft(sample, self.kernel_fft)
-            results.append(result_grid)
+        if self.multi_scale:
+            dims = tuple(range(-spatial_dims, 0))
+            u_fft = torch.fft.rfftn(v_batches, dim=dims)
+            result_fft = torch.zeros_like(u_fft)
+            for weight, kernel_fft in zip(self.weights, self.kernel_ffts):
+                result_fft = result_fft + (weight * (u_fft * kernel_fft))
+            stacked = torch.fft.irfftn(result_fft, s=self.grid_shape, dim=dims)
+        else:
+            stacked = self._apply_kernel_fft(v_batches, self.kernel_fft)
 
-        stacked = torch.stack(results, dim=0)
         stacked = stacked.reshape(*batch_shape, *self.grid_shape)
 
         if needs_reduction:

@@ -47,7 +47,7 @@ class LoRALinear(nn.Module):
         """Merge LoRA weights into the base layer for inference."""
         with torch.no_grad():
             delta = (self.lora_up.weight @ self.lora_down.weight) * self.scale
-            self.base.weight.data += delta
+            self.base.weight.add_(delta)
             self.lora_down.weight.zero_()
             self.lora_up.weight.zero_()
 

@@ -99,9 +99,9 @@ class AdvancedHierarchicalDiffusionSampler:
     # ------------------------------------------------------------------
     def _resolve_conditioning(
         self,
-        conditioning: Optional[Dict[str, Any]],
+        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]],
         batch_size: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[Union[bool, torch.Tensor, Dict[str, Any]]]:
         payload = conditioning if conditioning is not None else self.current_conditioning
         if payload is None:
             return None
@@ -155,10 +155,10 @@ class AdvancedHierarchicalDiffusionSampler:
     def _prepare_conditioning(
         self,
         batch_size: int,
-        conditioning: Optional[Dict[str, Any]],
+        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]],
         prompts: Optional[List[str]],
         negative_prompts: Optional[List[str]],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[Union[bool, torch.Tensor, Dict[str, Any]]]:
         if prompts is not None:
             payload = self.prepare_conditioning_from_prompts(
                 prompts,
@@ -222,7 +222,7 @@ class AdvancedHierarchicalDiffusionSampler:
         show_progress: bool = True,
         verbose: Optional[bool] = None,
         callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
-        conditioning: Optional[Dict[str, Any]] = None,
+        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]] = None,
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
         initial_state: Optional[torch.Tensor] = None,
