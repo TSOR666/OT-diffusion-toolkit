@@ -218,9 +218,12 @@ class KernelDerivativeRFF(nn.Module):
         y_features = torch.cos(y_proj) * feature_scale
 
         if weights_y is not None:
-            y_features = y_features * weights_y.view(-1, 1).to(y_features.dtype)
+            weights = weights_y.view(-1, 1).to(y_features.dtype)
+            weight_sum = torch.clamp(weights.sum(), min=1e-8)
+            phi_y_sum = (y_features * weights).sum(dim=0) / weight_sum
+        else:
+            phi_y_sum = y_features.mean(dim=0)
 
-        phi_y_sum = y_features.sum(dim=0)
         phi_x = x_cos * feature_scale
 
         kernel_sum = torch.einsum("bd,d->b", phi_x, phi_y_sum).unsqueeze(-1) + 1e-10

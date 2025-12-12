@@ -4,6 +4,7 @@ import math
 import time
 from collections import OrderedDict
 from contextlib import nullcontext
+from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -25,6 +26,11 @@ from ..kernels import (
 )
 from ..utils.noise_prediction import NoisePredictionAdapter
 from ..utils.random import set_seed
+
+try:
+    from ..schedules import karras_noise_schedule
+except Exception:  # pragma: no cover - soft import to avoid circular issues in docs builds
+    karras_noise_schedule = None
 
 
 _VALID_KERNEL_TYPES = {"gaussian", "laplacian", "cauchy"}
@@ -64,6 +70,7 @@ class SchroedingerBridgeSolver:
         self._score_model: nn.Module
         self.noise_predictor: NoisePredictionAdapter
         self.score_model = score_model
+        self._karras_params = self._extract_karras_params(noise_schedule)
         
         # Use provided configs or set defaults
         if kernel_config is None:
@@ -72,6 +79,10 @@ class SchroedingerBridgeSolver:
             sampler_config = SamplerConfig()
             
         # Extract configuration parameters
+        if not (1e-10 <= kernel_config.epsilon <= 1e2):
+            raise ValueError(
+                f"epsilon must be in [1e-10, 1e2], got {kernel_config.epsilon}"
+            )
         self.epsilon = kernel_config.epsilon
         self.adaptive_epsilon = kernel_config.adaptive_epsilon
         self.solver_type = kernel_config.solver_type
@@ -83,7 +94,15 @@ class SchroedingerBridgeSolver:
                 f"Supported types are: {sorted(_VALID_KERNEL_TYPES)}"
             )
         self.kernel_type = kernel_type
+        if not (1 <= kernel_config.rff_features <= 100_000):
+            raise ValueError(
+                f"rff_features must be in [1, 100000], got {kernel_config.rff_features}"
+            )
         self.rff_features = kernel_config.rff_features
+        if not (1 <= kernel_config.n_landmarks <= 10_000):
+            raise ValueError(
+                f"n_landmarks must be in [1, 10000], got {kernel_config.n_landmarks}"
+            )
         self.n_landmarks = kernel_config.n_landmarks
 
         self.sb_iterations = sampler_config.sb_iterations
@@ -105,9 +124,19 @@ class SchroedingerBridgeSolver:
         else:
             self._amp_context = nullcontext
 
+        # Initialize logger early for validation warnings
+        self.logger = logging.getLogger("SchroedingerBridgeSolver")
+        self.logger.setLevel(logging.INFO if sampler_config.verbose_logging else logging.WARNING)
+
         # Set random seed if provided
         if self.seed is not None:
             set_seed(self.seed)
+            if self.device.type == "cuda":
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+                self.logger.info(
+                    "Deterministic CUDA kernels enabled due to fixed seed; this may reduce performance."
+                )
         
         # Initialize performance tracking
         self.perf_stats = {
@@ -120,11 +149,7 @@ class SchroedingerBridgeSolver:
             'mean_weights': [],
             'hierarchy': [],
         }
-        
-        # Initialize logger
-        self.logger = logging.getLogger("SchroedingerBridgeSolver")
-        self.logger.setLevel(logging.INFO if sampler_config.verbose_logging else logging.WARNING)
-        
+
         # Initialize kernel operator cache
         self.kernel_operators: "OrderedDict[Tuple[Any, ...], KernelOperator]" = OrderedDict()
         self.max_kernel_cache_size = int(kernel_config.max_kernel_cache_size)
@@ -187,11 +212,90 @@ class SchroedingerBridgeSolver:
         one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=info.tiny)
         return torch.sqrt(one_minus_alpha / alpha_clamped)
 
-    def _compute_sde_coefficients(
+    def _extract_karras_params(
+        self, schedule: Callable
+    ) -> Optional[Tuple[float, float, float]]:
+        """Infer parameters for karras_noise_schedule even when wrapped in functools.partial."""
+        if karras_noise_schedule is None:
+            return None
+
+        func = schedule.func if isinstance(schedule, partial) else schedule
+        if func is not karras_noise_schedule:
+            return None
+
+        defaults = karras_noise_schedule.__defaults__ or (0.002, 80.0, 7.0)
+        kw = schedule.keywords if isinstance(schedule, partial) and schedule.keywords else {}
+
+        try:
+            sigma_min = float(kw.get("sigma_min", defaults[0]))
+            sigma_max = float(kw.get("sigma_max", defaults[1]))
+            rho = float(kw.get("rho", defaults[2]))
+        except Exception:
+            return None
+
+        return sigma_min, sigma_max, rho
+
+    def _karras_alpha_prime(
         self, t: float, reference: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
-        alpha_t = self._schedule_to_tensor(t, reference)
+    ) -> Optional[torch.Tensor]:
+        """Analytical derivative d(alpha)/dt for the Karras noise schedule."""
+        if self._karras_params is None:
+            return None
+
+        sigma_min, sigma_max, rho = self._karras_params
+        dtype = reference.dtype
+        device = reference.device
+
+        if isinstance(t, torch.Tensor):
+            t_tensor = t.detach()
+            if not torch.is_floating_point(t_tensor):
+                t_tensor = t_tensor.to(dtype=torch.float32)
+            t_tensor = t_tensor.to(device=device, dtype=dtype)
+            if t_tensor.ndim > 0:
+                t_tensor = t_tensor.reshape(-1)[0]
+        else:
+            t_tensor = torch.tensor(float(t), device=device, dtype=dtype)
+
+        t_tensor = torch.clamp(t_tensor, 0.0, 1.0)
+
+        sigma_min_root = torch.tensor(sigma_min, device=device, dtype=dtype) ** (1.0 / rho)
+        sigma_max_root = torch.tensor(sigma_max, device=device, dtype=dtype) ** (1.0 / rho)
+        sigma_path = sigma_max_root + t_tensor * (sigma_min_root - sigma_max_root)
+
+        # sigma(t) = path(t) ** rho; d sigma / dt = rho * path(t) ** (rho-1) * path'(t)
+        sigma_t = sigma_path ** rho
+        sigma_prime = rho * (sigma_path ** (rho - 1.0)) * (sigma_min_root - sigma_max_root)
+
+        denom = 1.0 + sigma_t ** 2
+        alpha_prime = -2.0 * sigma_t * sigma_prime / (denom ** 2)
+        return alpha_prime
+
+    def _analytic_alpha_prime(
+        self, t: float, reference: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """
+        Attempt to compute d(alpha)/dt analytically.
+        
+        Priority:
+        1) Custom derivative attached to the schedule (``alpha_derivative`` or ``derivative``)
+        2) Built-in Karras schedule derivative
+        Fallback: numerical finite differences handled elsewhere.
+        """
+        derivative_fn = getattr(self.noise_schedule, "alpha_derivative", None) or getattr(
+            self.noise_schedule, "derivative", None
+        )
+        if derivative_fn is not None:
+            try:
+                return self._schedule_value_to_tensor(derivative_fn(t), reference)
+            except Exception:
+                self.logger.debug("Failed to use custom schedule derivative; will fall back.", exc_info=True)
+
+        return self._karras_alpha_prime(t, reference)
+
+    def _finite_difference_alpha_prime(
+        self, t: float, reference: torch.Tensor, alpha_t: torch.Tensor
+    ) -> torch.Tensor:
+        """Fallback numerical derivative used when no analytical formula is available."""
         delta = 1e-3
         t_upper = min(1.0, t + delta)
         t_lower = max(0.0, t - delta)
@@ -201,31 +305,33 @@ class SchroedingerBridgeSolver:
             t_upper = min(1.0, t + delta)
             t_lower = max(0.0, t - delta)
             if t_upper == t_lower:
-                zero = torch.zeros_like(alpha_t)
-                return zero, zero
+                return torch.zeros_like(alpha_t)
 
-        alpha_upper = self._schedule_value_to_tensor(
-            self.noise_schedule(t_upper), reference
-        )
-        alpha_lower = self._schedule_value_to_tensor(
-            self.noise_schedule(t_lower), reference
-        )
+        alpha_upper = self._schedule_value_to_tensor(self.noise_schedule(t_upper), reference)
+        alpha_lower = self._schedule_value_to_tensor(self.noise_schedule(t_lower), reference)
 
         denom = max(t_upper - t_lower, 1e-6)
         denom_tensor = alpha_t.new_tensor(denom)
-        alpha_prime = (alpha_upper - alpha_lower) / denom_tensor
+        return (alpha_upper - alpha_lower) / denom_tensor
+
+    def _compute_sde_coefficients(
+        self, t: float, reference: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
+        alpha_t = self._schedule_to_tensor(t, reference)
+        alpha_prime = self._analytic_alpha_prime(t, reference)
+        if alpha_prime is None:
+            alpha_prime = self._finite_difference_alpha_prime(t, reference, alpha_t)
 
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
         beta_raw = -alpha_prime / alpha_safe
-        # Noise schedules like Karras increase alpha over time; take the magnitude
-        # to keep the diffusion coefficient positive in those cases.
-        beta_t = torch.clamp(beta_raw, min=info.tiny)
-        if (beta_raw <= 0).any():
-            beta_t = torch.clamp(beta_raw.abs(), min=info.tiny)
+        beta_mag = torch.clamp(beta_raw.abs(), min=info.tiny)
+        beta_signed = torch.where(beta_raw >= 0, beta_mag, -beta_mag)
 
-        f_t = -0.5 * beta_t
-        g_sq_t = beta_t
+        # Drift keeps the sign of the schedule derivative; diffusion uses magnitude.
+        f_t = -0.5 * beta_signed
+        g_sq_t = beta_mag
 
         return f_t, torch.clamp(g_sq_t, min=0.0)
 
@@ -252,7 +358,7 @@ class SchroedingerBridgeSolver:
         noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
-        sigma_t = self._compute_sigma(alpha_t)
+        sigma_t = torch.clamp(self._compute_sigma(alpha_t), min=1e-6)
         score = -noise_pred / sigma_t
         return score
 
@@ -362,8 +468,14 @@ class SchroedingerBridgeSolver:
         # Set method based on theoretical error bounds or specific request
         if self.solver_type != 'auto':
             method = self.solver_type
-        elif is_grid and len(grid_shape) <= 3:
-            # Grid data is best handled by FFT
+        elif (
+            is_grid
+            and grid_shape is not None
+            and len(grid_shape) <= 3
+            and batch_size == int(np.prod(grid_shape))
+        ):
+            # Only use FFT when the batch indexes grid points (i.e. n == prod(grid_shape)).
+            # For typical image batches (B, C, H, W), FFT does not represent a Gram operator.
             method = 'fft'
         elif batch_size <= 1000:
             # Small problems: use direct method
@@ -383,6 +495,12 @@ class SchroedingerBridgeSolver:
             # Default to RFF as a balanced choice
             method = 'rff'
         
+        if method == 'fft':
+            self.logger.warning(
+                "FFT kernel currently lacks pairwise transport support; using RFF instead for correctness."
+            )
+            method = 'rff'
+
         # Track method usage
         if method in self.perf_stats['methods_used']:
             self.perf_stats['methods_used'][method] += 1
@@ -392,11 +510,19 @@ class SchroedingerBridgeSolver:
         # Create and return the appropriate kernel operator
         kernel_start_time = time.time()
         
-        # Check for special case: FFT requested but data is not grid-structured
-        if method == 'fft' and (not is_grid or not grid_shape):
-            self.logger.warning("Data is not grid-structured, falling back to RFF")
-            # Use RFF instead of recursively calling this function
-            method = 'rff'
+        # Check for special case: FFT requested but the batch does not represent grid points.
+        if method == 'fft':
+            if (not is_grid) or (not grid_shape):
+                self.logger.warning("Data is not grid-structured, falling back to RFF")
+                method = 'rff'
+            elif batch_size != int(np.prod(grid_shape)):
+                self.logger.warning(
+                    "FFT kernel requires batch_size == prod(grid_shape); got batch_size=%d, grid_shape=%s. "
+                    "Falling back to RFF.",
+                    batch_size,
+                    grid_shape,
+                )
+                method = 'rff'
         
         cacheable = method != 'nystrom'
         cache_key = None
@@ -449,8 +575,7 @@ class SchroedingerBridgeSolver:
                     landmarks=landmarks,
                     kernel_type=self.kernel_type,
                     epsilon=epsilon,
-                    device=self.device,
-                    seed=self.seed
+                    device=self.device
                 )
             elif method == 'fft':
                 operator = FFTKernelOperator(
@@ -471,11 +596,15 @@ class SchroedingerBridgeSolver:
                 while len(self.kernel_operators) > self.max_kernel_cache_size:
                     evicted_key, evicted_operator = self.kernel_operators.popitem(last=False)
                     self.perf_stats["kernel_cache_evictions"] += 1
-                    if hasattr(evicted_operator, "clear_cache"):
-                        try:
+                    try:
+                        if hasattr(evicted_operator, "clear_cache"):
                             evicted_operator.clear_cache()
-                        except Exception:
-                            pass
+                    except Exception as exc:
+                        self.logger.error(
+                            "Failed to clear cache for %s due to %s", evicted_key, exc
+                        )
+                    finally:
+                        del evicted_operator
                     self.logger.debug(f"Evicted kernel operator cache entry {evicted_key}")
         
         self.perf_stats['kernel_time'] += time.time() - kernel_start_time
@@ -551,6 +680,21 @@ class SchroedingerBridgeSolver:
                 raise RuntimeError(
                     f"Conjugate gradient solution shape mismatch: expected ({batch_size},), got {f.shape}"
                 )
+            else:
+                # Proactively check conditioning to avoid CG on nearly singular systems.
+                try:
+                    cond_estimate = self._check_system_conditioning(kernel_op, x)
+                except RuntimeError as exc:
+                    self.logger.warning(
+                        "Conditioning check failed for linear solver (%s); falling back to Sinkhorn.",
+                        exc,
+                    )
+                    cond_estimate = None
+                if cond_estimate is not None and cond_estimate > 1e4:
+                    self.logger.warning(
+                        "Estimated condition number of (I - K) is high (%.2e); CG may converge slowly.",
+                        cond_estimate,
+                    )
 
             Kf = kernel_op.apply(x, f)
             if (Kf < 1e-10).any() or (Kf > 1e8).any():
@@ -597,6 +741,47 @@ class SchroedingerBridgeSolver:
             )
 
         return f, g
+
+    def _check_system_conditioning(
+        self, kernel_op: KernelOperator, x: torch.Tensor, sample_size: int = 100
+    ) -> float:
+        """
+        Estimate the conditioning of (I - K) via power iteration on K^T K.
+
+        Returns an estimate of 1 / (1 - lambda_max), where lambda_max is the
+        largest eigenvalue magnitude of K. Raises if the system is nearly singular.
+        """
+        sample = min(sample_size, x.size(0))
+        if sample <= 1:
+            return 1.0
+
+        with torch.no_grad():
+            v = torch.randn(sample, device=self.device)
+            norm = torch.norm(v)
+            if norm > 0:
+                v = v / norm
+
+            # Power iteration on K^T K to estimate |lambda_max|
+            for _ in range(20):
+                Kv = kernel_op.apply(x[:sample], v)
+                KtKv = kernel_op.apply_transpose(x[:sample], Kv)
+                new_norm = torch.norm(KtKv)
+                if new_norm < 1e-12:
+                    break
+                v = KtKv / new_norm
+
+            Kv = kernel_op.apply(x[:sample], v)
+            KtKv = kernel_op.apply_transpose(x[:sample], Kv)
+            denom = torch.dot(v, v).clamp_min(1e-12)
+            lambda_sq = torch.dot(v, KtKv).clamp_min(0.0) / denom
+            lambda_max_val = float(torch.sqrt(lambda_sq))
+
+        if lambda_max_val >= 0.99:
+            raise RuntimeError(
+                f"System (I - K) is nearly singular: |lambda_max(K)| = {lambda_max_val:.6f}"
+            )
+
+        return float(1.0 / max(1e-6, 1.0 - lambda_max_val))
     
     def _conjugate_gradient(
         self,
@@ -683,6 +868,10 @@ class SchroedingerBridgeSolver:
                 denom_is_finite = torch.isfinite(denom)
                 denom_abs = torch.abs(denom)
 
+                if denom_is_finite and denom_abs < min_denom:
+                    denom = denom + min_denom
+                    denom_abs = torch.abs(denom)
+
                 # If still problematic, return current best solution
                 if (not denom_is_finite) or denom_abs <= min_denom:
                     self.logger.warning(
@@ -715,7 +904,7 @@ class SchroedingerBridgeSolver:
                 return _finalize(True, rsnorm)
 
             # If the residual is increasing or unstable, exit early
-            if rsnew > rsold * 1.02:
+            if rsnew > rsold * 1.10:
                 prev_residual = torch.sqrt(rsold).detach().cpu().item()
                 self.logger.warning(
                     "Conjugate gradient residual increased at iteration %d (%.3e -> %.3e); returning partial solution.",
@@ -821,7 +1010,11 @@ class SchroedingerBridgeSolver:
         # Use more conservative bounds to prevent numerical overflow in downstream operations
         fg_raw = torch.nan_to_num(f * g, nan=1e-10, posinf=1e6, neginf=1e-10)
         fg = torch.clamp(fg_raw, min=1e-10, max=1e6)  # [batch_size]
-        
+        if fg.shape[0] != batch_size:
+            raise RuntimeError(
+                f"Potential vector shape mismatch: expected ({batch_size},), got {tuple(fg.shape)}"
+            )
+
         def transport_map(z: torch.Tensor) -> torch.Tensor:
             """
             Apply the optimal transport map to new points z.
@@ -853,13 +1046,30 @@ class SchroedingerBridgeSolver:
                 # Ensure weights form a proper stochastic matrix even if approximations
                 # produce small negative values.
                 weights = torch.clamp(weights, min=0.0)
-                P_zx = weights * fg.unsqueeze(0)
-                row_sums = torch.clamp(P_zx.sum(dim=1, keepdim=True), min=1e-10)
+                if weights.shape != (z_flat.size(0), batch_size):
+                    raise RuntimeError(
+                        f"Kernel weights shape mismatch: expected {(z_flat.size(0), batch_size)}, got {tuple(weights.shape)}"
+                    )
+                fg_broadcasted = fg.unsqueeze(0)
+                P_zx = weights * fg_broadcasted  # (batch_z, batch_x)
+                row_sums = P_zx.sum(dim=1, keepdim=True)
+                if not torch.all(row_sums > 0):
+                    raise RuntimeError("Transport map has zero-weight rows; cannot normalize.")
+                row_sums = torch.clamp(row_sums, min=1e-10)
                 P_zx_norm = P_zx / row_sums
-                z_next = P_zx_norm @ x_next_flat
+                row_sum_check = P_zx_norm.sum(dim=1)
+                atol = 1e-3 if P_zx_norm.dtype == torch.float16 else 1e-4
+                if not torch.allclose(row_sum_check, torch.ones_like(row_sum_check), atol=atol):
+                    self.logger.warning(
+                        "Row-stochasticity drift detected in transport map: max deviation %.3e",
+                        float(torch.max(torch.abs(row_sum_check - 1.0))),
+                    )
+                z_next = P_zx_norm @ x_next_flat  # (batch_z, batch_x) @ (batch_x, d) -> (batch_z, d)
             elif isinstance(kernel_op, FFTKernelOperator):
-                alpha = 0.5  # Interpolation parameter
-                z_next = (1 - alpha) * z_flat + alpha * x_next_flat
+                raise RuntimeError(
+                    "FFT kernel operator does not expose pairwise evaluations required for transport map. "
+                    "Use solver_type='rff' or 'direct' until FFT transport support is implemented."
+                )
             else:
                 raise RuntimeError(
                     "Kernel operator must implement pairwise evaluation or support FFT transport "
@@ -970,43 +1180,44 @@ class SchroedingerBridgeSolver:
 
         timesteps = self.validate_timesteps(timesteps)
 
-        # Reset performance accumulators
-        self.perf_stats['times_per_step'].clear()
-        self.perf_stats['memory_usage'].clear()
-        self.perf_stats['mean_weights'].clear()
-        self.perf_stats['hierarchy'] = []
-        self.perf_stats['kernel_time'] = 0.0
-        self.perf_stats['sb_time'] = 0.0
+        with torch.inference_mode():
+            # Reset performance accumulators
+            self.perf_stats['times_per_step'].clear()
+            self.perf_stats['memory_usage'].clear()
+            self.perf_stats['mean_weights'].clear()
+            self.perf_stats['hierarchy'] = []
+            self.perf_stats['kernel_time'] = 0.0
+            self.perf_stats['sb_time'] = 0.0
 
-        total_start_time = time.time()
+            total_start_time = time.time()
 
-        # Initialize with random noise
-        x_t = torch.randn(shape, device=self.device)
+            # Initialize with random noise
+            x_t = torch.randn(shape, device=self.device)
 
-        # Simplified sampling loop without hierarchical features
-        # For advanced features, use AdvancedHierarchicalDiffusionSampler
-        from tqdm import tqdm
-        iterator = range(len(timesteps) - 1)
-        if verbose:
-            iterator = tqdm(iterator, desc="Sampling", leave=False)
+            # Simplified sampling loop without hierarchical features
+            # For advanced features, use AdvancedHierarchicalDiffusionSampler
+            from tqdm import tqdm
+            iterator = range(len(timesteps) - 1)
+            if verbose:
+                iterator = tqdm(iterator, desc="Sampling", leave=False)
 
-        for idx in iterator:
-            t_curr = float(timesteps[idx])
-            t_next = float(timesteps[idx + 1])
+            for idx in iterator:
+                t_curr = float(timesteps[idx])
+                t_next = float(timesteps[idx + 1])
 
-            # Perform single SB step
-            x_t = self.solve_once(
-                x_t,
-                t_curr,
-                t_next,
-                conditioning=conditioning,
-            )
+                # Perform single SB step
+                x_t = self.solve_once(
+                    x_t,
+                    t_curr,
+                    t_next,
+                    conditioning=conditioning,
+                )
 
-            if callback is not None:
-                callback(x_t, t_curr, t_next)
+                if callback is not None:
+                    callback(x_t, t_curr, t_next)
 
-        self.perf_stats['total_time'] = time.time() - total_start_time
-        return x_t
+            self.perf_stats['total_time'] = time.time() - total_start_time
+            return x_t
 
     def validate_timesteps(self, timesteps: Sequence[float]) -> List[float]:
         """Validate and normalise a sequence of timesteps for sampling."""

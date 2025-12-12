@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from fastsb_ot import FastSBOTConfig, FastSBOTSolver, make_schedule
+from fastsb_ot.kernels import KernelModule
 
 
 class MockScoreModel(nn.Module):
@@ -295,6 +296,67 @@ class TestNumericalStability:
 
         x_next = solver.ddim_step(x_t, noise_pred, t_curr=0.5, t_next=0.4, eta=0.0)
         assert torch.isfinite(x_next).all()
+
+
+class TestRegressionGaps:
+    """Regression tests for cache correctness and Fisher gradients."""
+
+    def test_sample_recomputes_scores_per_call(self, noise_schedule, device):
+        """Ensure score cache keys depend on x_t content, forcing recomputation."""
+
+        class CountingModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv = nn.Conv2d(3, 3, 1)
+                self.calls = 0
+
+            def forward(self, x, t):
+                self.calls += 1
+                return self.conv(x)
+
+        cfg = FastSBOTConfig(
+            quality="draft",
+            warmup=False,
+            use_mixed_precision=False,
+            use_dynamic_compilation=False,
+            use_triton_kernels=False,
+            use_momentum_transport=False,
+            use_hierarchical_bridge=False,
+            seed=123,
+        )
+        model = CountingModel()
+        solver = FastSBOTSolver(model, noise_schedule, cfg, device)
+        timesteps = [1.0, 0.0]
+        shape = (1, 3, 4, 4)
+
+        solver.sample(shape, timesteps, verbose=False)
+        first_calls = model.calls
+        solver.sample(shape, timesteps, verbose=False)
+
+        assert first_calls > 0
+        # With content-aware cache keys, the second call must trigger new score evaluations
+        assert model.calls > first_calls
+
+    def test_fisher_retains_gradients(self, device):
+        """Fisher diagonal estimator must allow gradient flow for training."""
+        cfg = FastSBOTConfig(
+            quality="draft",
+            warmup=False,
+            use_mixed_precision=False,
+            use_triton_kernels=False,
+            use_dynamic_compilation=False,
+        )
+        kernel_module = KernelModule(cfg, device)
+
+        score = torch.randn(2, 3, 8, 8, device=device, requires_grad=True)
+        x = torch.randn_like(score)
+
+        fisher = kernel_module.estimate_fisher_diagonal(x, score, t=0.25, alpha=0.8)
+        loss = fisher.sum()
+        loss.backward()
+
+        assert score.grad is not None
+        assert torch.isfinite(score.grad).all()
 
 
 if __name__ == "__main__":

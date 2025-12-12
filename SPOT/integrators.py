@@ -89,21 +89,16 @@ class HeunIntegrator:
         t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
         t_next_tensor = torch.full((1,), t_next, device=x.device, dtype=torch.float32)
 
-        _, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)
-        _, sigma_next = self.schedule.alpha_sigma(t_next_tensor)
         beta_curr = _beta_from_schedule(self.schedule, t_curr)
         beta_next = _beta_from_schedule(self.schedule, t_next)
 
-        sigma_curr_sq = (sigma_curr.to(x.dtype) ** 2)
-        sigma_next_sq = (sigma_next.to(x.dtype) ** 2)
-
-        # Probability-flow ODE drift: -0.5*beta*x - beta*sigma^2*score
-        drift_curr = -0.5 * beta_curr * x - beta_curr * sigma_curr_sq * score_curr
+        # Probability-flow ODE drift: -0.5*beta*x - beta*score
+        drift_curr = -0.5 * beta_curr * x - beta_curr * score_curr
         x_pred = x + drift_curr * dt
 
         # Corrector step (evaluate score at predicted point)
         score_next = score_fn(x_pred, t_next)
-        drift_next = -0.5 * beta_next * x_pred - beta_next * sigma_next_sq * score_next
+        drift_next = -0.5 * beta_next * x_pred - beta_next * score_next
 
         # Trapezoidal rule (average of drifts)
         x_next = x + 0.5 * (drift_curr + drift_next) * dt
@@ -344,12 +339,9 @@ class AdaptiveIntegrator:
         """
         # Probability-flow drift helper
         def drift(x_val, t_val):
-            t_tensor = torch.full((1,), t_val, device=x.device, dtype=torch.float32)
-            _, sigma = self.schedule.alpha_sigma(t_tensor)
-            sigma_sq = (sigma.to(x.dtype) ** 2)
             beta = _beta_from_schedule(self.schedule, float(t_val))
             score = score_fn(x_val, t_val)
-            return -0.5 * beta * x_val - beta * sigma_sq * score
+            return -0.5 * beta * x_val - beta * score
 
         # Simple embedded RK method (Heun with Euler comparison)
         k1 = drift(x, t)
@@ -397,7 +389,7 @@ class EulerIntegrator:
     ) -> torch.Tensor:
         """Take one explicit Euler step.
 
-        Probability-flow ODE drift: f(x,t) = -0.5*β(t)*x - β(t)*σ²(t)*score(x,t)
+        Probability-flow ODE drift: f(x,t) = -0.5*beta(t)*x - beta(t)*score(x,t)
 
         Args:
             x: Current state
@@ -408,10 +400,6 @@ class EulerIntegrator:
         Returns:
             Next state x_{t+1}
         """
-        # Beta and sigma^2 at current time
-        t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
-        _, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)
-        sigma_curr_sq = (sigma_curr.to(x.dtype) ** 2)
         beta_curr = _beta_from_schedule(self.schedule, t_curr)
 
         # Compute score once (explicit Euler for PF-ODE)
@@ -419,7 +407,7 @@ class EulerIntegrator:
 
         # Explicit Euler update
         dt = t_next - t_curr
-        drift = -0.5 * beta_curr * x - beta_curr * sigma_curr_sq * score
+        drift = -0.5 * beta_curr * x - beta_curr * score
         x_next = x + drift * dt
 
         return x_next
@@ -432,7 +420,7 @@ class ExponentialIntegrator(EulerIntegrator):
     but will be removed in a future version.
 
     An actual exponential integrator would use exact integration of the linear
-    part: exp(-0.5 * β * dt) * x, which this implementation does NOT do.
+    part: exp(-0.5 * beta * dt) * x, which this implementation does NOT do.
     """
 
     def __init__(self, schedule: NoiseScheduleProtocol):

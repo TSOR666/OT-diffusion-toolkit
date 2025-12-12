@@ -74,10 +74,10 @@ class ConditioningConfig:
     def __post_init__(self) -> None:
         if self.use_clip:
             if self.context_dim <= 0:
-                raise ValueError("context_dim must be positive when use_clip is enabled.")
+                raise ValueError("context_dim must be positive when use_clip=True.")
         else:
             if self.context_dim < 0:
-                raise ValueError("context_dim cannot be negative.")
+                raise ValueError("context_dim must be non-negative when use_clip=False.")
         if self.max_length <= 0:
             raise ValueError("max_length must be positive.")
         if self.guidance_scale < 1.0:

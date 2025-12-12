@@ -109,6 +109,23 @@ class TestSlicedOT:
             ot.transport(x, y, eps=0.01)
 
 
+def test_sliced_ot_zero_theta(monkeypatch, device):
+    """Ensure projection normalization is stable even if theta has zero norm."""
+    ot = SlicedOptimalTransport()
+
+    # Create inputs before monkeypatching randn
+    x = torch.randn(2, 10, 3, device=device)
+    y = torch.randn(2, 10, 3, device=device)
+
+    def fake_randn(size, device=None, dtype=None, generator=None):
+        return torch.zeros(size, device=device, dtype=dtype if dtype is not None else torch.float32)
+
+    monkeypatch.setattr(torch, "randn", fake_randn)
+
+    result = ot._sliced_ot_fixed(x, y, n_projections=1)
+    assert torch.isfinite(result).all()
+
+
 class TestReshapeToPoints:
     """Test tensor reshaping utilities."""
 

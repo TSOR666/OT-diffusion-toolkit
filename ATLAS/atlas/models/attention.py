@@ -74,9 +74,18 @@ class ContextualAttention2D(nn.Module):
             mask = context_mask.to(dtype=torch.bool)
             if mask.dim() == 2:
                 mask = mask[:, None, None, :]
+            elif mask.dim() == 3:
+                # Treat as (B, Q, K) and broadcast across heads.
+                mask = mask[:, None, :, :]
+            elif mask.dim() != 4:
+                raise ValueError("context_mask must be 2D, 3D, or 4D.")
             # Mask out padded (False) positions; assume True=valid
             invalid_mask = ~mask
             attn_scores = attn_scores.masked_fill(invalid_mask, float("-inf"))
+            # If an entire row is masked, softmax would produce NaNs.
+            all_invalid = invalid_mask.all(dim=-1, keepdim=True)
+            if all_invalid.any():
+                attn_scores = attn_scores.masked_fill(all_invalid, 0.0)
 
         attn = torch.softmax(attn_scores, dim=-1)
         attn = self.dropout(attn)

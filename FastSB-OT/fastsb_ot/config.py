@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Configuration primitives for the FastSB-OT solver."""
 
 from __future__ import annotations
@@ -94,6 +95,7 @@ class FastSBOTConfig:
 
     # Enhanced compilation settings
     seed: Optional[int] = None
+    deterministic: Optional[bool] = None
     warmup: bool = True
     compile_mode: str = "reduce-overhead"
     use_triton_kernels: bool = True
@@ -273,6 +275,15 @@ class FastSBOTConfig:
                 np.random.seed(self.seed)
             torch.manual_seed(self.seed)
 
+            # Determine deterministic mode (default: on when seed provided)
+            deterministic_env = os.environ.get("FASTSBOT_DETERMINISTIC")
+            if deterministic_env is not None:
+                deterministic = deterministic_env == "1"
+            elif self.deterministic is not None:
+                deterministic = bool(self.deterministic)
+            else:
+                deterministic = True
+
             if self.generator is None:
                 try:
                     # Create CPU generator by default; solver will migrate to device as needed
@@ -285,19 +296,47 @@ class FastSBOTConfig:
                 except Exception:
                     pass
 
+            # Apply global deterministic settings where possible
+            if deterministic and hasattr(torch, "use_deterministic_algorithms"):
+                try:
+                    torch.use_deterministic_algorithms(True, warn_only=True)
+                except TypeError:
+                    # Older PyTorch without warn_only kwarg
+                    try:
+                        torch.use_deterministic_algorithms(True)
+                    except Exception as e:
+                        logger.warning(f"Deterministic algorithms requested but not fully available: {e}")
+
+            if deterministic and self.use_dynamic_compilation:
+                logger.warning("Deterministic mode requested with torch.compile enabled; results may still be non-deterministic.")
+            if deterministic and self.use_triton_kernels:
+                logger.warning("Deterministic mode requested with Triton kernels enabled; Triton kernels may not be deterministic on all hardware.")
+
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(self.seed)
 
-                deterministic = os.environ.get("FASTSBOT_DETERMINISTIC", "0") == "1"
                 torch.backends.cudnn.deterministic = deterministic
                 torch.backends.cudnn.benchmark = not deterministic
 
                 # Safer deterministic algorithms - wrap with try/except
                 if deterministic and hasattr(torch, 'use_deterministic_algorithms'):
                     try:
-                        torch.use_deterministic_algorithms(True)
-                    except Exception as e:
-                        logger.warning(f"Deterministic algorithms requested but not fully available: {e}. "
-                                       f"Some operations (FFT, Triton) may not be deterministic.")
+                        torch.use_deterministic_algorithms(True, warn_only=True)
+                    except TypeError:
+                        try:
+                            torch.use_deterministic_algorithms(True)
+                        except Exception as e:
+                            logger.warning(f"Deterministic algorithms requested but not fully available: {e}. "
+                                           f"Some operations (FFT, Triton) may not be deterministic.")
+            else:
+                # CPU deterministic algorithms
+                if deterministic and hasattr(torch, 'use_deterministic_algorithms'):
+                    try:
+                        torch.use_deterministic_algorithms(True, warn_only=True)
+                    except TypeError:
+                        try:
+                            torch.use_deterministic_algorithms(True)
+                        except Exception as e:
+                            logger.warning(f"Deterministic algorithms requested but not fully available on CPU: {e}.")
 
 

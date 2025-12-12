@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections import OrderedDict
 from typing import List, Optional, Sequence, Tuple
@@ -53,6 +54,7 @@ class RFFKernelOperator(KernelOperator):
         self.multi_scale = multi_scale
         self.scale_factors = list(scale_factors) if scale_factors is not None else [1.0]
         self.max_cached_batch_size = int(max_cached_batch_size)
+        self._cache_fingerprint_size = 256
 
         self.seed = seed
         self.rng = torch.Generator(device=self.device)
@@ -66,6 +68,18 @@ class RFFKernelOperator(KernelOperator):
         self._initialise_features()
 
     # ------------------------------------------------------------------
+    def _ensure_device_consistency(self) -> None:
+        """Ensure generator and cached parameters stay on the configured device."""
+        if self.rng.device != self.device:
+            self.rng = torch.Generator(device=self.device)
+            if self.seed is not None:
+                self.rng.manual_seed(self.seed)
+
+        if any(weight.device != self.device for weight in self.weights):
+            self.weights = [weight.to(self.device) for weight in self.weights]
+        if any(offset.device != self.device for offset in self.offsets):
+            self.offsets = [offset.to(self.device) for offset in self.offsets]
+
     def _base_scale(self) -> float:
         if self.kernel_type == "gaussian":
             return 1.0 / self.epsilon
@@ -134,9 +148,42 @@ class RFFKernelOperator(KernelOperator):
             self._feature_cache.popitem(last=False)
 
     def _cache_key(self, x: torch.Tensor) -> Optional[Tuple]:
-        return None  # Disabled: data_ptr-based caching is unsafe; implement content-based caching if needed.
+        """
+        Build a lightweight, content-based cache key.
+
+        The tensor is sampled (not fully materialised) to avoid large host transfers.
+        """
+        if x.requires_grad:
+            return None
+
+        try:
+            flat = x.reshape(-1)
+            if flat.numel() == 0:
+                sample = flat
+            elif flat.numel() <= self._cache_fingerprint_size:
+                sample = flat
+            else:
+                idx = torch.linspace(
+                    0, flat.numel() - 1, steps=self._cache_fingerprint_size, device=x.device
+                ).long()
+                sample = flat.index_select(0, idx)
+
+            sample_bytes = sample.detach().cpu().numpy().tobytes()
+            digest = hashlib.sha1(sample_bytes).hexdigest()
+            device_index = x.device.index if x.device.index is not None else -1
+            return (
+                tuple(x.shape),
+                tuple(x.stride()),
+                str(x.dtype),
+                x.device.type,
+                device_index,
+                digest,
+            )
+        except Exception:
+            return None
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
+        self._ensure_device_consistency()
         x = x.to(self.device)
         # Ensure the tensor has a well-defined storage layout for caching.
         x = x.contiguous()
@@ -176,8 +223,8 @@ class RFFKernelOperator(KernelOperator):
         target_shape = v.shape
         v_flat = v.reshape(v.shape[0], -1).to(features.dtype)
 
-        transformed = features.T @ v_flat
-        result = features @ transformed
+        transformed = features.T @ v_flat  # (f, n) @ (n, k) -> (f, k)
+        result = features @ transformed  # (n, f) @ (f, k) -> (n, k)
         return result.reshape(target_shape)
 
     def apply_transpose(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -196,4 +243,4 @@ class RFFKernelOperator(KernelOperator):
         """Compute approximate kernel matrix via shared feature space."""
         phi_x = self.compute_features(x)
         phi_y = self.compute_features(y)
-        return phi_x @ phi_y.T
+        return phi_x @ phi_y.T  # (n, f) @ (f, m) -> (n, m)

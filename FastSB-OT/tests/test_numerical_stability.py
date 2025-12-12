@@ -1,6 +1,5 @@
 """Tests for numerical stability and catastrophic inputs."""
 
-import math
 import pytest
 import torch
 import torch.nn as nn
@@ -205,7 +204,7 @@ class TestDivisionByZeroProtection:
         """Test that zero overlap is caught and reported."""
         # This test verifies the patch overlap validation we added
         model = MockScoreModel()
-        solver = FastSBOTSolver(model, noise_schedule, config, device)
+        _ = FastSBOTSolver(model, noise_schedule, config, device)
 
         # Try to create a scenario with no overlap (stride >= patch_size)
         # Note: The actual validation is in compute_score_patches_fixed

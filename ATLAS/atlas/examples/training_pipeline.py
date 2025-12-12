@@ -32,6 +32,15 @@ from atlas.utils import create_dataloader, set_seed
 logger = logging.getLogger(__name__)
 
 
+def _safe_torch_load(path: str | Path, map_location=None):
+    """Load checkpoints defensively with weights_only when supported."""
+    load_kwargs = {"map_location": map_location}
+    try:
+        return torch.load(path, weights_only=True, **load_kwargs)  # type: ignore[call-arg]
+    except TypeError:
+        return torch.load(path, **load_kwargs)
+
+
 def _expand_alpha(alpha: torch.Tensor) -> torch.Tensor:
     return alpha.view(alpha.shape[0], 1, 1, 1)
 
@@ -113,7 +122,8 @@ def run_training(
         train_cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    set_seed(train_cfg.seed)
+    if train_cfg.seed is not None:
+        set_seed(train_cfg.seed)
 
     micro_batch = train_cfg.micro_batch_size or train_cfg.batch_size
     if train_cfg.batch_size % micro_batch != 0:
@@ -296,11 +306,15 @@ def run_inference(
         infer_cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    set_seed(infer_cfg.seed)
+    if infer_cfg.seed is not None:
+        set_seed(infer_cfg.seed)
 
     score_model = HighResLatentScoreModel(model_cfg).to(actual_device)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if "model" not in checkpoint:
         raise ValueError(f"Checkpoint '{checkpoint_path}' is missing required key 'model'.")
     if "ema" not in checkpoint:

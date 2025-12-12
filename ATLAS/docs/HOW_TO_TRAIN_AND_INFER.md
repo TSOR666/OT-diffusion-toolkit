@@ -277,7 +277,7 @@ before starting the fine-tuning loop:
 ```python
 import torch
 
-checkpoint = torch.load("./checkpoints/base/latest.pt", map_location="cpu")
+checkpoint = torch.load("./checkpoints/base/latest.pt", map_location="cpu", weights_only=True)
 score_model.load_state_dict(checkpoint["model"], strict=False)
 ```
 
@@ -309,7 +309,7 @@ import torch
 
 model = HighResLatentScoreModel(model_cfg)
 apply_lora_to_model(model, model_cfg.lora)
-model.load_state_dict(torch.load("./checkpoints/lora/latest.pt")['model'])
+model.load_state_dict(torch.load("./checkpoints/lora/latest.pt", weights_only=True)['model'])
 ```
 
 As long as `model_cfg.lora` matches the configuration used during training, the

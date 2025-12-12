@@ -99,9 +99,9 @@ class AdvancedHierarchicalDiffusionSampler:
     # ------------------------------------------------------------------
     def _resolve_conditioning(
         self,
-        conditioning: Optional[Dict[str, Any]],
+        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]],
         batch_size: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[Union[bool, torch.Tensor, Dict[str, Any]]]:
         payload = conditioning if conditioning is not None else self.current_conditioning
         if payload is None:
             return None
@@ -155,10 +155,10 @@ class AdvancedHierarchicalDiffusionSampler:
     def _prepare_conditioning(
         self,
         batch_size: int,
-        conditioning: Optional[Dict[str, Any]],
+        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]],
         prompts: Optional[List[str]],
         negative_prompts: Optional[List[str]],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[Union[bool, torch.Tensor, Dict[str, Any]]]:
         if prompts is not None:
             payload = self.prepare_conditioning_from_prompts(
                 prompts,
@@ -222,7 +222,7 @@ class AdvancedHierarchicalDiffusionSampler:
         show_progress: bool = True,
         verbose: Optional[bool] = None,
         callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
-        conditioning: Optional[Dict[str, Any]] = None,
+        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]] = None,
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
         initial_state: Optional[torch.Tensor] = None,
@@ -315,128 +315,129 @@ class AdvancedHierarchicalDiffusionSampler:
                     f"or lowering resolution."
                 )
 
-        # Initialize state
-        if initial_state is None:
-            x_t = torch.randn(tuple(shape), device=self.device)
-        else:
-            if not isinstance(initial_state, torch.Tensor):
-                raise TypeError(f"initial_state must be a torch.Tensor, got {type(initial_state)}")
-            if not initial_state.is_floating_point():
-                raise TypeError(f"initial_state must be floating point, got {initial_state.dtype}")
-            if not torch.isfinite(initial_state).all():
-                raise ValueError("initial_state contains NaN or Inf.")
-            if initial_state.shape != tuple(shape):
-                raise ValueError(
-                    f"initial_state.shape={initial_state.shape} doesn't match "
-                    f"target shape={shape}"
-                )
-            x_t = initial_state.to(self.device)
-
-        if verbose is not None:
-            import warnings
-            warnings.warn(
-                "'verbose' is deprecated; use 'show_progress' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            show_progress = bool(verbose)
-        progress_flag = show_progress
-
-        if callback is not None:
-            import inspect
-            try:
-                sig = inspect.signature(callback)
-                if len(sig.parameters) != 3:
-                    raise TypeError(
-                        f"callback must accept 3 arguments (x_t, t_curr, t_next); got {len(sig.parameters)}."
-                    )
-            except (TypeError, ValueError) as exc:
-                raise TypeError(f"Invalid callback signature: {exc}") from exc
-
-        # Prepare conditioning
-        try:
-            active_conditioning = self._prepare_conditioning(
-                batch_size, conditioning, prompts, negative_prompts
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to prepare conditioning: {e}\n"
-                f"If using prompts, ensure CLIP is installed: pip install open-clip-torch"
-            )
-
-        # Setup iteration
-        iterator: Iterable[int]
-        iterator = range(len(schedule) - 1)
-        if progress_flag:
-            iterator = tqdm(iterator, desc="Sampling", leave=False)
-
-        if self.sampler_config.memory_efficient:
-            reset_peak_memory()
-            self.sb_solver.kernel_operators.clear()
-
-        # Store intermediates if requested
-        intermediates = [] if return_intermediates else None
-        if return_intermediates and len(schedule) > 50:
-            est_mem = len(schedule) * batch_size * 50  # rough heuristic MB
-            self.logger.warning(
-                f"Storing {len(schedule)} intermediates may consume significant CPU memory (~{est_mem} MB)."
-            )
-
-        # Main sampling loop with error handling
-        try:
-            for idx in iterator:
-                t_curr = float(schedule[idx])
-                t_next = float(schedule[idx + 1])
-
-                x_t = self.sb_solver.solve_once(
-                    x_t,
-                    t_curr,
-                    t_next,
-                    conditioning=active_conditioning,
-                )
-
-                if return_intermediates:
-                    intermediates.append(x_t.clone().cpu())
-
-                if callback is not None:
-                    callback(x_t, t_curr, t_next)
-
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                # Provide helpful OOM suggestions
-                memory_info = ""
-                if torch.cuda.is_available():
-                    current_memory = torch.cuda.memory_allocated() / (1024 ** 2)
-                    max_memory = torch.cuda.max_memory_allocated() / (1024 ** 2)
-                    memory_info = f"Memory usage: {current_memory:.1f} MB allocated, {max_memory:.1f} MB peak\n"
-
-                raise RuntimeError(
-                    f"Out of memory during sampling.\n"
-                    f"{memory_info}"
-                    f"Current settings:\n"
-                    f"  - batch_size: {batch_size}\n"
-                    f"  - shape: {shape}\n"
-                    f"  - mixed_precision: {self.sampler_config.use_mixed_precision}\n"
-                    f"\nSuggestions:\n"
-                    f"  1. Reduce batch_size (currently {batch_size})\n"
-                    f"  2. Enable mixed_precision if not already enabled\n"
-                    f"  3. Use smaller resolution\n"
-                    f"  4. Clear cache: sampler.clear_kernel_cache()\n"
-                    f"  5. Reduce kernel cache size in KernelConfig"
-                ) from e
+        with torch.inference_mode():
+            # Initialize state
+            if initial_state is None:
+                x_t = torch.randn(tuple(shape), device=self.device)
             else:
-                # Re-raise other runtime errors with context
+                if not isinstance(initial_state, torch.Tensor):
+                    raise TypeError(f"initial_state must be a torch.Tensor, got {type(initial_state)}")
+                if not initial_state.is_floating_point():
+                    raise TypeError(f"initial_state must be floating point, got {initial_state.dtype}")
+                if not torch.isfinite(initial_state).all():
+                    raise ValueError("initial_state contains NaN or Inf.")
+                if initial_state.shape != tuple(shape):
+                    raise ValueError(
+                        f"initial_state.shape={initial_state.shape} doesn't match "
+                        f"target shape={shape}"
+                    )
+                x_t = initial_state.to(self.device)
+
+            if verbose is not None:
+                import warnings
+                warnings.warn(
+                    "'verbose' is deprecated; use 'show_progress' instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                show_progress = bool(verbose)
+            progress_flag = show_progress
+
+            if callback is not None:
+                import inspect
+                try:
+                    sig = inspect.signature(callback)
+                    if len(sig.parameters) != 3:
+                        raise TypeError(
+                            f"callback must accept 3 arguments (x_t, t_curr, t_next); got {len(sig.parameters)}."
+                        )
+                except (TypeError, ValueError) as exc:
+                    raise TypeError(f"Invalid callback signature: {exc}") from exc
+
+            # Prepare conditioning
+            try:
+                active_conditioning = self._prepare_conditioning(
+                    batch_size, conditioning, prompts, negative_prompts
+                )
+            except Exception as e:
                 raise RuntimeError(
-                    f"Sampling failed at timestep {idx}/{len(schedule)-1}: {e}"
-                ) from e
+                    f"Failed to prepare conditioning: {e}\n"
+                    f"If using prompts, ensure CLIP is installed: pip install open-clip-torch"
+                )
 
-        if self.sampler_config.memory_efficient:
-            peak = get_peak_memory_mb()
-            warn_on_high_memory(peak, threshold_mb=self.sampler_config.memory_threshold_mb)
+            # Setup iteration
+            iterator: Iterable[int]
+            iterator = range(len(schedule) - 1)
+            if progress_flag:
+                iterator = tqdm(iterator, desc="Sampling", leave=False)
 
-        if return_intermediates:
-            return x_t, intermediates
-        return x_t
+            if self.sampler_config.memory_efficient:
+                reset_peak_memory()
+                self.sb_solver.kernel_operators.clear()
+
+            # Store intermediates if requested
+            intermediates = [] if return_intermediates else None
+            if return_intermediates and len(schedule) > 50:
+                est_mem = len(schedule) * batch_size * 50  # rough heuristic MB
+                self.logger.warning(
+                    f"Storing {len(schedule)} intermediates may consume significant CPU memory (~{est_mem} MB)."
+                )
+
+            # Main sampling loop with error handling
+            try:
+                for idx in iterator:
+                    t_curr = float(schedule[idx])
+                    t_next = float(schedule[idx + 1])
+
+                    x_t = self.sb_solver.solve_once(
+                        x_t,
+                        t_curr,
+                        t_next,
+                        conditioning=active_conditioning,
+                    )
+
+                    if return_intermediates:
+                        intermediates.append(x_t.clone().cpu())
+
+                    if callback is not None:
+                        callback(x_t, t_curr, t_next)
+
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    # Provide helpful OOM suggestions
+                    memory_info = ""
+                    if torch.cuda.is_available():
+                        current_memory = torch.cuda.memory_allocated() / (1024 ** 2)
+                        max_memory = torch.cuda.max_memory_allocated() / (1024 ** 2)
+                        memory_info = f"Memory usage: {current_memory:.1f} MB allocated, {max_memory:.1f} MB peak\n"
+
+                    raise RuntimeError(
+                        f"Out of memory during sampling.\n"
+                        f"{memory_info}"
+                        f"Current settings:\n"
+                        f"  - batch_size: {batch_size}\n"
+                        f"  - shape: {shape}\n"
+                        f"  - mixed_precision: {self.sampler_config.use_mixed_precision}\n"
+                        f"\nSuggestions:\n"
+                        f"  1. Reduce batch_size (currently {batch_size})\n"
+                        f"  2. Enable mixed_precision if not already enabled\n"
+                        f"  3. Use smaller resolution\n"
+                        f"  4. Clear cache: sampler.clear_kernel_cache()\n"
+                        f"  5. Reduce kernel cache size in KernelConfig"
+                    ) from e
+                else:
+                    # Re-raise other runtime errors with context
+                    raise RuntimeError(
+                        f"Sampling failed at timestep {idx}/{len(schedule)-1}: {e}"
+                    ) from e
+
+            if self.sampler_config.memory_efficient:
+                peak = get_peak_memory_mb()
+                warn_on_high_memory(peak, threshold_mb=self.sampler_config.memory_threshold_mb)
+
+            if return_intermediates:
+                return x_t, intermediates
+            return x_t
 
     # ------------------------------------------------------------------
     def get_performance_stats(self) -> Dict[str, Any]:
