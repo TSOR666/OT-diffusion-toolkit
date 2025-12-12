@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 from collections import OrderedDict
 from functools import wraps
 
+<<<<<<< Updated upstream
 # CORRECTNESS FIX: Fallback for packaging import
 try:
     from packaging.version import Version as _PkgVersion
@@ -38,6 +39,18 @@ except Exception:
         def __ge__(self, other: object) -> bool:
             return False  # Conservative: assume older version
 Version = _PkgVersion
+=======
+# CORRECTNESS FIX: Fallback for packaging import
+try:
+    from packaging.version import Version
+except Exception:
+    # Conservative fallback if packaging isn't installed
+    class Version:  # type: ignore[no-redef]
+        def __init__(self, version_str: str) -> None:
+            self.version = version_str
+        def __ge__(self, other: "Version") -> bool:
+            return False  # Conservative: assume older version
+>>>>>>> Stashed changes
 
 # Try to import numpy (optional for stats)
 try:

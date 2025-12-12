@@ -385,8 +385,9 @@ class SchroedingerBridgeSolver:
         f_t, g_sq_t = self._compute_sde_coefficients(t, score)
 
         # Probability flow ODE drift (VP SDE):
-        # dx/dt = f(t) * x - g(t)^2 * score
-        drift = f_t * x - g_sq_t * score
+        # dx/dt = f(t) * x - 0.5 * g(t)^2 * score
+        # with f(t) = -0.5 * beta(t), g(t)^2 = beta(t)
+        drift = f_t * x - 0.5 * g_sq_t * score
 
         return drift * dt
     
