@@ -52,7 +52,7 @@ class LoRALinear(nn.Module):
             self._lora_down_backup = self.lora_down.weight.data.clone()
             self._lora_up_backup = self.lora_up.weight.data.clone()
             delta = (self.lora_up.weight @ self.lora_down.weight) * self.scale
-            self.base.weight.data += delta
+            self.base.weight.add_(delta)
             self.lora_down.weight.zero_()
             self.lora_up.weight.zero_()
 

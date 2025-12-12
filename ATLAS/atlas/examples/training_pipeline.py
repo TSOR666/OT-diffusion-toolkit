@@ -122,7 +122,8 @@ def run_training(
         train_cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    set_seed(train_cfg.seed)
+    if train_cfg.seed is not None:
+        set_seed(train_cfg.seed)
 
     micro_batch = train_cfg.micro_batch_size or train_cfg.batch_size
     if train_cfg.batch_size % micro_batch != 0:
@@ -305,11 +306,15 @@ def run_inference(
         infer_cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    set_seed(infer_cfg.seed)
+    if infer_cfg.seed is not None:
+        set_seed(infer_cfg.seed)
 
     score_model = HighResLatentScoreModel(model_cfg).to(actual_device)
 
-    checkpoint = _safe_torch_load(checkpoint_path, map_location="cpu")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if "model" not in checkpoint:
         raise ValueError(f"Checkpoint '{checkpoint_path}' is missing required key 'model'.")
     if "ema" not in checkpoint:

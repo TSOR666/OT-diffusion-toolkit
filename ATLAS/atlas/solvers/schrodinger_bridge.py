@@ -4,6 +4,7 @@ import math
 import time
 from collections import OrderedDict
 from contextlib import nullcontext
+from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -25,6 +26,11 @@ from ..kernels import (
 )
 from ..utils.noise_prediction import NoisePredictionAdapter
 from ..utils.random import set_seed
+
+try:
+    from ..schedules import karras_noise_schedule
+except Exception:  # pragma: no cover - soft import to avoid circular issues in docs builds
+    karras_noise_schedule = None
 
 
 _VALID_KERNEL_TYPES = {"gaussian", "laplacian", "cauchy"}
@@ -64,6 +70,7 @@ class SchroedingerBridgeSolver:
         self._score_model: nn.Module
         self.noise_predictor: NoisePredictionAdapter
         self.score_model = score_model
+        self._karras_params = self._extract_karras_params(noise_schedule)
         
         # Use provided configs or set defaults
         if kernel_config is None:
@@ -204,37 +211,116 @@ class SchroedingerBridgeSolver:
         one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=info.tiny)
         return torch.sqrt(one_minus_alpha / alpha_clamped)
 
+    def _extract_karras_params(
+        self, schedule: Callable
+    ) -> Optional[Tuple[float, float, float]]:
+        """Infer parameters for karras_noise_schedule even when wrapped in functools.partial."""
+        if karras_noise_schedule is None:
+            return None
+
+        func = schedule.func if isinstance(schedule, partial) else schedule
+        if func is not karras_noise_schedule:
+            return None
+
+        defaults = karras_noise_schedule.__defaults__ or (0.002, 80.0, 7.0)
+        kw = schedule.keywords if isinstance(schedule, partial) and schedule.keywords else {}
+
+        try:
+            sigma_min = float(kw.get("sigma_min", defaults[0]))
+            sigma_max = float(kw.get("sigma_max", defaults[1]))
+            rho = float(kw.get("rho", defaults[2]))
+        except Exception:
+            return None
+
+        return sigma_min, sigma_max, rho
+
+    def _karras_alpha_prime(
+        self, t: float, reference: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """Analytical derivative d(alpha)/dt for the Karras noise schedule."""
+        if self._karras_params is None:
+            return None
+
+        sigma_min, sigma_max, rho = self._karras_params
+        dtype = reference.dtype
+        device = reference.device
+
+        if isinstance(t, torch.Tensor):
+            t_tensor = t.detach()
+            if not torch.is_floating_point(t_tensor):
+                t_tensor = t_tensor.to(dtype=torch.float32)
+            t_tensor = t_tensor.to(device=device, dtype=dtype)
+            if t_tensor.ndim > 0:
+                t_tensor = t_tensor.reshape(-1)[0]
+        else:
+            t_tensor = torch.tensor(float(t), device=device, dtype=dtype)
+
+        t_tensor = torch.clamp(t_tensor, 0.0, 1.0)
+
+        sigma_min_root = torch.tensor(sigma_min, device=device, dtype=dtype) ** (1.0 / rho)
+        sigma_max_root = torch.tensor(sigma_max, device=device, dtype=dtype) ** (1.0 / rho)
+        sigma_path = sigma_max_root + t_tensor * (sigma_min_root - sigma_max_root)
+
+        # sigma(t) = path(t) ** rho; d sigma / dt = rho * path(t) ** (rho-1) * path'(t)
+        sigma_t = sigma_path ** rho
+        sigma_prime = rho * (sigma_path ** (rho - 1.0)) * (sigma_min_root - sigma_max_root)
+
+        denom = 1.0 + sigma_t ** 2
+        alpha_prime = -2.0 * sigma_t * sigma_prime / (denom ** 2)
+        return alpha_prime
+
+    def _analytic_alpha_prime(
+        self, t: float, reference: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """
+        Attempt to compute d(alpha)/dt analytically.
+        
+        Priority:
+        1) Custom derivative attached to the schedule (``alpha_derivative`` or ``derivative``)
+        2) Built-in Karras schedule derivative
+        Fallback: numerical finite differences handled elsewhere.
+        """
+        derivative_fn = getattr(self.noise_schedule, "alpha_derivative", None) or getattr(
+            self.noise_schedule, "derivative", None
+        )
+        if derivative_fn is not None:
+            try:
+                return self._schedule_value_to_tensor(derivative_fn(t), reference)
+            except Exception:
+                self.logger.debug("Failed to use custom schedule derivative; will fall back.", exc_info=True)
+
+        return self._karras_alpha_prime(t, reference)
+
+    def _finite_difference_alpha_prime(
+        self, t: float, reference: torch.Tensor, alpha_t: torch.Tensor
+    ) -> torch.Tensor:
+        """Fallback numerical derivative used when no analytical formula is available."""
+        delta = 1e-3
+        t_upper = min(1.0, t + delta)
+        t_lower = max(0.0, t - delta)
+
+        if t_upper == t_lower:
+            delta = 1e-4
+            t_upper = min(1.0, t + delta)
+            t_lower = max(0.0, t - delta)
+            if t_upper == t_lower:
+                return torch.zeros_like(alpha_t)
+
+        alpha_upper = self._schedule_value_to_tensor(self.noise_schedule(t_upper), reference)
+        alpha_lower = self._schedule_value_to_tensor(self.noise_schedule(t_lower), reference)
+
+        denom = max(t_upper - t_lower, 1e-6)
+        denom_tensor = alpha_t.new_tensor(denom)
+        return (alpha_upper - alpha_lower) / denom_tensor
+
     def _compute_sde_coefficients(
         self, t: float, reference: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute drift coefficients f(t) and g(t)^2 for the probability flow ODE."""
         alpha_t = self._schedule_to_tensor(t, reference)
-
-        # Use an adaptive step size to remain stable near the boundaries.
-        base_h = min(1e-3, max(1e-6, min(t, 1.0 - t) / 2.0))
-
-        def _finite_difference(h_val: float) -> torch.Tensor:
-            """Centered difference with boundary safety."""
-            t_plus = min(1.0, t + h_val)
-            t_minus = max(0.0, t - h_val)
-            if t_plus == t_minus:
-                return torch.zeros_like(alpha_t)
-
-            alpha_plus = self._schedule_value_to_tensor(
-                self.noise_schedule(t_plus), reference
-            )
-            alpha_minus = self._schedule_value_to_tensor(
-                self.noise_schedule(t_minus), reference
-            )
-            denom = max(t_plus - t_minus, 1e-12)
-            return (alpha_plus - alpha_minus) / alpha_t.new_tensor(denom)
-
-        # Richardson extrapolation for a higher-order derivative estimate.
-        D_h = _finite_difference(base_h)
-        D_h2 = _finite_difference(base_h / 2.0)
-        alpha_prime = (4 * D_h2 - D_h) / 3.0
-        if not torch.isfinite(alpha_prime).all():
-            alpha_prime = D_h2
+        alpha_prime = self._analytic_alpha_prime(t, reference)
+        if alpha_prime is None:
+            alpha_prime = self._finite_difference_alpha_prime(t, reference, alpha_t)
 
         info = torch.finfo(alpha_t.dtype)
         alpha_safe = torch.clamp(alpha_t, min=info.tiny)
@@ -292,8 +378,10 @@ class SchroedingerBridgeSolver:
         score = self._compute_score(x, t, conditioning=conditioning)
         f_t, g_sq_t = self._compute_sde_coefficients(t, score)
 
-        # Probability flow ODE drift: f(t) * x + g(t)^2 * score / 2
-        drift = f_t * x + 0.5 * g_sq_t * score
+        # Probability flow ODE drift (VP SDE):
+        # dx/dt = f(t) * x - g(t)^2 * score
+        # with f(t) = -0.5 * beta(t), g(t)^2 = beta(t)
+        drift = f_t * x - g_sq_t * score
 
         return drift * dt
     
@@ -375,15 +463,15 @@ class SchroedingerBridgeSolver:
         # Set method based on theoretical error bounds or specific request
         if self.solver_type != 'auto':
             method = self.solver_type
-        elif is_grid and len(grid_shape) <= 3:
-            # Grid data is best handled by FFT in principle, but transport map
-            # construction requires pairwise kernel access which is not available
-            # for the current FFT operator. Fall back to RFF to preserve correctness.
-            self.logger.warning(
-                "FFT kernel selected for grid data but pairwise transport is unsupported; "
-                "falling back to RFF for correctness."
-            )
-            method = 'rff'
+        elif (
+            is_grid
+            and grid_shape is not None
+            and len(grid_shape) <= 3
+            and batch_size == int(np.prod(grid_shape))
+        ):
+            # Only use FFT when the batch indexes grid points (i.e. n == prod(grid_shape)).
+            # For typical image batches (B, C, H, W), FFT does not represent a Gram operator.
+            method = 'fft'
         elif batch_size <= 1000:
             # Small problems: use direct method
             method = 'direct'
@@ -417,11 +505,19 @@ class SchroedingerBridgeSolver:
         # Create and return the appropriate kernel operator
         kernel_start_time = time.time()
         
-        # Check for special case: FFT requested but data is not grid-structured
-        if method == 'fft' and (not is_grid or not grid_shape):
-            self.logger.warning("Data is not grid-structured, falling back to RFF")
-            # Use RFF instead of recursively calling this function
-            method = 'rff'
+        # Check for special case: FFT requested but the batch does not represent grid points.
+        if method == 'fft':
+            if (not is_grid) or (not grid_shape):
+                self.logger.warning("Data is not grid-structured, falling back to RFF")
+                method = 'rff'
+            elif batch_size != int(np.prod(grid_shape)):
+                self.logger.warning(
+                    "FFT kernel requires batch_size == prod(grid_shape); got batch_size=%d, grid_shape=%s. "
+                    "Falling back to RFF.",
+                    batch_size,
+                    grid_shape,
+                )
+                method = 'rff'
         
         cacheable = method != 'nystrom'
         cache_key = None
@@ -474,8 +570,7 @@ class SchroedingerBridgeSolver:
                     landmarks=landmarks,
                     kernel_type=self.kernel_type,
                     epsilon=epsilon,
-                    device=self.device,
-                    seed=self.seed
+                    device=self.device
                 )
             elif method == 'fft':
                 operator = FFTKernelOperator(
@@ -780,18 +875,7 @@ class SchroedingerBridgeSolver:
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
             dtype_info = torch.finfo(denom.dtype)
-            min_denom = torch.tensor(
-                dtype_info.tiny * self._min_curvature_multiplier,
-                dtype=denom.dtype,
-                device=denom.device  # (n,) @ (n,) -> scalar, ensure device consistency
-            )
-
-            if (not denom_is_finite) or denom_abs < min_denom:
-                # Apply a small diagonal damping to avoid zero curvature without bailing early.
-                damping = torch.where(denom_is_finite, min_denom, min_denom)
-                denom = denom + damping
-                denom_abs = torch.abs(denom)
-                denom_is_finite = torch.isfinite(denom)
+            min_denom = denom_abs.new_tensor(math.sqrt(dtype_info.eps))
 
             if (not denom_is_finite) or denom_abs < min_denom:
                 denom_value = float(denom.detach().cpu().item()) if denom_is_finite else float("nan")

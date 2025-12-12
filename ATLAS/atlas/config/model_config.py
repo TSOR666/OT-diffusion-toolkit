@@ -25,6 +25,8 @@ class HighResModelConfig:
     time_emb_dim: int = 768
     model_variant: str = "custom"
     conditional: bool = True
+    # Optional vector conditioning dimension (e.g., class embeddings). Set to 0 to disable.
+    conditioning_dim: int = 0
     cross_attention_levels: Tuple[int, ...] = (1, 2)
     conditioning_dim: int = 768
     # Legacy fields retained for backward compatibility; kept in sync with conditioning config.
@@ -54,6 +56,8 @@ class HighResModelConfig:
             raise ValueError(f"dropout must be in [0, 1], got {self.dropout}.")
         if self.time_emb_dim <= 0:
             raise ValueError("time_emb_dim must be positive.")
+        if self.conditioning_dim < 0:
+            raise ValueError("conditioning_dim must be non-negative.")
         if self.time_emb_dim < 128:
             warnings.warn(
                 f"Small time_emb_dim ({self.time_emb_dim}) may limit temporal modeling",
@@ -120,7 +124,7 @@ class HighResModelConfig:
             if self.context_dim != self.conditioning.context_dim:
                 warnings.warn(
                     f"context_dim ({self.context_dim}) differs from conditioning.context_dim ({self.conditioning.context_dim}); "
-                    "this may cause dimension mismatches.",
+                    "these must match for CLIP conditioning.",
                     UserWarning,
                     stacklevel=2,
                 )

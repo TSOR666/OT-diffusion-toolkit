@@ -95,28 +95,53 @@ See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for detailed requirements and c
 
 ---
 
-## Key Features
+## Mathematical Foundations
 
-### For All Users
-- **Easy API**: Simple `create_sampler()` interface for quick results
-- **Hardware Auto-Detection**: Automatically optimizes for your GPU/CPU
-- **Consumer GPU Support**: Runs on 6GB+ GPUs (RTX 3060 and up)
-- **Cross-Platform**: Works on Windows, Linux, macOS (including Apple Silicon)
-- **Production Ready**: Full test coverage, CI/CD, type hints
+### Score-Based Diffusion
+ATLAS parameterises the variance-preserving SDE through the cumulative signal power
+`alpha(t) in (0, 1]` returned by the noise schedule:
+```
+sigma^2(t) = (1 - alpha(t)) / alpha(t)
+beta(t) = - d alpha(t) / dt / alpha(t)
+```
+which yields the standard VP SDE
+```
+dx = -0.5 * beta(t) * x * dt + sqrt(beta(t)) * dW_t
+```
+where the score network learns `s_theta(x, t) ~ grad_x log p_t(x)` via denoising score
+matching. The probability-flow ODE used in code is
+```
+dx/dt = -0.5 * beta(t) * x - beta(t) * s_theta(x, t)
+```
+and is integrated with predictor-corrector schemes or higher-order samplers.
+The default Karras schedule returns `alpha(t)` directly; the solver now uses the
+analytical derivative of this schedule when available to avoid finite-difference error.
 
-### For Advanced Users
-- **Multiple Kernel Operators**: Direct, FFT, RFF, Nyström solvers
-- **CUDA Graph Acceleration**: 10-30% speedup for repeated sampling
-- **Ultra-High Resolution**: Native 2K generation with automatic tiling
-- **Mixed Precision**: BF16/FP16/TF32 support with automatic selection
-- **CLIP Conditioning**: Text-to-image generation
-- **Flexible Architecture**: Customize models, kernels, schedules, samplers
+### Schrodinger Bridge Updates
+To stabilise long trajectories the sampler inserts an entropic optimal transport solve
+at each step. Given model samples `x_t` and reference samples `y_t`, the bridge computes
+dual potentials `(u, v)` satisfying
+```
+pi(x, y) ~ exp(u(x)) * k(x, y) * exp(v(y))
+```
+where `k` is a kernel operator (Gaussian by default). The barycentric projection of
+`pi` supplies a transport map that complements the probability-flow update.
 
-### Technical Strengths
-- **Hierarchical Samplers**: Multi-scale generation for high resolution
-- **Schrödinger Bridge Transport**: Stable, mathematically grounded sampling
-- **Kernel Registry**: Pluggable kernel operators with automatic tier selection
-- **LoRA Support**: Memory-efficient fine-tuning
+### Kernel Operators
+ATLAS implements several kernel backends:
+- **Direct**: exact `O(n^2)` Gram matrices for small batches.
+- **FFT**: convolutional kernels for grid-structured data (images/volumes).
+- **Random Fourier Features (RFF)**: sub-quadratic approximations for point clouds.
+- **Nystrom**: low-rank sketches when memory budgets are tight.
+
+Bandwidths, feature counts, and approximations are configured via `KernelConfig`.
+
+---
+
+## What It Is
+
+- Category: full‑stack DIFFUSION TOOLKIT — standalone training and inference.
+- Strengths: hierarchical samplers, kernel registry, CLIP guidance, consumer‑GPU presets.
 
 ## Training Guide
 

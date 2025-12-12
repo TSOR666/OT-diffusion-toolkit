@@ -163,7 +163,9 @@ class HighResLatentScoreModel(nn.Module):
 
         if isinstance(condition, dict):
             context = condition.get("context")
-            context_mask = condition.get("context_mask") or condition.get("mask")
+            context_mask = condition.get("context_mask")
+            if context_mask is None:
+                context_mask = condition.get("mask")
             if context is not None:
                 if context.dim() == 2:
                     context = context.unsqueeze(1)
