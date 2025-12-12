@@ -88,6 +88,7 @@ class SchroedingerBridgeSolver:
 
         self.sb_iterations = sampler_config.sb_iterations
         self.error_tolerance = sampler_config.error_tolerance
+        self.marginal_constraint_threshold = sampler_config.marginal_constraint_threshold
         self.use_linear_solver = sampler_config.use_linear_solver
         self.use_multiscale = kernel_config.multi_scale
         self.use_mixed_precision = (
@@ -566,7 +567,29 @@ class SchroedingerBridgeSolver:
                 # Check convergence
                 if torch.max(torch.abs(f - f_prev)) < self.error_tolerance:
                     break
+<<<<<<< Updated upstream
         
+=======
+
+            f = torch.exp(log_f)
+            g = torch.exp(log_g)
+
+        Kg_final = kernel_op.apply(x, g)
+        convergence_error = torch.max(torch.abs(f * Kg_final - 1.0))
+        if convergence_error > self.error_tolerance:
+            self.logger.warning(
+                "Sinkhorn iteration did not meet tolerance: error=%.3e",
+                float(convergence_error.detach()),
+            )
+
+        marginal_error = torch.abs(f * Kg_final - 1.0).max().detach()
+        if marginal_error > self.marginal_constraint_threshold:
+            raise RuntimeError(
+                f"Marginal constraint violated: max error {float(marginal_error):.3e} "
+                f"(threshold: {self.marginal_constraint_threshold:.3e})"
+            )
+
+>>>>>>> Stashed changes
         return f, g
     
     def _conjugate_gradient(

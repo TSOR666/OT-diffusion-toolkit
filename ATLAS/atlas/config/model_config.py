@@ -26,6 +26,7 @@ class HighResModelConfig:
     model_variant: str = "custom"
     conditional: bool = True
     cross_attention_levels: Tuple[int, ...] = (1, 2)
+    # Conditioning dimension for cross-attention (e.g., CLIP context). Set to 0 to disable vector conditioning.
     conditioning_dim: int = 768
     # Legacy fields retained for backward compatibility; kept in sync with conditioning config.
     use_clip_conditioning: bool = True
