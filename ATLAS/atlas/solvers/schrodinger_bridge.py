@@ -241,9 +241,14 @@ class SchroedingerBridgeSolver:
         if x.ndim == 0:
             raise ValueError("Input tensor must include a batch dimension for scoring.")
 
-        with torch.no_grad():
+        use_grad = self.score_model.training or x.requires_grad
+        if use_grad:
             with self._amp_context():
                 noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
+        else:
+            with torch.no_grad():
+                with self._amp_context():
+                    noise_pred = self.noise_predictor.predict_noise(x, t, conditioning)
         noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
@@ -273,8 +278,9 @@ class SchroedingerBridgeSolver:
         score = self._compute_score(x, t, conditioning=conditioning)
         f_t, g_sq_t = self._compute_sde_coefficients(t, score)
 
-        # Probability flow ODE drift: f(t) * x + g(t)^2 * score / 2
-        drift = f_t * x + 0.5 * g_sq_t * score
+        # Probability flow ODE drift (VP SDE):
+        # dx/dt = f(t) * x - g(t)^2 * score
+        drift = f_t * x - g_sq_t * score
 
         return drift * dt
     
@@ -496,54 +502,14 @@ class SchroedingerBridgeSolver:
             Tuple of potential functions (f, g)
         """
         batch_size = x.size(0)
-        
-        # Choose between Light SB approach (linear system) or traditional iteration
-        if self.use_linear_solver:
-            # Light SB approach: solve (I - K)f = 1 directly
-            # Initialize with ones
-            f = torch.ones(batch_size, device=self.device)
 
-            # Set up linear operator for conjugate gradient
-            def linear_op(v):
-                return v - kernel_op.apply(x, v)
-
-            # Right-hand side is vector of ones
-            b = torch.ones(batch_size, device=self.device)
-
-            # Solve using conjugate gradient
-            f, convergence = self._conjugate_gradient(
-                linear_op, b, x0=f, max_iter=max_iter, tol=self.error_tolerance
-            )
-
-            # Verify solution shape matches expected batch size
-            if f.shape != (batch_size,):
-                raise RuntimeError(
-                    f"Conjugate gradient solution shape mismatch: expected ({batch_size},), got {f.shape}"
-                )
-
-            # Compute g from f with improved numerical stability
-            Kf = kernel_op.apply(x, f)
-
-            # Use clamping to prevent numerical instability
-            if (Kf < 1e-10).any() or (Kf > 1e8).any():
-                self.logger.warning(
-                    "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
-                    float(Kf.min()),
-                    float(Kf.max()),
-                )
-            g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
-        else:
-            # Traditional iterative approach
-            # Initialize potentials
-            f = torch.ones(batch_size, device=self.device)
-            g = torch.ones_like(f)
-            
-            # Iterative updates
+        def sinkhorn_iterative() -> Tuple[torch.Tensor, torch.Tensor]:
+            f_iter = torch.ones(batch_size, device=self.device)
+            g_iter = torch.ones_like(f_iter)
             for i in range(max_iter):
-                f_prev = f.clone()
+                f_prev = f_iter.clone()
 
-                # Update f: f = 1 / (K @ g) with numerical stability
-                Kg = kernel_op.apply(x, g)
+                Kg = kernel_op.apply(x, g_iter)
                 if (Kg < 1e-10).any() or (Kg > 1e8).any():
                     self.logger.warning(
                         "Schrodinger bridge iteration %d: Kg out of range [%.2e, %.2e]",
@@ -551,10 +517,9 @@ class SchroedingerBridgeSolver:
                         float(Kg.min()),
                         float(Kg.max()),
                     )
-                f = 1.0 / torch.clamp(Kg, min=1e-8, max=1e8)
+                f_iter = 1.0 / torch.clamp(Kg, min=1e-8, max=1e8)
 
-                # Update g: g = 1 / (K^T @ f) with numerical stability
-                KTf = kernel_op.apply_transpose(x, f)
+                KTf = kernel_op.apply_transpose(x, f_iter)
                 if (KTf < 1e-10).any() or (KTf > 1e8).any():
                     self.logger.warning(
                         "Schrodinger bridge iteration %d: KTf out of range [%.2e, %.2e]",
@@ -562,34 +527,75 @@ class SchroedingerBridgeSolver:
                         float(KTf.min()),
                         float(KTf.max()),
                     )
-                g = 1.0 / torch.clamp(KTf, min=1e-8, max=1e8)
-                
-                # Check convergence
-                if torch.max(torch.abs(f - f_prev)) < self.error_tolerance:
+                g_iter = 1.0 / torch.clamp(KTf, min=1e-8, max=1e8)
+
+                if torch.max(torch.abs(f_iter - f_prev)) < self.error_tolerance:
                     break
-<<<<<<< Updated upstream
-        
-=======
+            return f_iter, g_iter
 
-            f = torch.exp(log_f)
-            g = torch.exp(log_g)
+        used_fallback = False
+        linear_converged = True
 
-        Kg_final = kernel_op.apply(x, g)
-        convergence_error = torch.max(torch.abs(f * Kg_final - 1.0))
+        if self.use_linear_solver:
+            f = torch.ones(batch_size, device=self.device)
+
+            def linear_op(v: torch.Tensor) -> torch.Tensor:
+                return v - kernel_op.apply(x, v)
+
+            b = torch.ones(batch_size, device=self.device)
+            f, linear_converged = self._conjugate_gradient(
+                linear_op, b, x0=f, max_iter=max_iter, tol=self.error_tolerance
+            )
+
+            if f.shape != (batch_size,):
+                raise RuntimeError(
+                    f"Conjugate gradient solution shape mismatch: expected ({batch_size},), got {f.shape}"
+                )
+
+            Kf = kernel_op.apply(x, f)
+            if (Kf < 1e-10).any() or (Kf > 1e8).any():
+                self.logger.warning(
+                    "Light Schrodinger bridge: Kf out of range [%.2e, %.2e]",
+                    float(Kf.min()),
+                    float(Kf.max()),
+                )
+            g = torch.ones_like(f) / torch.clamp(Kf, min=1e-8, max=1e8)
+
+            if not linear_converged:
+                self.logger.warning(
+                    "Linear SB solve did not converge; falling back to Sinkhorn iterations."
+                )
+                f, g = sinkhorn_iterative()
+                used_fallback = True
+        else:
+            f, g = sinkhorn_iterative()
+
+        def check_marginals() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            Kg_local = kernel_op.apply(x, g)
+            convergence_err = torch.max(torch.abs(f * Kg_local - 1.0))
+            return Kg_local, convergence_err, torch.abs(f * Kg_local - 1.0).max().detach()
+
+        Kg_final, convergence_error, marginal_error = check_marginals()
         if convergence_error > self.error_tolerance:
             self.logger.warning(
                 "Sinkhorn iteration did not meet tolerance: error=%.3e",
                 float(convergence_error.detach()),
             )
 
-        marginal_error = torch.abs(f * Kg_final - 1.0).max().detach()
+        if marginal_error > self.marginal_constraint_threshold and self.use_linear_solver and not used_fallback:
+            self.logger.warning(
+                "Linear solver marginals violated (%.3e); retrying with Sinkhorn iterations.",
+                float(marginal_error),
+            )
+            f, g = sinkhorn_iterative()
+            Kg_final, convergence_error, marginal_error = check_marginals()
+
         if marginal_error > self.marginal_constraint_threshold:
             raise RuntimeError(
                 f"Marginal constraint violated: max error {float(marginal_error):.3e} "
                 f"(threshold: {self.marginal_constraint_threshold:.3e})"
             )
 
->>>>>>> Stashed changes
         return f, g
     
     def _conjugate_gradient(
@@ -654,8 +660,8 @@ class SchroedingerBridgeSolver:
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
             dtype_info = torch.finfo(denom.dtype)
-            min_denom = torch.tensor(
-                dtype_info.tiny * self._min_curvature_multiplier, dtype=denom.dtype
+            min_denom = denom_abs.new_tensor(
+                dtype_info.tiny * self._min_curvature_multiplier
             )
 
             if (not denom_is_finite) or denom_abs < min_denom:

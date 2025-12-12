@@ -137,125 +137,18 @@ class FFTKernelOperator(KernelOperator):
         Returns:
             Result of kernel convolution
         """
-        if list(u.shape) != self.grid_shape:
-            raise ValueError(f"Input grid shape {tuple(u.shape)} does not match configured grid_shape {tuple(self.grid_shape)}")
-        # Compute FFT of u
-        u_fft = torch.fft.rfftn(u)
-        
-        # Apply kernel in Fourier domain (pointwise multiplication)
-        result_fft = u_fft * kernel_fft
-<<<<<<< Updated upstream
-        
-        # Transform back to spatial domain
-        result = torch.fft.irfftn(result_fft, s=u.shape)
-        
-        return result
-    
-    def apply(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """
-        Apply kernel operator using FFT convolution.
-
-        Args:
-            x: Input data (not used, here for API consistency)
-            v: Input vector [batch_size]
-
-        Returns:
-            Result [batch_size]
-        """
         spatial_dims = len(self.grid_shape)
         if spatial_dims == 0:
             raise ValueError("grid_shape must contain at least one spatial dimension")
-
-        if v.numel() == 0:
-            return v
-
-        original_shape = v.shape
-        needs_reduction = False
-        grid_numel = math.prod(self.grid_shape)
-
-        if v.dim() >= spatial_dims and list(v.shape[-spatial_dims:]) == self.grid_shape:
-            reshaped = v
-        elif v.dim() >= 1 and v.shape[-1] == grid_numel:
-            try:
-                reshaped = v.reshape(*v.shape[:-1], *self.grid_shape)
-            except RuntimeError as exc:  # pragma: no cover - defensive programming
-                raise ValueError(
-                    "Input tensor cannot be reshaped to match provided grid_shape"
-                ) from exc
-        elif x is not None and x.shape[0] == v.shape[0]:
-            # Handle vectors defined per-sample (e.g. [batch]) by broadcasting to the grid
-            batch_dim = v.shape[0]
-            view_shape = (batch_dim,) + (1,) * spatial_dims
-            expanded = v.reshape(view_shape).expand(batch_dim, *self.grid_shape)
-            reshaped = expanded.contiguous()
-            needs_reduction = True
-        else:
+        if tuple(u.shape[-spatial_dims:]) != tuple(self.grid_shape):
             raise ValueError(
-                "Input tensor cannot be reshaped or broadcast to match provided grid_shape"
+                f"Input grid shape {tuple(u.shape)} does not match configured grid_shape {tuple(self.grid_shape)}"
             )
 
-        batch_shape = reshaped.shape[:-spatial_dims]
-        v_batches = reshaped.reshape(-1, *self.grid_shape)
-
-        results = []
-        for sample in v_batches:
-            if self.multi_scale:
-                result_grid = torch.zeros_like(sample)
-                for weight, kernel_fft in zip(self.weights, self.kernel_ffts):
-                    scale_result = self._apply_kernel_fft(sample, kernel_fft)
-                    result_grid += weight * scale_result
-            else:
-                result_grid = self._apply_kernel_fft(sample, self.kernel_fft)
-            results.append(result_grid)
-
-        stacked = torch.stack(results, dim=0)
-        stacked = stacked.reshape(*batch_shape, *self.grid_shape)
-
-        if needs_reduction:
-            reduce_dims = tuple(range(-spatial_dims, 0))
-            reduced = stacked.mean(dim=reduce_dims)
-            return reduced.reshape(original_shape)
-
-        return stacked
-    
-    def apply_transpose(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """
-        Apply transpose kernel operator using FFT convolution.
-        
-        For symmetric kernels, this is the same as apply().
-        
-        Args:
-            x: Input data (not used, here for API consistency)
-            v: Input vector [batch_size]
-            
-        Returns:
-            Result [batch_size]
-        """
-        # For symmetric kernels, K^T = K
-        return self.apply(x, v)
-    
-    def get_error_bound(self, n_samples: int) -> float:
-        """
-        Get theoretical error bound for FFT approximation.
-        
-        Error bound: O(1/resolution) where resolution is grid size.
-        
-        Args:
-            n_samples: Number of samples (not used)
-            
-        Returns:
-            Theoretical error bound
-        """
-        # Error bound based on grid resolution
-        min_res = min(self.grid_shape)
-        return 1.0 / min_res
-
-    def clear_cache(self) -> None:
-        """Clear any cached computations to free memory."""
-        # Clear precomputed FFT kernels to free GPU memory
-=======
-        result = torch.fft.irfftn(result_fft, s=self.grid_shape, dim=dims)
-        return result
+        dims = tuple(range(-spatial_dims, 0))
+        u_fft = torch.fft.rfftn(u, dim=dims)
+        result_fft = u_fft * kernel_fft
+        return torch.fft.irfftn(result_fft, s=self.grid_shape, dim=dims)
     
     def apply(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -359,14 +252,10 @@ class FFTKernelOperator(KernelOperator):
 
         Note: After clearing, the operator must be reinitialized before use.
         """
-        # Clear precomputed FFT kernels to free GPU memory
->>>>>>> Stashed changes
         if self.multi_scale:
             self.kernel_ffts.clear()
-            # Reset weights to empty tensor (maintains type consistency)
-            if hasattr(self, "weights") and self.weights is not None:
+            if hasattr(self, "weights"):
                 self.weights = torch.empty(0, device=self.device)
         else:
-            # Reset kernel_fft to empty tensor (maintains type consistency)
-            if hasattr(self, "kernel_fft") and self.kernel_fft is not None:
+            if hasattr(self, "kernel_fft"):
                 self.kernel_fft = torch.empty(0, device=self.device)
