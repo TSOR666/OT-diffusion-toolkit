@@ -86,8 +86,8 @@ class KernelConfig:
                 stacklevel=2,
             )
 
-    def with_overrides(self, **kwargs):
+    def with_overrides(self, **kwargs: object) -> "KernelConfig":
         """Return a copy with specific fields overridden."""
-        new_cfg = replace(self, **kwargs)
+        new_cfg = replace(self, **kwargs)  # type: ignore[arg-type]
         new_cfg.validate()
         return new_cfg

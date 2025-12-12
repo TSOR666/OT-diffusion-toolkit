@@ -98,12 +98,11 @@ class HilbertSinkhornDivergence:
                 raise RuntimeError("Failed to initialize RFF kernel")
             x_features = self.rff.compute_features(x)
             y_features = self.rff.compute_features(y)
-            x_features = F.normalize(x_features, p=2, dim=1)
-            y_features = F.normalize(y_features, p=2, dim=1)
             x_norm = (x_features**2).sum(1, keepdim=True)
             y_norm = (y_features**2).sum(1, keepdim=True)
             xy = x_features @ y_features.T
             cost_matrix = x_norm + y_norm.T - 2 * xy
+            cost_matrix = torch.clamp(cost_matrix, min=0.0)
             # Scale by sigma^2 to approximate Euclidean cost in the original space
             cost_matrix = cost_matrix * (self.sigma ** 2)
         else:

@@ -1,7 +1,8 @@
 import math
-from typing import List, Tuple
+from typing import List, Tuple, cast
 import warnings
 import logging
+
 import torch
 import torch.nn as nn
 
@@ -36,20 +37,42 @@ class LoRALinear(nn.Module):
         nn.init.zeros_(self.lora_up.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base_out = self.base(x)
+        base_out = cast(torch.Tensor, self.base(x))
         lora_hidden = self.lora_down(x)
         if self.dropout is not None:
             lora_hidden = self.dropout(lora_hidden)
         lora_out = self.lora_up(lora_hidden) * self.scale
-        return base_out + lora_out
+        return cast(torch.Tensor, base_out + lora_out)
 
     def merge_lora_weights(self) -> None:
         """Merge LoRA weights into the base layer for inference."""
         with torch.no_grad():
+            if not hasattr(self, "_original_weight"):
+                self._original_weight = self.base.weight.data.clone()
+            self._lora_down_backup = self.lora_down.weight.data.clone()
+            self._lora_up_backup = self.lora_up.weight.data.clone()
             delta = (self.lora_up.weight @ self.lora_down.weight) * self.scale
             self.base.weight.add_(delta)
             self.lora_down.weight.zero_()
             self.lora_up.weight.zero_()
+
+        self._merged = True
+
+    def unmerge_lora_weights(self) -> None:
+        """Restore original base and LoRA weights after a merge."""
+        if not getattr(self, "_merged", False):
+            return
+        if not hasattr(self, "_original_weight"):
+            raise RuntimeError("Cannot unmerge LoRA weights before a merge has been performed.")
+
+        with torch.no_grad():
+            self.base.weight.data.copy_(self._original_weight)
+            if hasattr(self, "_lora_down_backup"):
+                self.lora_down.weight.data.copy_(self._lora_down_backup)
+            if hasattr(self, "_lora_up_backup"):
+                self.lora_up.weight.data.copy_(self._lora_up_backup)
+
+        self._merged = False
 
 
 def _replace_module(root: nn.Module, module_name: str, new_module: nn.Module) -> None:

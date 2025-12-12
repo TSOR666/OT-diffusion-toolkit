@@ -2,11 +2,50 @@
 
 Comprehensive guides for using and extending ATLAS.
 
-## Getting Started
+## Choose Your Path
 
-- [Main README](../README.md) - Overview, installation, quick start
-- [How to Train & Run Anywhere](HOW_TO_TRAIN_AND_INFER.md) - OS-specific setup, CPU/GPU guidance, torch.compile tips
-- [Dependencies Matrix](DEPENDENCIES.md) - Requirements, compatibility, installation
+### 🚀 I'm New to ATLAS or Diffusion Models
+**Start here:** [Complete Beginner's Guide](GETTING_STARTED.md)
+
+This guide covers:
+- What ATLAS is and what you can do with it
+- Step-by-step installation for any platform
+- Understanding checkpoints and the training/inference workflow
+- Your first image generation
+- Common beginner questions and troubleshooting
+
+**Time:** 15-30 minutes to get set up and generating images
+
+### ⚡ I Want to Get Started Quickly
+**Start here:** [Quick Start Guide](QUICKSTART.md)
+
+For users who:
+- Have basic Python/ML familiarity
+- Want a quick reference guide
+- Need working code examples fast
+
+**Time:** 5-10 minutes
+
+### 🎓 I Want a Complete Training & Inference Tutorial
+**Start here:** [How to Train & Run Anywhere](HOW_TO_TRAIN_AND_INFER.md)
+
+For users who want:
+- Cross-platform installation details (Windows/Mac/Linux)
+- Complete training walkthrough with presets
+- Production deployment guidance
+- LoRA fine-tuning instructions
+
+**Time:** 30-60 minutes to understand, hours/days for actual training
+
+---
+
+## Core Documentation
+
+### Getting Started
+- **[Complete Beginner's Guide](GETTING_STARTED.md)** ✨ - Start here if you're new
+- **[Quick Start Guide](QUICKSTART.md)** ⚡ - Quick reference with examples
+- **[How to Train & Run Anywhere](HOW_TO_TRAIN_AND_INFER.md)** 🎓 - Complete training/inference guide
+- **[Dependencies Matrix](DEPENDENCIES.md)** 📦 - Requirements, compatibility, installation
 
 ## Core Guides
 
@@ -32,17 +71,21 @@ Comprehensive guides for using and extending ATLAS.
   - Custom conditioning
   - Custom samplers
 
-## Quick Links
+## By Use Case
 
-### For Users
-- **New to ATLAS?** Start with the [Main README](../README.md)
-- **Installation issues?** See [Dependencies](DEPENDENCIES.md)
-- **Performance problems?** Check [GPU/CPU Behavior](GPU_CPU_BEHAVIOR.md)
-- **Out of memory?** Read [CUDA Graphs & Tiling](CUDA_GRAPHS_TILING.md)
-
-### For Developers
-- **Want to extend ATLAS?** Follow [Extending ATLAS](EXTENDING.md)
-- **Contributing?** See [CONTRIBUTING.md](../CONTRIBUTING.md) (if available)
+### I want to...
+| Task | Guide |
+|------|-------|
+| **Understand what ATLAS does** | [Beginner's Guide § What is ATLAS](GETTING_STARTED.md#what-is-atlas) |
+| **Install ATLAS on Windows/Mac/Linux** | [Beginner's Guide § Installation](GETTING_STARTED.md#step-1-installation) |
+| **Get my first images quickly** | [Quick Start Guide](QUICKSTART.md) |
+| **Train a custom model** | [How to Train & Run Anywhere § Training](HOW_TO_TRAIN_AND_INFER.md#5-training-atlas-presets) |
+| **Fix "out of memory" errors** | [Quick Start § Troubleshooting](QUICKSTART.md#8-troubleshooting) |
+| **Generate 2K+ resolution images** | [CUDA Graphs & Tiling](CUDA_GRAPHS_TILING.md) |
+| **Speed up generation** | [GPU/CPU Behavior § Performance](GPU_CPU_BEHAVIOR.md#performance-expectations) |
+| **Fine-tune an existing model** | [How to Train & Run Anywhere § LoRA](HOW_TO_TRAIN_AND_INFER.md#7-fine-tuning-with-lora-adapters) |
+| **Create custom kernels/samplers** | [Extending ATLAS](EXTENDING.md) |
+| **Debug hardware issues** | [GPU/CPU Behavior Guide](GPU_CPU_BEHAVIOR.md) |
 
 ## Common Tasks
 
@@ -105,33 +148,121 @@ noise = adapter.predict_noise(x, t=0.5, conditioning=conditioning_payload)
 
 ## FAQ
 
+### Hardware & Requirements
+
 **Q: What GPU do I need?**
-A: ATLAS runs on any CUDA GPU (compute 7.0+). Recommended: RTX 3060+ for 512px, RTX 4080+ for 1024px, RTX 4090 for 2K.
+A: ATLAS runs on any CUDA GPU (compute 7.0+) or CPU. Recommended:
+- 512px generation: RTX 3060+ (8GB VRAM)
+- 1024px generation: RTX 4080+ (16GB VRAM)
+- 2K generation: RTX 4090 (24GB VRAM)
+- CPU-only works but is 5-10x slower
 
-**Q: Can I run on CPU?**
-A: Yes, but 5-10x slower. Use reduced RFF features (512) and lower resolution (256-512px).
+**Q: Can I run ATLAS without a GPU?**
+A: Yes! ATLAS works on CPU but is significantly slower (5-10x). Use:
+- Lower resolution (256-512px)
+- Reduced RFF features (512 instead of 2048)
+- Smaller batch sizes (1-2)
+- See [Beginner's Guide § Prerequisites](GETTING_STARTED.md#prerequisites)
 
-**Q: How do I enable BF16?**
-A: Automatic on Ampere+ GPUs (RTX 30xx/40xx/A100). Check with `torch.cuda.is_bf16_supported()`.
+**Q: Does ATLAS support AMD GPUs or Apple Silicon?**
+A: Yes, but with caveats:
+- **AMD (ROCm)**: Supported on Linux. See [HOW_TO_TRAIN_AND_INFER.md § Install PyTorch](HOW_TO_TRAIN_AND_INFER.md#3-install-pytorch-for-your-platform)
+- **Apple Silicon (M1/M2/M3)**: Supported via MPS backend, 2-3x slower than NVIDIA
+- **Intel Arc**: Not officially tested
 
-**Q: What's the difference between CUDA graphs and tiling?**
-A: CUDA graphs speed up execution (10-30%), tiling enables higher resolutions by processing in chunks (slower but less memory).
+### Getting Started
+
+**Q: Where do I get model checkpoints?**
+A: You need to either:
+1. **Train your own** (see [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md))
+2. **Download community checkpoints** (check GitHub Discussions/Issues)
+3. **Train a quick test model** (1-2 hours for 64x64 ImageNet)
+
+ATLAS does not ship with pre-trained models due to size and licensing.
+
+**Q: How long does training take?**
+A: Depends on your hardware and target resolution:
+- 64x64 (test): 2-4 hours on RTX 4090
+- 256x256: 2-4 days on RTX 4090
+- 1024x1024: 1-2 weeks on RTX 4090
+- See [HOW_TO_TRAIN_AND_INFER.md § Training Times](HOW_TO_TRAIN_AND_INFER.md#55-estimated-training-times-default-presets)
+
+**Q: What datasets can I use?**
+A: ATLAS supports:
+- **Auto-download**: CIFAR-10, MNIST (via torchvision)
+- **Manual download**: CelebA, CelebA-HQ, FFHQ, ImageNet, LSUN
+- **Custom**: Any folder of images (ImageFolder format)
+- Minimum 1000+ diverse images recommended
+
+For download links, see [Getting Started § Dataset Downloads](GETTING_STARTED.md#dataset-downloads)
+
+### Performance & Optimization
 
 **Q: My generations are slow, how can I speed them up?**
-A:
-1. Enable CUDA graphs for fixed shapes
-2. Use mixed precision (BF16/FP16)
-3. Reduce number of sampling steps
+A: Try these in order:
+1. Enable CUDA graphs: `enable_cuda_graphs=True` (10-30% speedup)
+2. Use mixed precision (automatic on compatible GPUs)
+3. Reduce timesteps: `timesteps=30` instead of 50
 4. Use RFF kernels instead of Direct
-5. Ensure TF32 is enabled (Ampere+)
+5. Check GPU usage: `python -m atlas.check_hardware`
 
-**Q: I get OOM errors, what should I do?**
-A:
-1. Reduce batch size
-2. Lower resolution
-3. Enable tiling for ultra-high-res
-4. Use Nyström kernels for tight memory
+See [GPU/CPU Behavior § Performance](GPU_CPU_BEHAVIOR.md#performance-expectations)
+
+**Q: I get "CUDA out of memory" errors, what should I do?**
+A: Solutions in order:
+1. Reduce batch size: `batch_size=1`
+2. Lower resolution: `resolution=512`
+3. Enable tiling for ultra-high-res: `tile_size=512`
+4. Use Nyström kernels: `solver_type="nystrom"`
 5. Clear cache: `sampler.clear_cache()`
+
+See [Quick Start § Troubleshooting OOM](QUICKSTART.md#cuda-out-of-memory)
+
+**Q: How do I enable BF16/TF32?**
+A: Both are automatic on compatible hardware:
+- **BF16**: Auto-enabled on Ampere+ GPUs (RTX 30xx/40xx/50xx, A100+)
+- **TF32**: Auto-enabled on Ampere+ for matmul operations
+- Check: `python -m atlas.check_hardware`
+
+**Q: What's the difference between CUDA graphs and tiling?**
+A: Different purposes:
+- **CUDA graphs**: Speed up execution (10-30% faster) by caching computation graph
+- **Tiling**: Enable higher resolutions by processing in chunks (slower but less memory)
+- You can use both together!
+
+See [CUDA Graphs & Tiling Guide](CUDA_GRAPHS_TILING.md)
+
+### Troubleshooting
+
+**Q: Images are all noise/garbage**
+A: Common causes:
+1. Model not trained enough (need more epochs)
+2. Learning rate too high/low
+3. Dataset too small (need 1000+ images)
+4. Wrong checkpoint loaded
+
+**Q: "No module named 'atlas'" error**
+A: Installation issue:
+```bash
+cd ATLAS/
+pip install -e .[vision,clip]
+```
+
+**Q: Can I use pre-trained Stable Diffusion checkpoints?**
+A: Not directly. ATLAS uses a different architecture. You would need to:
+1. Convert the checkpoint (advanced, not officially supported)
+2. Train from scratch (recommended)
+
+### Advanced Topics
+
+**Q: Can I fine-tune with LoRA?**
+A: Yes! See [HOW_TO_TRAIN_AND_INFER.md § LoRA](HOW_TO_TRAIN_AND_INFER.md#7-fine-tuning-with-lora-adapters)
+
+**Q: How do I create custom kernels?**
+A: See [Extending ATLAS](EXTENDING.md) for complete guide
+
+**Q: Can I use ATLAS for other modalities (audio, video)?**
+A: ATLAS is designed for images. For other modalities, you would need to adapt the architecture (advanced).
 
 ## Support
 

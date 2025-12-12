@@ -68,6 +68,18 @@ class RFFKernelOperator(KernelOperator):
         self._initialise_features()
 
     # ------------------------------------------------------------------
+    def _ensure_device_consistency(self) -> None:
+        """Ensure generator and cached parameters stay on the configured device."""
+        if self.rng.device != self.device:
+            self.rng = torch.Generator(device=self.device)
+            if self.seed is not None:
+                self.rng.manual_seed(self.seed)
+
+        if any(weight.device != self.device for weight in self.weights):
+            self.weights = [weight.to(self.device) for weight in self.weights]
+        if any(offset.device != self.device for offset in self.offsets):
+            self.offsets = [offset.to(self.device) for offset in self.offsets]
+
     def _base_scale(self) -> float:
         if self.kernel_type == "gaussian":
             return 1.0 / self.epsilon
@@ -161,6 +173,7 @@ class RFFKernelOperator(KernelOperator):
             return None
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
+        self._ensure_device_consistency()
         x = x.to(self.device)
         # Ensure the tensor has a well-defined storage layout for caching.
         x = x.contiguous()
@@ -200,8 +213,8 @@ class RFFKernelOperator(KernelOperator):
         target_shape = v.shape
         v_flat = v.reshape(v.shape[0], -1).to(features.dtype)
 
-        transformed = features.T @ v_flat
-        result = features @ transformed
+        transformed = features.T @ v_flat  # (f, n) @ (n, k) -> (f, k)
+        result = features @ transformed  # (n, f) @ (f, k) -> (n, k)
         return result.reshape(target_shape)
 
     def apply_transpose(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -220,4 +233,4 @@ class RFFKernelOperator(KernelOperator):
         """Compute approximate kernel matrix via shared feature space."""
         phi_x = self.compute_features(x)
         phi_y = self.compute_features(y)
-        return phi_x @ phi_y.T
+        return phi_x @ phi_y.T  # (n, f) @ (f, m) -> (n, m)

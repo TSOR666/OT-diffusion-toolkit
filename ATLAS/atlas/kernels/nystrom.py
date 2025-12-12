@@ -128,6 +128,7 @@ class NystromKernelOperator(KernelOperator):
         if x.shape[0] != v.shape[0]:
             raise ValueError("Input data and vector must share the same batch dimension.")
 
+        self._validate_device(self.landmarks)
         x = x.to(self.device)
         v_in = v.to(self.device)
         features = v_in.reshape(v_in.shape[0], -1)
@@ -135,9 +136,9 @@ class NystromKernelOperator(KernelOperator):
         K_xl = self._compute_kernel(x, self.landmarks)
         if K_xl.dtype != features.dtype:
             features = features.to(K_xl.dtype)
-        rhs = K_xl.T @ features
+        rhs = K_xl.T @ features  # (m, n) @ (n, k) -> (m, k)
         solved = self._solve_landmark_system(rhs)
-        result = K_xl @ solved
+        result = K_xl @ solved  # (n, m) @ (m, k) -> (n, k)
         return result.reshape(v_in.shape)
 
     def apply_transpose(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

@@ -1,14 +1,11 @@
+# mypy: ignore-errors
 """Solver entry points for FastSB-OT."""
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
-import random
-import tempfile
-import time
 from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -396,8 +393,16 @@ class FastSBOTSolver(nn.Module):
             else:
                 t_val = float(t)
             t_key = f"{t_val:.6f}"
+            # Content-aware fingerprint prevents stale score reuse across different x_t
+            fp = x.reshape(-1)
+            if fp.numel() >= 4:
+                sample = torch.stack([fp[0], fp[fp.numel() // 3], fp[2 * fp.numel() // 3], fp[-1]]).float()
+                chk = float(sample.sum().item())
+            else:
+                chk = float(fp.float().sum().item())
+            fingerprint = f"ptr{int(x.data_ptr())}_chk{chk:.6e}"
             cache_key = self._normalize_cache_key(
-                f"{cache_key}_t{t_key}", x.shape, x.device, x.dtype
+                f"{cache_key}_t{t_key}_{fingerprint}", x.shape, x.device, x.dtype
             )
 
             clone_cache = os.environ.get("FASTSBOT_CLONE_CACHE", "1") == "1"  # Default to True for safety
@@ -616,6 +621,17 @@ class FastSBOTSolver(nn.Module):
 
         # Use cached overlap mask instead of recomputing
         overlap_count = self._get_overlap_mask(H_pad, W_pad, patch_size, stride, x.device)
+
+        # CRITICAL FIX: Validate patch overlap to prevent division issues
+        min_overlap = overlap_count.min().item()
+        if min_overlap <= 0:
+            raise ValueError(
+                f"Patch overlap is zero (min={min_overlap:.2f}). "
+                f"This indicates patches don't overlap properly. "
+                f"Increase patch_overlap_ratio (current: {self.config.patch_overlap_ratio}) "
+                f"or adjust patch_size (current: {patch_size}) and stride (current: {stride})."
+            )
+
         # Shape: (1, 1, H_pad, W_pad), broadcast over B
         # Convert to FP32 for safe division
         orig_dtype = scores_padded.dtype
@@ -758,13 +774,9 @@ class FastSBOTSolver(nn.Module):
         beta_t = 1.0 - alpha_bar_curr / max(alpha_bar_prev, 1e-12)
         beta_t = max(beta_t, 1e-20)
 
-        # Track if learned variance path is used
-        learned_variance_used = False
-
         # Improved variance computation
         if self.config.use_learned_variance and noise_pred.shape[1] == 2 * x_t.shape[1]:
             # Model predicts both mean and variance
-            learned_variance_used = True
             c = noise_pred.shape[1]
             xc = x_t.shape[1]
             if c != 2 * xc:
@@ -1090,7 +1102,13 @@ class FastSBOTSolver(nn.Module):
         if not torch.is_tensor(alpha_bar):
             alpha_bar = x_work.new_tensor(alpha_bar)
 
-        if TRITON_AVAILABLE and self.config.use_triton_kernels and x_work.is_cuda and x_work.numel() > 65536:
+        triton_ready = (
+            TRITON_AVAILABLE
+            and self.config.use_triton_kernels
+            and launch_triton_kernel_safe is not None
+            and fused_drift_transport_kernel_fixed is not None
+        )
+        if triton_ready and x_work.is_cuda and x_work.numel() > 65536:
             x_flat = x_work.reshape(-1).contiguous()
             drift_flat = drift_work.reshape(-1).contiguous()
             out = torch.empty_like(x_flat)

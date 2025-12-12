@@ -508,8 +508,11 @@ class EnhancedScoreBasedSBDiffusionSolver:
             return self.fft_ot._is_grid_structured(x)
         
         # Default implementation
-        if x.dim() > 2:
-            # Multi-dimensional data (like images) is grid-structured
+        if x.dim() >= 4:
+            # Assume N,C,*spatial
+            return True, list(x.shape[2:])
+        if x.dim() == 3:
+            # Assume N,*spatial
             return True, list(x.shape[1:])
         
         return False, None
@@ -582,9 +585,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
         Returns:
             Score tensor
         """
-        with torch.no_grad():
-            t_tensor = torch.ones(x.shape[0], device=x.device) * t
-            model_out = self.score_model(x, t_tensor)
+        t_tensor = torch.ones(x.shape[0], device=x.device) * t
+        model_out = self.score_model(x, t_tensor)
 
         # If the model outputs epsilon, convert to score; otherwise assume it already outputs score
         alpha_t = self.noise_schedule(t)
@@ -820,22 +822,28 @@ class EnhancedScoreBasedSBDiffusionSolver:
             
             # Compute optimal transport
             if self.use_hilbert_sinkhorn:
-                # Use Hilbert Sinkhorn Divergence
-                divergence = self.sinkhorn_divergence.compute_divergence(x_pred, x_ref)
-                transport_cost = divergence.item()
-                
-                # Extract transport plan (approximate using kernel)
+                # Use Hilbert Sinkhorn with consistent plan reconstruction
                 x_pred_flat = x_pred.reshape(batch_size, -1)
                 x_ref_flat = x_ref.reshape(batch_size, -1)
-                
-                # Compute soft assignment using RFF kernel
-                if self.sinkhorn_divergence.rff is not None:
-                    K = self.sinkhorn_divergence.rff.compute_kernel(x_pred_flat, x_ref_flat)
-                else:
-                    K = torch.exp(-torch.cdist(x_pred_flat, x_ref_flat, p=2).pow(2) / (2 * self.kernel_bandwidth**2))
-                
-                # Apply transport with relaxation
-                P = K / K.sum(dim=1, keepdim=True)
+
+                cost_matrix = self.sinkhorn_divergence._compute_cost_matrix(x_pred_flat, x_ref_flat)
+                eps_val = (
+                    self.eps * (1 + 5 * torch.sqrt(variance_next))
+                    if self.adaptive_eps
+                    else self.eps
+                )
+
+                transport_cost_tensor, u, v = self.sinkhorn_divergence._sinkhorn_algorithm(
+                    cost_matrix, eps=eps_val
+                )
+                log_kernel = (-cost_matrix / eps_val).clamp(min=-50.0)
+                log_P = (u[:, None] + v[None, :]) + log_kernel
+                log_P = torch.clamp(log_P, min=-50.0, max=50.0)
+                P = torch.exp(log_P)
+                # Normalize defensively to avoid accumulation of numerical error
+                P = P / P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
+                transport_cost = float(torch.sum(P * cost_matrix))
+
                 x_transported = self._apply_transport_map(x_pred, x_ref, P)
                 x_pred = TRANSPORT_RELAXATION_FACTOR * x_pred + TRANSPORT_CORRECTION_FACTOR * x_transported
                 

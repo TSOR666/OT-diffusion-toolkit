@@ -32,7 +32,7 @@ GPU Memory Presets:
 import torch
 import warnings
 from pathlib import Path
-from typing import Union, List, Optional, Dict, Any, Tuple, Mapping
+from typing import Union, List, Optional, Tuple, Mapping
 from dataclasses import dataclass, replace
 
 from atlas.models.score_network import HighResLatentScoreModel
@@ -44,6 +44,22 @@ from atlas.config.sampler_config import SamplerConfig
 from atlas.config.conditioning_config import ConditioningConfig
 from atlas.utils.hardware import safe_cuda_mem_get_info
 from atlas.utils.memory import get_peak_memory_mb
+
+
+def _safe_torch_load(path: Union[str, Path], map_location=None):
+    """
+    Load a checkpoint with weights_only=True when supported to avoid unsafe pickle execution.
+    Falls back to standard torch.load if the installed PyTorch version lacks the flag.
+    """
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    load_kwargs = {"map_location": map_location}
+    try:
+        return torch.load(checkpoint_path, weights_only=True, **load_kwargs)  # type: ignore[call-arg]
+    except TypeError:
+        return torch.load(checkpoint_path, **load_kwargs)
 
 
 _CLIP_MODEL_CONTEXT_DIMS = {
@@ -677,7 +693,6 @@ def create_sampler(
         detect_hardware_capabilities,
         enable_optimal_precision,
         gate_expensive_feature,
-        adjust_config_for_hardware,
     )
 
     hw_caps = detect_hardware_capabilities()
@@ -941,7 +956,7 @@ def create_sampler(
                 sampler=sampler,
             )
 
-    print(f"[ATLAS] Sampler ready! Configuration summary:")
+    print("[ATLAS] Sampler ready! Configuration summary:")
     print(f"  - Resolution: {profile.resolution}x{profile.resolution}")
     print(f"  - Max batch size: {profile.batch_size}")
     print(f"  - Mixed precision: {profile.use_mixed_precision}")

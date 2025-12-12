@@ -1,6 +1,43 @@
 # ATLAS Quick Start Guide
 
-Get started with ATLAS in 5 minutes.
+Quick reference for users who have basic familiarity with diffusion models and Python.
+
+**New to ATLAS?** See the [Complete Beginner's Guide](GETTING_STARTED.md) first.
+
+---
+
+## Prerequisites
+
+Before starting, ensure you have:
+- ✅ Python 3.10 or 3.11 installed
+- ✅ Basic command line familiarity
+- ✅ 16GB+ RAM (8GB minimum)
+- ✅ GPU recommended (8GB+ VRAM) but optional
+- ✅ A **trained checkpoint** or plan to train one (see below)
+
+**Important:** You cannot generate images without a trained model checkpoint. See [Understanding Checkpoints](#understanding-checkpoints).
+
+---
+
+## Understanding Checkpoints
+
+A **checkpoint** is a trained model file (`.pt`) that ATLAS uses to generate images. You have three options:
+
+1. **Train your own** (2-4 hours for small models, days for production models)
+   - See [Training Section](#5-training-your-own-model) below
+   - Most flexible but requires time and GPU resources
+
+2. **Download community checkpoints** (if available)
+   - Check ATLAS discussions/forums
+   - Verify compatibility with your ATLAS version
+
+3. **Quick test model** (for learning)
+   - Train a tiny model on MNIST/CIFAR-10 (1-2 hours)
+   - Good for understanding the workflow
+
+**This guide assumes you have or will obtain a checkpoint.**
+
+---
 
 ## 1. Installation
 
@@ -9,8 +46,11 @@ Get started with ATLAS in 5 minutes.
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Install ATLAS with all features
+cd OT-diffusion-toolkit/ATLAS
 pip install -e .[vision,clip]
 ```
+
+**Platform-specific installation:** See [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md#3-install-pytorch-for-your-platform) for Windows/macOS/AMD GPU instructions.
 
 ## 2. Check Your Hardware
 
@@ -18,36 +58,78 @@ pip install -e .[vision,clip]
 python -m atlas.check_hardware
 ```
 
-This will show your GPU capabilities and recommended settings.
+This will show:
+- Your GPU/CPU capabilities
+- Recommended batch sizes
+- Supported precision modes (FP16/BF16/TF32)
+- Expected performance
 
-## 3. Generate Your First Images
+## 3. Generate Your First Images (Simple API)
 
-### Option A: Simple API (Recommended for Beginners)
+**Save this as `generate.py`:**
 
 ```python
 from atlas.easy_api import create_sampler
+from torchvision.utils import save_image
 
 # Create sampler (auto-detects GPU)
 sampler = create_sampler(
-    checkpoint="path/to/model.pt",
-    gpu_memory="auto",  # Or "8GB", "16GB", "24GB"
+    checkpoint="path/to/your/checkpoint.pt",  # ⚠️ Replace with your actual checkpoint path
+    gpu_memory="auto",  # Auto-detect, or specify "8GB", "16GB", "24GB"
 )
 
-# Generate images
+# Generate images (unconditional)
 images = sampler.generate(
-    prompts=["a serene mountain landscape", "a futuristic city"],
-    num_samples=4,
-    timesteps=50,
-    guidance_scale=7.5,
+    num_samples=4,        # Generate 4 images
+    timesteps=50,         # Quality/speed tradeoff (20-100)
 )
 
 # Save results
-from torchvision.utils import save_image
 for i, img in enumerate(images):
     save_image(img, f"output_{i}.png")
+
+print("✅ Images saved as output_0.png to output_3.png")
 ```
 
-### Option B: Advanced API (Full Control)
+**Run it:**
+```bash
+python generate.py
+```
+
+**Parameters explained:**
+- `checkpoint`: Path to your trained model file (required)
+- `gpu_memory`: "auto" detects automatically, or specify your VRAM size
+- `num_samples`: How many images to generate
+- `timesteps`: Higher = better quality but slower (recommended: 50)
+
+## 4. Generate Images with Text Prompts (CLIP)
+
+If your model supports text conditioning:
+
+```python
+from atlas.easy_api import create_sampler
+from torchvision.utils import save_image
+
+sampler = create_sampler(
+    checkpoint="path/to/checkpoint.pt",
+    enable_clip=True,  # Enable text conditioning
+)
+
+images = sampler.generate(
+    prompts=["a serene mountain landscape", "a futuristic city at night"],
+    negative_prompts=["blurry, low quality"],  # Optional: what to avoid
+    num_samples=2,
+    timesteps=50,
+    guidance_scale=7.5,  # How strongly to follow the prompt (1.0-20.0)
+)
+
+for i, img in enumerate(images):
+    save_image(img, f"text_to_image_{i}.png")
+```
+
+**Note:** CLIP conditioning requires the `[clip]` extra: `pip install -e .[vision,clip]`
+
+## 5. Advanced API (Full Control)
 
 ```python
 import torch
@@ -69,7 +151,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = HighResLatentScoreModel(model_config).to(device).eval()
 
 # Load checkpoint
-checkpoint = torch.load("model.pt", map_location=device)
+checkpoint = torch.load("model.pt", map_location=device, weights_only=True)
 model.load_state_dict(checkpoint["model"])
 
 # Configure sampler
@@ -102,201 +184,182 @@ samples = sampler.sample(
 )
 ```
 
-## 4. Common Configurations
+## 6. Training Your Own Model
 
-### Text-to-Image with CLIP
+### Quick Test Training (1-2 hours)
 
-```python
-sampler = create_sampler(
-    checkpoint="model.pt",
-    gpu_memory="16GB",
-    enable_clip=True,  # Enable CLIP conditioning
-)
+Train a small model for testing/learning:
 
-images = sampler.generate(
-    prompts=["a sunset over the ocean"],
-    negative_prompts=["blurry, low quality"],
-    guidance_scale=7.5,  # Classifier-free guidance strength
-    timesteps=60,
-)
+```bash
+# CIFAR-10 (fastest, auto-downloads)
+python -m atlas.examples.cifar10_training \
+    --data-root ./data/cifar10 \
+    --checkpoints ./my_first_model \
+    --device cuda \
+    --max-steps 10000
+
+# ImageNet 64×64 (requires manual download)
+python -m atlas.examples.imagenet64_training \
+    --data-root /path/to/imagenet64 \
+    --checkpoints ./my_first_model \
+    --device cuda \
+    --max-steps 10000
 ```
 
-### High-Resolution Generation (2K)
+**What this does:**
+- CIFAR-10: Auto-downloads 32×32 images, fastest for testing
+- ImageNet: Uses 64×64 images, requires [manual download](GETTING_STARTED.md#dataset-downloads)
+- Trains for 10K steps (~1-2 hours on RTX 4090)
+- Saves checkpoints to `./my_first_model/`
+- You can start seeing results after ~5K steps
 
-```python
-sampler = create_sampler(
-    checkpoint="model.pt",
-    gpu_memory="24GB",
-    resolution=2048,
-    tile_size=512,          # Enable tiling
-    tile_overlap=0.125,
-    enable_cuda_graphs=True,  # Speed optimization
-)
+### Full Production Training
 
-images = sampler.generate(
-    prompts=["an intricate mandala pattern"],
-    num_samples=1,
-    timesteps=80,
-)
+For real production models (days to weeks):
+
+```bash
+# CelebA-HQ 1024×1024 (takes ~1 week on RTX 4090)
+python -m atlas.examples.celeba1024_training \
+    --data-root /datasets/celeba_hq \
+    --checkpoints ./checkpoints/celeba
+
+# LSUN Bedroom 256×256 (takes ~3-4 days on RTX 4090)
+python -m atlas.examples.lsun256_training \
+    --data-root /datasets/lsun/bedroom \
+    --checkpoints ./checkpoints/lsun
 ```
 
-### Batch Generation (Production)
+**Training tips:**
+- Start with small resolutions (CIFAR-10 32×32 or ImageNet 64×64)
+- Monitor training: checkpoints saved every 5K steps
+- Training times in [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md#55-estimated-training-times-default-presets)
 
+**Dataset downloads:** See [Getting Started § Dataset Downloads](GETTING_STARTED.md#dataset-downloads) for all dataset links.
+
+**Custom datasets:** See [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md#5-training-atlas-presets) for using your own image folders.
+
+## 8. Troubleshooting
+
+### "CUDA out of memory"
+
+**Solutions:**
 ```python
-sampler = create_sampler(
-    checkpoint="model.pt",
-    gpu_memory="24GB",
-    batch_size=8,
-    enable_cuda_graphs=True,  # Reuses graphs for same shape
-)
+# 1. Reduce batch size
+sampler = create_sampler(checkpoint="model.pt", batch_size=1)
 
-# Generate many variations
-prompts = ["a cat"] * 100  # Generate 100 cat images
-all_images = []
+# 2. Lower resolution (if supported by your checkpoint)
+sampler = create_sampler(checkpoint="model.pt", resolution=512)
 
-for i in range(0, len(prompts), 8):  # Process in batches of 8
-    batch_prompts = prompts[i:i+8]
-    images = sampler.generate(
-        prompts=batch_prompts,
-        num_samples=1,
-        timesteps=50,
-    )
-    all_images.append(images)
-```
+# 3. Enable tiling for ultra-high-res
+sampler = create_sampler(checkpoint="model.pt", tile_size=512, tile_overlap=0.125)
 
-## 5. Training Your Own Model
-
-```python
-from atlas.examples.training_pipeline import run_training
-from atlas.config import TrainingConfig, DatasetConfig
-
-# Configure dataset
-dataset_config = DatasetConfig(
-    name="celeba",
-    root="./data/celeba",
-    resolution=256,
-    batch_size=32,
-)
-
-# Configure training
-train_config = TrainingConfig(
-    learning_rate=2e-4,
-    epochs=100,
-    mixed_precision=True,
-    checkpoint_interval=5000,
-)
-
-# Launch training
-run_training(
-    preset_name="base",
-    dataset_root="./data/celeba",
-    checkpoint_dir="./checkpoints",
-    device="cuda",
-)
-```
-
-## 6. Troubleshooting
-
-### Out of Memory
-```python
-# Reduce batch size
-sampler = create_sampler(..., batch_size=1)
-
-# Lower resolution
-sampler = create_sampler(..., resolution=512)
-
-# Enable tiling for high-res
-sampler = create_sampler(..., tile_size=512)
-
-# Clear cache between runs
+# 4. Clear cache between runs
 sampler.clear_cache()
 ```
 
-### Slow Performance
+### "checkpoint file not found"
+
+**Solutions:**
+1. Check the path is correct: `ls path/to/checkpoint.pt`
+2. Use absolute path: `/full/path/to/checkpoint.pt`
+3. Verify file extension is `.pt`
+
+### Slow generation (taking forever)
+
+**Solutions:**
 ```python
-# Enable CUDA graphs (fixed shapes)
-sampler = create_sampler(..., enable_cuda_graphs=True)
+# 1. Enable CUDA graphs (10-30% speedup for fixed shapes)
+sampler = create_sampler(checkpoint="model.pt", enable_cuda_graphs=True)
 
-# Use mixed precision
-# (automatically enabled on compatible GPUs)
+# 2. Reduce timesteps (faster, slightly lower quality)
+images = sampler.generate(num_samples=4, timesteps=30)  # Instead of 50
 
-# Reduce timesteps
-images = sampler.generate(..., timesteps=30)  # Instead of 50
+# 3. Check GPU is being used
+python -m atlas.check_hardware  # Should show GPU, not CPU
+
+# 4. Verify mixed precision is enabled (automatic on compatible GPUs)
 ```
 
-### CLIP Not Working
+### "No module named 'open_clip'" or CLIP errors
+
+**Solutions:**
 ```bash
 # Install CLIP support
-pip install open-clip-torch
+pip install -e .[clip]
 
-# Or disable in config
-sampler = create_sampler(..., enable_clip=False)
+# Or disable CLIP if not needed
+sampler = create_sampler(checkpoint="model.pt", enable_clip=False)
 ```
 
-## 7. Next Steps
+### Images are all noise/garbage
 
-- **Read the full docs**: [docs/](../docs/)
-- **Check hardware capabilities**: `python -m atlas.check_hardware`
-- **Explore examples**: [examples/](../examples/)
-- **Customize components**: [docs/EXTENDING.md](EXTENDING.md)
+**Common causes:**
+1. **Model not trained enough**: Train for more steps (check loss curve)
+2. **Wrong checkpoint**: Verify you're loading the correct file
+3. **Incompatible checkpoint**: Checkpoint might be from different version/architecture
+4. **Dataset too small**: Need 1000+ diverse images for good results
 
-## 8. Example Gallery
+**Try:**
+- Check training logs/loss values
+- Verify checkpoint size (should be 100MB+)
+- Test with a known-good checkpoint
 
-### Unconditional Generation
-```python
-sampler = create_sampler(checkpoint="unconditional_model.pt")
-images = sampler.generate(num_samples=16, timesteps=50)
-```
+### "torch.cuda.is_available() returns False"
 
-### Class-Conditional
-```python
-sampler = create_sampler(checkpoint="class_conditional.pt")
-images = sampler.generate(
-    condition={"class": 5},  # Generate class 5
-    num_samples=8,
-)
-```
+**Solutions:**
+1. Check NVIDIA drivers: Run `nvidia-smi` in terminal
+2. Reinstall PyTorch with CUDA: `pip install torch --index-url https://download.pytorch.org/whl/cu121`
+3. Verify GPU is detected: `python -m atlas.check_hardware`
+4. Try CPU mode (slower): `sampler = create_sampler(..., device="cpu")`
 
-### Image-to-Image
-```python
-import torch
-from PIL import Image
-from torchvision import transforms
+### Training crashes or stalls
 
-# Load starting image
-init_image = Image.open("input.png")
-transform = transforms.ToTensor()
-x_init = transform(init_image).unsqueeze(0)
+**Solutions:**
+1. Reduce batch size in preset configuration
+2. Enable gradient checkpointing (see [HOW_TO_TRAIN_AND_INFER.md](HOW_TO_TRAIN_AND_INFER.md))
+3. Check dataset path is correct
+4. Monitor GPU temperature (may be thermal throttling)
 
-# Add noise and denoise
-images = sampler.generate(
-    num_samples=1,
-    timesteps=50,
-    x_init=x_init,
-    start_timestep=0.5,  # Start from 50% noise
-)
-```
+## 9. Quick Reference
 
-## Quick Reference
-
-| Task | Configuration |
-|------|---------------|
+| Task | Command/Configuration |
+|------|----------------------|
+| Check hardware | `python -m atlas.check_hardware` |
 | Fast generation | `timesteps=30, enable_cuda_graphs=True` |
-| High quality | `timesteps=100, guidance_scale=7.5` |
-| Large images | `resolution=2048, tile_size=512` |
-| Batch production | `batch_size=8, enable_cuda_graphs=True` |
-| Memory constrained | `batch_size=1, resolution=512, rff_features=1024` |
+| High quality | `timesteps=100` |
+| Ultra-high-res (2K) | `tile_size=512, tile_overlap=0.125` |
+| Batch processing | `batch_size=8, enable_cuda_graphs=True` |
+| Memory constrained | `batch_size=1, resolution=512` |
+| Text conditioning | `enable_clip=True, guidance_scale=7.5` |
 
-## Getting Help
+## 10. Next Steps
 
-- **Documentation**: [docs/](../docs/)
-- **Hardware Check**: `python -m atlas.check_hardware`
-- **Issues**: Report at GitHub Issues
-- **Examples**: See [examples/](../examples/) directory
+### Learn More
+- **Absolute beginner?** → [Complete Beginner's Guide](GETTING_STARTED.md)
+- **Cross-platform setup** → [How to Train & Run Anywhere](HOW_TO_TRAIN_AND_INFER.md)
+- **Optimize performance** → [GPU/CPU Behavior Guide](GPU_CPU_BEHAVIOR.md)
+- **Advanced features** → [CUDA Graphs & Tiling](CUDA_GRAPHS_TILING.md)
+- **Extend ATLAS** → [Extending Guide](EXTENDING.md)
+- **All docs** → [Documentation Index](README.md)
+
+### Explore Examples
+```bash
+# List available examples
+ls atlas/examples/*.py
+
+# Run basic sampling demo
+python -m atlas.examples.basic_sampling
+
+# Get help on any example
+python -m atlas.examples.lsun256_training --help
+```
+
+### Get Help
+- **Documentation**: [docs/README.md](README.md)
+- **GitHub Issues**: Report bugs or request features
+- **GitHub Discussions**: Ask questions, share results
+- **Hardware diagnostics**: `python -m atlas.check_hardware`
 
 ---
 
-**Need more details?** Check the [full documentation](README.md) or run:
-```bash
-python -m atlas.check_hardware --help
-```
+**Ready to dive deeper?** Check out the [complete documentation index](README.md) for specialized guides on advanced topics.

@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
 import logging
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn

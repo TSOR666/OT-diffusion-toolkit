@@ -28,6 +28,7 @@ class HighResModelConfig:
     # Optional vector conditioning dimension (e.g., class embeddings). Set to 0 to disable.
     conditioning_dim: int = 0
     cross_attention_levels: Tuple[int, ...] = (1, 2)
+    conditioning_dim: int = 768
     # Legacy fields retained for backward compatibility; kept in sync with conditioning config.
     use_clip_conditioning: bool = True
     context_dim: int = 768
@@ -115,6 +116,8 @@ class HighResModelConfig:
                 raise ValueError(
                     f"Channels at attention level {lvl} ({channels_at_level}) must be divisible by num_heads ({self.num_heads})."
                 )
+        if self.conditioning_dim < 0:
+            raise ValueError("conditioning_dim must be non-negative.")
         if self.conditional:
             if self.conditioning.context_dim <= 0:
                 raise ValueError("conditioning.context_dim must be positive when conditional=True.")
@@ -132,8 +135,11 @@ class HighResModelConfig:
                     stacklevel=2,
                 )
                 self.use_clip_conditioning = self.conditioning.use_clip
+            if self.conditioning_dim == 0:
+                self.conditioning_dim = self.context_dim
         else:
             self.use_clip_conditioning = False
+            self.conditioning_dim = 0
 
     @property
     def depth(self) -> int:
@@ -145,7 +151,7 @@ class HighResModelConfig:
 
     @property
     def total_downsampling(self) -> int:
-        return 2 ** self.depth
+        return int(2 ** self.depth)
 
     def __repr__(self) -> str:
         return (

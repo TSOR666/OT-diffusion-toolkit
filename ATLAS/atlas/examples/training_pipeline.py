@@ -32,6 +32,15 @@ from atlas.utils import create_dataloader, set_seed
 logger = logging.getLogger(__name__)
 
 
+def _safe_torch_load(path: str | Path, map_location=None):
+    """Load checkpoints defensively with weights_only when supported."""
+    load_kwargs = {"map_location": map_location}
+    try:
+        return torch.load(path, weights_only=True, **load_kwargs)  # type: ignore[call-arg]
+    except TypeError:
+        return torch.load(path, **load_kwargs)
+
+
 def _expand_alpha(alpha: torch.Tensor) -> torch.Tensor:
     return alpha.view(alpha.shape[0], 1, 1, 1)
 

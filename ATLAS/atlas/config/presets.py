@@ -339,6 +339,82 @@ def imagenet64_experiment() -> Dict[str, Any]:
     }
 
 
+def cifar10_experiment() -> Dict[str, Any]:
+    """Preset bundle covering CIFAR-10 training and sampling."""
+
+    model_cfg = HighResModelConfig(
+        in_channels=3,
+        out_channels=3,
+        base_channels=128,
+        channel_mult=(1, 2, 2, 2),
+        num_res_blocks=2,
+        attention_levels=(1, 2),
+        num_heads=4,
+        dropout=0.1,
+        time_emb_dim=512,
+        conditional=False,
+        cross_attention_levels=(),
+        conditioning=ConditioningConfig(use_clip=False, context_dim=0),
+    )
+
+    dataset_cfg = DatasetConfig(
+        name="cifar10",
+        root="./data/cifar10",
+        resolution=32,
+        channels=3,
+        center_crop=False,
+        random_flip=True,
+        download=True,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        batch_size=128,
+        extra={"split": "train"},
+    )
+
+    train_cfg = TrainingConfig(
+        batch_size=256,
+        micro_batch_size=64,
+        learning_rate=2e-4,
+        betas=(0.9, 0.999),
+        weight_decay=1e-4,
+        ema_decay=0.999,
+        epochs=400,
+        log_interval=100,
+        checkpoint_interval=2000,
+        mixed_precision=True,
+        gradient_clip_norm=1.0,
+        compile=False,
+        checkpoint_dir="checkpoints/cifar10",
+    )
+
+    infer_cfg = InferenceConfig(
+        sampler_steps=18,
+        guidance_scale=1.0,
+        batch_size=32,
+        num_samples=64,
+        seed=2028,
+        use_ema=True,
+        output_dir="outputs/cifar10",
+    )
+
+    kernel_cfg = gaussian_multiscale_kernel()
+    sampler_cfg = hierarchical_sampler_default().with_overrides(
+        sb_iterations=2,
+        memory_efficient=True,
+        verbose_logging=False,
+    )
+
+    return {
+        "model": model_cfg,
+        "dataset": dataset_cfg,
+        "training": train_cfg,
+        "inference": infer_cfg,
+        "kernel": kernel_cfg,
+        "sampler": sampler_cfg,
+    }
+
+
 # ============================================================================
 # Consumer GPU Presets (Added for non-expert users)
 # ============================================================================
@@ -854,6 +930,7 @@ PRESETS = {
     "experiment:celeba1024": celeba1024_experiment,
     "experiment:ffhq128": ffhq128_experiment,
     "experiment:imagenet64": imagenet64_experiment,
+    "experiment:cifar10": cifar10_experiment,
     # Consumer GPU presets
     "gpu:6gb": consumer_6gb_preset,
     "gpu:8gb": consumer_8gb_preset,

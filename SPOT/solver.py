@@ -1101,13 +1101,10 @@ class ProductionSPOTSolver:
                             else:
                                 s = self._compute_score_optimized(x, t)
 
-                            _, sigma_t = self.noise_schedule.alpha_sigma(t_tensor)
                             beta_t = self.noise_schedule.beta(t_tensor).to(x.dtype)
                             
-                            with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
-                                sigma_sq = (sigma_t.to(x.dtype)) ** 2
-                            # Probability-flow ODE drift to match HeunIntegrator
-                            return -0.5 * beta_t * x - beta_t * sigma_sq * s
+                            # Probability-flow ODE drift: -0.5 * beta * x - beta * score
+                            return -0.5 * beta_t * x - beta_t * s
                         
                         def compute_eps_at(t_scalar):
                             eps_base = self.config.eps
