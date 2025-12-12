@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, overload
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,7 @@ from ..config.kernel_config import KernelConfig
 from ..config.sampler_config import SamplerConfig
 from ..utils.memory import get_peak_memory_mb, reset_peak_memory, warn_on_high_memory
 from ..utils.random import set_seed
+from ..types import ConditioningPayload, NoiseSchedule
 from .schrodinger_bridge import SchroedingerBridgeSolver
 
 
@@ -27,7 +28,7 @@ class AdvancedHierarchicalDiffusionSampler:
     def __init__(
         self,
         score_model: nn.Module,
-        noise_schedule: Callable[[float], float],
+        noise_schedule: NoiseSchedule,
         device: Optional[torch.device] = None,
         kernel_config: Optional[KernelConfig] = None,
         sampler_config: Optional[SamplerConfig] = None,
@@ -65,7 +66,7 @@ class AdvancedHierarchicalDiffusionSampler:
         )
 
         self.conditioner: Optional[CLIPConditioningInterface] = None
-        self.current_conditioning: Optional[Dict[str, Any]] = None
+        self.current_conditioning: Optional[ConditioningPayload] = None
         self._conditioning_base_batch: Optional[int] = None
         self._wrappers_prepared = False
         self._last_kernel_method: Optional[str] = None
@@ -93,15 +94,15 @@ class AdvancedHierarchicalDiffusionSampler:
             guidance_scale=guidance_scale,
         )
         self.current_conditioning = payload
-        self._conditioning_base_batch = payload.get("base_batch", len(prompts))
+        self._conditioning_base_batch = int(payload.get("base_batch", len(prompts)))
         return payload
 
     # ------------------------------------------------------------------
     def _resolve_conditioning(
         self,
-        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]],
+        conditioning: Optional[ConditioningPayload],
         batch_size: int,
-    ) -> Optional[Union[bool, torch.Tensor, Dict[str, Any]]]:
+    ) -> Optional[ConditioningPayload]:
         payload = conditioning if conditioning is not None else self.current_conditioning
         if payload is None:
             return None
@@ -155,10 +156,10 @@ class AdvancedHierarchicalDiffusionSampler:
     def _prepare_conditioning(
         self,
         batch_size: int,
-        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]],
+        conditioning: Optional[ConditioningPayload],
         prompts: Optional[List[str]],
         negative_prompts: Optional[List[str]],
-    ) -> Optional[Union[bool, torch.Tensor, Dict[str, Any]]]:
+    ) -> Optional[ConditioningPayload]:
         if prompts is not None:
             payload = self.prepare_conditioning_from_prompts(
                 prompts,
@@ -215,6 +216,7 @@ class AdvancedHierarchicalDiffusionSampler:
         self._wrappers_prepared = True
 
     # ------------------------------------------------------------------
+    @overload
     def sample(
         self,
         shape: Sequence[int],
@@ -222,7 +224,36 @@ class AdvancedHierarchicalDiffusionSampler:
         show_progress: bool = True,
         verbose: Optional[bool] = None,
         callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
-        conditioning: Optional[Union[bool, torch.Tensor, Dict[str, Any]]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
+        prompts: Optional[List[str]] = None,
+        negative_prompts: Optional[List[str]] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        return_intermediates: Literal[False] = False,
+    ) -> torch.Tensor: ...
+
+    @overload
+    def sample(
+        self,
+        shape: Sequence[int],
+        timesteps: Union[int, Sequence[float]],
+        show_progress: bool = True,
+        verbose: Optional[bool] = None,
+        callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
+        prompts: Optional[List[str]] = None,
+        negative_prompts: Optional[List[str]] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        return_intermediates: Literal[True] = True,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]: ...
+
+    def sample(
+        self,
+        shape: Sequence[int],
+        timesteps: Union[int, Sequence[float]],
+        show_progress: bool = True,
+        verbose: Optional[bool] = None,
+        callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
         initial_state: Optional[torch.Tensor] = None,
@@ -279,7 +310,7 @@ class AdvancedHierarchicalDiffusionSampler:
                     1.0, 0.01, steps=timesteps, dtype=torch.float32
                 ).tolist()
             else:
-                schedule = timesteps
+                schedule = list(timesteps)
             schedule = self.sb_solver.validate_timesteps(schedule)
             if any(schedule[i] <= schedule[i + 1] for i in range(len(schedule) - 1)):
                 raise ValueError("Timesteps must be strictly decreasing after validation.")
@@ -376,7 +407,7 @@ class AdvancedHierarchicalDiffusionSampler:
                 self.sb_solver.kernel_operators.clear()
 
             # Store intermediates if requested
-            intermediates = [] if return_intermediates else None
+            intermediates: List[torch.Tensor] = []
             if return_intermediates and len(schedule) > 50:
                 est_mem = len(schedule) * batch_size * 50  # rough heuristic MB
                 self.logger.warning(

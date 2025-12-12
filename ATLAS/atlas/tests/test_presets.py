@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -32,7 +34,7 @@ def test_experiment_presets_structure(name: str, expected_resolution: int, batch
     assert "model" in bundle and "kernel" in bundle and "sampler" in bundle
 
 
-def test_fake_dataset_dataloader_shapes(tmp_path) -> None:
+def test_fake_dataset_dataloader_shapes(tmp_path: Path) -> None:
     pytest.importorskip("torchvision")
     cfg = DatasetConfig(
         name="fake",

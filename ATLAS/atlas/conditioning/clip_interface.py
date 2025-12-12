@@ -1,6 +1,6 @@
 import logging
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import torch
 
@@ -20,8 +20,8 @@ class CLIPConditioningInterface:
     ) -> None:
         self.config = config
         self.device = device
-        self.model = None
-        self.tokenizer = None
+        self.model: Optional[Any] = None
+        self.tokenizer: Optional[Any] = None
         self.pad_id: Optional[int] = None
         self.eot_id: Optional[int] = None
         self.cache: "OrderedDict[Tuple[str, ...], Dict[str, Any]]" = OrderedDict()
@@ -30,10 +30,9 @@ class CLIPConditioningInterface:
 
     def _setup_clip(self) -> None:
         try:
-            import open_clip  # type: ignore
+            import open_clip
         except ImportError:
             logging.warning("open_clip not found; CLIP conditioning disabled.")
-            self.config.use_clip = False
             return
 
         try:
@@ -49,12 +48,12 @@ class CLIPConditioningInterface:
                 self.config.clip_model,
                 exc,
             )
-            self.config.use_clip = False
             return
 
-        self.model = model.eval().to(self.device)
+        model = model.eval().to(self.device)
         if self.config.use_fp16:
-            self.model = self.model.half()
+            model = model.half()
+        self.model = model
         self.tokenizer = tokenizer
 
         pad_id = getattr(tokenizer, "pad_id", None)
@@ -98,12 +97,13 @@ class CLIPConditioningInterface:
         return torch.as_tensor(tokens, dtype=torch.long, device=self.device)
 
     def _encode_tokens(self, tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.model is None:
+        model = self.model
+        if model is None:
             raise RuntimeError("CLIP model not initialized.")
 
-        x = self.model.token_embedding(tokens)
-        if hasattr(self.model, "positional_embedding"):
-            pos_emb = self.model.positional_embedding
+        x = model.token_embedding(tokens)
+        if hasattr(model, "positional_embedding"):
+            pos_emb = model.positional_embedding
             seq_len = x.size(1)
             if pos_emb.dim() == 1:
                 pos_slice = pos_emb[:seq_len].view(1, seq_len, 1)
@@ -114,11 +114,12 @@ class CLIPConditioningInterface:
             x = x + pos_slice
 
         x = x.permute(1, 0, 2)
-        x = self.model.transformer(x)
+        x = model.transformer(x)
         x = x.permute(1, 0, 2)
 
-        if hasattr(self.model, "ln_final"):
-            x = self.model.ln_final(x)
+        if hasattr(model, "ln_final"):
+            x = model.ln_final(x)
+        x = cast(torch.Tensor, x)
 
         if self.eot_id is not None:
             eot_mask = tokens.eq(self.eot_id)
@@ -133,10 +134,10 @@ class CLIPConditioningInterface:
             cls_indices = tokens.new_full((tokens.size(0),), tokens.size(1) - 1)
         pooled = x[torch.arange(x.size(0), device=x.device), cls_indices]
         if (
-            hasattr(self.model, "text_projection")
-            and self.model.text_projection is not None
+            hasattr(model, "text_projection")
+            and model.text_projection is not None
         ):
-            pooled = pooled @ self.model.text_projection
+            pooled = pooled @ model.text_projection
 
         if self.config.use_fp16:
             x = x.half()

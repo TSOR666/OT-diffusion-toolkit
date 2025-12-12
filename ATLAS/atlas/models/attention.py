@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, cast
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,7 @@ class ContextualAttention2D(nn.Module):
         self.to_out = nn.Linear(channels, channels, bias=False)
         self.dropout = nn.Dropout(dropout)
 
+        self.context_proj: Optional[nn.Linear]
         if self.context_dim is not None and self.context_dim != channels:
             self.context_proj = nn.Linear(self.context_dim, channels, bias=False)
         else:
@@ -94,4 +95,4 @@ class ContextualAttention2D(nn.Module):
         out = self.to_out(out)
         out = out + hidden
         out = out.permute(0, 2, 1).view(b, c, h, w)
-        return out
+        return cast(torch.Tensor, out)

@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 import logging
 import math
@@ -5,15 +6,13 @@ import time
 from collections import OrderedDict
 from contextlib import nullcontext
 from functools import partial
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from collections.abc import Callable
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
-try:
-    from torch.cuda.amp import autocast
-except Exception:  # pragma: no cover - autocast optional
-    autocast = None
+from torch.cuda.amp import autocast
 
 from ..config.kernel_config import KernelConfig
 from ..config.sampler_config import SamplerConfig
@@ -26,11 +25,9 @@ from ..kernels import (
 )
 from ..utils.noise_prediction import NoisePredictionAdapter
 from ..utils.random import set_seed
+from ..types import ConditioningPayload, NoiseSchedule
 
-try:
-    from ..schedules import karras_noise_schedule
-except Exception:  # pragma: no cover - soft import to avoid circular issues in docs builds
-    karras_noise_schedule = None
+from ..schedules.noise import karras_noise_schedule
 
 
 _VALID_KERNEL_TYPES = {"gaussian", "laplacian", "cauchy"}
@@ -50,11 +47,11 @@ class SchroedingerBridgeSolver:
     def __init__(
         self,
         score_model: nn.Module, 
-        noise_schedule: Callable,
+        noise_schedule: NoiseSchedule,
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         kernel_config: Optional[KernelConfig] = None,
         sampler_config: Optional[SamplerConfig] = None,
-    ):
+    ) -> None:
         """
         Initialize the unified SB solver.
         
@@ -119,10 +116,11 @@ class SchroedingerBridgeSolver:
         self.seed = sampler_config.seed
         self.cg_relative_tolerance = sampler_config.cg_relative_tolerance
         self.cg_absolute_tolerance = sampler_config.cg_absolute_tolerance
+        self._amp_context: Callable[[], Any]
         if self.use_mixed_precision:
-            self._amp_context = lambda: autocast(device_type="cuda", dtype=torch.float16)  # type: ignore[call-arg]
+            self._amp_context = lambda: autocast(dtype=torch.float16)
         else:
-            self._amp_context = nullcontext
+            self._amp_context = lambda: nullcontext()
 
         # Initialize logger early for validation warnings
         self.logger = logging.getLogger("SchroedingerBridgeSolver")
@@ -139,7 +137,7 @@ class SchroedingerBridgeSolver:
                 )
         
         # Initialize performance tracking
-        self.perf_stats = {
+        self.perf_stats: dict[str, Any] = {
             'total_time': 0.0,
             'kernel_time': 0.0,
             'sb_time': 0.0,
@@ -213,12 +211,9 @@ class SchroedingerBridgeSolver:
         return torch.sqrt(one_minus_alpha / alpha_clamped)
 
     def _extract_karras_params(
-        self, schedule: Callable
+        self, schedule: NoiseSchedule
     ) -> Optional[Tuple[float, float, float]]:
         """Infer parameters for karras_noise_schedule even when wrapped in functools.partial."""
-        if karras_noise_schedule is None:
-            return None
-
         func = schedule.func if isinstance(schedule, partial) else schedule
         if func is not karras_noise_schedule:
             return None
@@ -339,7 +334,7 @@ class SchroedingerBridgeSolver:
         self,
         x: torch.Tensor,
         t: float,
-        conditioning: Optional[Dict[str, Any]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
     ) -> torch.Tensor:
         """
         Compute the score (gradient of log density) using the noise predictor.
@@ -367,7 +362,7 @@ class SchroedingerBridgeSolver:
         x: torch.Tensor,
         t: float,
         dt: float,
-        conditioning: Optional[Dict[str, Any]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
     ) -> torch.Tensor:
         """
         Compute the drift term for the transport map using score function.
@@ -459,7 +454,7 @@ class SchroedingerBridgeSolver:
         
         # Get data dimensionality
         if len(data_dims) > 0:
-            data_dim = np.prod(data_dims)
+            data_dim = int(np.prod(data_dims))
         else:
             data_dim = x.size(1) if x.dim() > 1 else 1
             
@@ -579,6 +574,8 @@ class SchroedingerBridgeSolver:
                     device=self.device
                 )
             elif method == 'fft':
+                if grid_shape is None:
+                    raise RuntimeError("FFT kernel requires a valid grid_shape.")
                 operator = FFTKernelOperator(
                     grid_shape=grid_shape,
                     kernel_type=self.kernel_type,
@@ -1086,7 +1083,7 @@ class SchroedingerBridgeSolver:
         x: torch.Tensor,
         t_curr: float,
         t_next: float,
-        conditioning: Optional[Dict[str, Any]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
     ) -> torch.Tensor:
         """
         Perform a single SB step from t_curr to t_next.
@@ -1153,8 +1150,8 @@ class SchroedingerBridgeSolver:
         shape: Tuple[int, ...],
         timesteps: List[float],
         verbose: bool = True,
-        callback: Optional[Callable] = None,
-        conditioning: Optional[Dict[str, Any]] = None,
+        callback: Optional[Callable[[torch.Tensor, float, float], None]] = None,
+        conditioning: Optional[ConditioningPayload] = None,
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
     ) -> torch.Tensor:
@@ -1198,7 +1195,7 @@ class SchroedingerBridgeSolver:
             # Simplified sampling loop without hierarchical features
             # For advanced features, use AdvancedHierarchicalDiffusionSampler
             from tqdm import tqdm
-            iterator = range(len(timesteps) - 1)
+            iterator: Iterable[int] = range(len(timesteps) - 1)
             if verbose:
                 iterator = tqdm(iterator, desc="Sampling", leave=False)
 
@@ -1276,14 +1273,14 @@ class SchroedingerBridgeSolver:
             Dictionary of tuned parameters
         """
         n_samples = x.shape[0]
-        results = {}
+        results: dict[str, Any] = {}
         
         # Tune RFF parameters
         if self.solver_type == 'rff' or self.solver_type == 'auto':
             self.rff_features = 1024  # Starting point
             
             # Create initial RFF operator
-            input_dim = x.shape[1] if x.dim() == 2 else np.prod(x.shape[1:])
+            input_dim = int(x.shape[1]) if x.dim() == 2 else int(np.prod(x.shape[1:]))
             rff_op = RFFKernelOperator(
                 input_dim=input_dim,
                 feature_dim=self.rff_features,

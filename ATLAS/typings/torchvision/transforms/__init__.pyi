@@ -1,0 +1,43 @@
+from enum import Enum
+from typing import Any, Sequence
+
+
+class InterpolationMode(Enum):
+    NEAREST = 0
+    BILINEAR = 2
+    BICUBIC = 3
+    LANCZOS = 1
+
+
+class Compose:
+    def __init__(self, transforms: Sequence[Any]) -> None: ...
+    def __call__(self, img: Any) -> Any: ...
+
+
+class Resize:
+    def __init__(self, size: Any, interpolation: Any = ...) -> None: ...
+    def __call__(self, img: Any) -> Any: ...
+
+
+class RandomCrop:
+    def __init__(self, size: Any) -> None: ...
+    def __call__(self, img: Any) -> Any: ...
+
+
+class CenterCrop:
+    def __init__(self, size: Any) -> None: ...
+    def __call__(self, img: Any) -> Any: ...
+
+
+class RandomHorizontalFlip:
+    def __init__(self, p: float = ...) -> None: ...
+    def __call__(self, img: Any) -> Any: ...
+
+
+class ToTensor:
+    def __call__(self, img: Any) -> Any: ...
+
+
+class Normalize:
+    def __init__(self, mean: Sequence[float], std: Sequence[float]) -> None: ...
+    def __call__(self, tensor: Any) -> Any: ...

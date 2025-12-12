@@ -4,7 +4,7 @@ from atlas.conditioning.clip_interface import CLIPConditioningInterface
 from atlas.config.conditioning_config import ConditioningConfig
 
 
-def _dummy_payload():
+def _dummy_payload() -> dict[str, torch.Tensor | None]:
     return {
         "context": torch.zeros(1, 1),
         "mask": None,

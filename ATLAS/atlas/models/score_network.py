@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 import torch.nn as nn
@@ -61,6 +61,7 @@ class HighResLatentScoreModel(nn.Module):
             nn.Linear(config.time_emb_dim * 4, config.time_emb_dim),
         )
 
+        self.condition_encoder: Optional[nn.Linear]
         if self.conditional:
             if config.conditioning_dim > 0:
                 self.condition_encoder = nn.Linear(
@@ -129,7 +130,7 @@ class HighResLatentScoreModel(nn.Module):
                 if (self.use_context and level in self.cross_attention_levels)
                 else None
             )
-            block = UpsampleBlock(
+            up_block = UpsampleBlock(
                 in_channels=in_channels,
                 skip_channels=skip_ch,
                 out_channels=skip_ch,
@@ -141,7 +142,7 @@ class HighResLatentScoreModel(nn.Module):
                 num_res_blocks=config.num_res_blocks,
                 context_dim=context_dim,
             )
-            self.up_blocks.append(block)
+            self.up_blocks.append(up_block)
             in_channels = skip_ch
 
         self.output_norm = make_group_norm(in_channels)
@@ -288,7 +289,8 @@ class HighResLatentScoreModel(nn.Module):
         skips: List[torch.Tensor] = []
 
         for block in self.down_blocks:
-            h, skip = block(
+            down_block = cast(DownsampleBlock, block)
+            h, skip = down_block(
                 h, time_emb, context=context, context_mask=context_mask
             )
             skips.append(skip)
@@ -298,13 +300,14 @@ class HighResLatentScoreModel(nn.Module):
         h = self.mid_block2(h, time_emb)
 
         for block in self.up_blocks:
+            up_block = cast(UpsampleBlock, block)
             if not skips:
                 raise RuntimeError(
                     "Not enough skip connections available for upsampling path. "
                     "Check channel_mult and num_res_blocks configuration."
                 )
             skip = skips.pop()
-            h = block(
+            h = up_block(
                 h, skip, time_emb, context=context, context_mask=context_mask
             )
         if skips:
@@ -314,7 +317,7 @@ class HighResLatentScoreModel(nn.Module):
 
         h = self.output_norm(h)
         h = F.silu(h)
-        return self.output_conv(h)
+        return cast(torch.Tensor, self.output_conv(h))
 
 
 def build_highres_score_model(
