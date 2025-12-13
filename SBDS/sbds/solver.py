@@ -17,7 +17,7 @@ from .kernel import KernelDerivativeRFF
 from .metrics import MetricsLogger
 from .noise_schedule import EnhancedAdaptiveNoiseSchedule
 from .sinkhorn import HilbertSinkhornDivergence
-from .utils import create_standard_timesteps, spectral_gradient
+from .utils import create_standard_timesteps
 
 # Resource limits
 MAX_TOTAL_ELEMENTS = 1e9  # 1B elements  4GB for float32
@@ -52,17 +52,24 @@ SINKHORN_ITERATIONS_NYSTROM = 30  # Iterations for Nystrom Sinkhorn
 class EnhancedScoreBasedSBDiffusionSolver:
     """
     Enhanced Score-Based Schrodinger Bridge Diffusion Solver with advanced kernel methods.
-    
+
     This enhanced version incorporates:
     1. Kernel Derivative Random Fourier Features for accurate score approximation
     2. FFT-based Optimal Transport for grid-structured data
     3. Hilbert Sinkhorn Divergence with improved theoretical guarantees
     4. Advanced kernel approximation techniques for better numerical stability and efficiency
     """
+
+    # Type hints for instance attributes
+    fft_ot: Optional[FFTOptimalTransport]
+    sinkhorn_divergence: Optional[HilbertSinkhornDivergence]
+    rff: Optional[KernelDerivativeRFF]
+    last_sigma: Optional[float]
+
     def __init__(
         self,
-        score_model: nn.Module, 
-        noise_schedule: Callable,
+        score_model: nn.Module,
+        noise_schedule: Callable[[float], float],
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         eps: float = 0.01,  # Entropy regularization parameter
         adaptive_eps: bool = True,  # Whether to adapt eps based on noise level
@@ -89,7 +96,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         debiased_divergence: bool = True,  # Whether to use debiased divergence
         kernel_derivative_order: int = 2,  # Maximum order of kernel derivatives
         chunk_size: int = 128,  # Chunk size for pairwise distance computation
-        spectral_gradient: bool = False,  # Whether to use spectral gradient computation
+        use_spectral_gradient: bool = False,  # Whether to use spectral gradient computation
         model_outputs_noise: bool = False,  # If True, model predicts epsilon; otherwise predicts score
     ):
         """
@@ -124,7 +131,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
             debiased_divergence: Whether to use debiased divergence
             kernel_derivative_order: Maximum order of kernel derivatives to support
             chunk_size: Chunk size for pairwise distance computation
-            spectral_gradient: Whether to use spectral gradient computation
+            use_spectral_gradient: Whether to use spectral gradient computation
+            model_outputs_noise: If True, model predicts epsilon; otherwise predicts score
         """
         # Input validation
         if eps <= 0:
@@ -187,7 +195,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         self.debiased_divergence = debiased_divergence
         self.kernel_derivative_order = kernel_derivative_order
         self.chunk_size = chunk_size
-        self.spectral_gradient = spectral_gradient
+        self.use_spectral_gradient = use_spectral_gradient
         self._warned_fft_batch = False
         # Respect model hint when available; otherwise use provided flag
         if hasattr(score_model, "predicts_noise"):
@@ -236,7 +244,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         self.scaler = torch.cuda.amp.GradScaler() if self.use_mixed_precision and device.type == 'cuda' else None
         
         # Pre-create constants for log-uniform distributions to avoid host-device sync
-        self.log_batch_size = {}  # Cache for different batch sizes
+        self.log_batch_size: Dict[int, torch.Tensor] = {}  # Cache for different batch sizes
 
     def _validate_memory_usage(self, shape: Tuple[int, ...]) -> None:
         """
@@ -277,10 +285,10 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 f"Please check input dimensions."
             )
 
-    def _initialize_rff(self, input_dim: int):
+    def _initialize_rff(self, input_dim: int) -> None:
         """
         Initialize RFF for given input dimension.
-        
+
         Args:
             input_dim: Dimensionality of the input data
         """
@@ -317,16 +325,19 @@ class EnhancedScoreBasedSBDiffusionSolver:
                     return
             
             # Cache the original weights and offsets if not already done
-            if not hasattr(self.rff, 'original_weights'):
-                self.rff.original_weights = self.rff.weights.clone()
-                self.rff.original_offset = self.rff.offset.clone()
-                self.rff.original_sigma = self.rff.sigma
-            
+            if not hasattr(self.rff, '_original_weights'):
+                setattr(self.rff, '_original_weights', self.rff.weights.clone())
+                setattr(self.rff, '_original_offset', self.rff.offset.clone())
+                setattr(self.rff, '_original_sigma', self.rff.sigma)
+
             # Scale the weights directly based on the original weights
             # This preserves the mathematical relationship and avoids accumulating numerical errors
-            scale_factor = self.rff.original_sigma / new_sigma
-            self.rff.weights = self.rff.original_weights * scale_factor
-            
+            original_sigma = float(getattr(self.rff, '_original_sigma'))
+            scale_factor = original_sigma / new_sigma
+            original_weights: torch.Tensor = getattr(self.rff, '_original_weights')
+            # Use register_buffer to update weights in-place
+            self.rff.register_buffer('weights', original_weights * scale_factor)
+
             # Update sigma and cache the latest value
             self.rff.sigma = new_sigma
             self.last_sigma = new_sigma
@@ -334,11 +345,11 @@ class EnhancedScoreBasedSBDiffusionSolver:
             # The offset doesn't need to be scaled as it's a phase term independent of sigma
     
     def sample(
-        self, 
-        shape: Tuple[int, ...], 
+        self,
+        shape: Tuple[int, ...],
         timesteps: List[float],
         verbose: bool = True,
-        callback: Optional[Callable] = None,
+        callback: Optional[Callable[[float, torch.Tensor], None]] = None,
         metrics_logger: Optional[MetricsLogger] = None,
         enable_profiling: bool = False,
     ) -> torch.Tensor:
@@ -372,7 +383,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         x_t = torch.randn(shape, device=self.device)
         
         # Initialize RFF for flattened data
-        self._initialize_rff(np.prod(shape[1:]))
+        self._initialize_rff(int(np.prod(shape[1:])))
         
         # Import profiling tools only if needed
         if enable_profiling:
@@ -403,7 +414,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
             with cm:
                 # Determine computational tier if set to auto
                 if self.computational_tier == 'auto':
-                    tier = self._determine_computational_tier(shape[0], np.prod(shape[1:]))
+                    tier = self._determine_computational_tier(shape[0], int(np.prod(shape[1:])))
                 else:
                     tier = self.computational_tier
                 
@@ -482,7 +493,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
             if callback is not None:
                 callback(t_next, x_t)
             
-            if verbose and i % 10 == 0:
+            if verbose and i % 10 == 0 and hasattr(iterator, "set_postfix_str"):
                 status = f"t_curr={t_curr:.4f}, t_next={t_next:.4f}, tier={tier}"
                 if use_sb:
                     status += f", using SB with {sb_iterations} iterations"
@@ -599,11 +610,12 @@ class EnhancedScoreBasedSBDiffusionSolver:
             variance = torch.as_tensor(1 - alpha_t, device=model_out.device, dtype=compute_dtype)
             variance = torch.clamp(variance, min=MIN_ALPHA_VARIANCE)
             denom = torch.sqrt(variance)
-            score = -model_out.to(dtype=compute_dtype) / denom
+            score: torch.Tensor = -model_out.to(dtype=compute_dtype) / denom
         else:
             score = model_out.to(dtype=compute_dtype)
 
-        return score.to(dtype=out_dtype)
+        result: torch.Tensor = score.to(dtype=out_dtype)
+        return result
     
     def _variance_reduced_score(self, x: torch.Tensor, t: float, n_samples: int = 5) -> torch.Tensor:
         """
@@ -682,12 +694,12 @@ class EnhancedScoreBasedSBDiffusionSolver:
             Approximated score tensor
         """
         alpha_t = self.noise_schedule(t)
-        
+
         # We need to approximate the score function  log p_t(x)
         # First, generate samples from p_t
         batch_size = x.size(0)
-        flat_dim = np.prod(x.shape[1:])
-        
+        flat_dim = int(np.prod(x.shape[1:]))
+
         # Generate reference samples from the marginal distribution at time t.
         # For variance-preserving diffusions with standard normal prior, the marginal
         # at time t is N(0, (1 - alpha_t) I).
@@ -697,17 +709,19 @@ class EnhancedScoreBasedSBDiffusionSolver:
         ref_samples = torch.sqrt(variance) * torch.randn(
             batch_size * 4, *x.shape[1:], device=self.device, dtype=x.dtype
         )
-        
+
         # Reshape for RFF
         x_flat = x.reshape(batch_size, flat_dim)
         ref_flat = ref_samples.reshape(ref_samples.size(0), flat_dim)
-        
+
         # Ensure RFF is initialized
         self._initialize_rff(flat_dim)
-        
+
         # Compute score approximation using kernel derivatives
+        if self.rff is None:
+            raise RuntimeError("RFF not initialized after _initialize_rff call")
         score_flat = self.rff.compute_score_approximation(x_flat, ref_flat)
-        
+
         # Reshape back to original shape
         score = score_flat.reshape(x.shape)
         
@@ -781,10 +795,9 @@ class EnhancedScoreBasedSBDiffusionSolver:
 
         # Apply barycentric mapping
         x_shape = x.shape
-        x_flat = x.reshape(x.size(0), -1)
         y_flat = y.reshape(y.size(0), -1)
 
-        # Transport: x_new = P @ y
+        # Transport: x_new = P @ y (barycentric projection)
         transported = P_normalized @ y_flat
 
         return transported.reshape(x_shape)
@@ -823,12 +836,13 @@ class EnhancedScoreBasedSBDiffusionSolver:
             # Compute optimal transport
             if self.use_hilbert_sinkhorn:
                 # Use Hilbert Sinkhorn with consistent plan reconstruction
+                assert self.sinkhorn_divergence is not None  # Guaranteed by use_hilbert_sinkhorn
                 x_pred_flat = x_pred.reshape(batch_size, -1)
                 x_ref_flat = x_ref.reshape(batch_size, -1)
 
                 cost_matrix = self.sinkhorn_divergence._compute_cost_matrix(x_pred_flat, x_ref_flat)
-                eps_val = (
-                    self.eps * (1 + 5 * torch.sqrt(variance_next))
+                eps_val: float = (
+                    float(self.eps * (1 + 5 * torch.sqrt(variance_next).item()))
                     if self.adaptive_eps
                     else self.eps
                 )
@@ -909,28 +923,30 @@ class EnhancedScoreBasedSBDiffusionSolver:
             Tuple of (transported samples, transport cost)
         """
         batch_size = x_t.shape[0]
-        flat_dim = np.prod(x_t.shape[1:])
-        
+        flat_dim = int(np.prod(x_t.shape[1:]))
+
         # Initialize with score-based prediction
         x_pred = x_t + self._compute_drift(x_t, t_curr, t_curr - t_next)
-        
+
         # Generate reference samples at t_next
         alpha_next = self.noise_schedule(t_next)
         variance_next = torch.as_tensor(
             max(0.0, 1 - alpha_next), device=x_t.device, dtype=x_t.dtype
         )
         x_ref = torch.sqrt(variance_next) * torch.randn_like(x_t)
-        
+
         # Ensure RFF is initialized
         self._initialize_rff(flat_dim)
-        
+        if self.rff is None:
+            raise RuntimeError("RFF not initialized after _initialize_rff call")
+
         transport_cost = 0.0
-        
+
         for iter in range(iterations):
             # Flatten for RFF computation
             x_pred_flat = x_pred.reshape(batch_size, flat_dim)
             x_ref_flat = x_ref.reshape(batch_size, flat_dim)
-            
+
             # Compute RFF features
             x_pred_features = self.rff.compute_features(x_pred_flat)
             x_ref_features = self.rff.compute_features(x_ref_flat)
@@ -1016,6 +1032,10 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 RuntimeWarning,
             )
             return self._rff_sb_transport(x_t, t_curr, t_next, iterations)
+
+        if self.fft_ot is None:
+            raise RuntimeError("FFT-OT not initialized. Set use_fft_ot=True in constructor.")
+
         # Initialize with score-based prediction
         x_pred = x_t + self._compute_drift(x_t, t_curr, t_curr - t_next)
         
@@ -1232,16 +1252,10 @@ class EnhancedScoreBasedSBDiffusionSolver:
         """
         # Initialize with score-based prediction
         x_pred = x_t + self._compute_drift(x_t, t_curr, t_curr - t_next)
-        
-        # Generate reference samples at t_next
-        alpha_next = self.noise_schedule(t_next)
-        variance_next = torch.as_tensor(
-            max(0.0, 1 - alpha_next), device=x_t.device, dtype=x_t.dtype
-        )
-        x_ref = torch.sqrt(variance_next) * torch.randn_like(x_t)
-        
+
+        # Reference samples are generated inside _rff_sb_transport at each scale
         transport_cost = 0.0
-        
+
         # Multi-scale approach: solve at coarse scale first, then refine
         scales = [2**i for i in range(self.multiscale_levels, -1, -1)]
         
@@ -1250,10 +1264,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
             if scale > 1:
                 indices = torch.arange(0, x_pred.size(0), scale, device=self.device)
                 x_pred_sub = x_pred[indices].clone()  # Clone to avoid in-place modification
-                x_ref_sub = x_ref[indices]
             else:
                 x_pred_sub = x_pred
-                x_ref_sub = x_ref
 
             # Run transport at current scale
             # Use more iterations at coarser scales for better initialization
@@ -1268,8 +1280,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
 
                 # Linear interpolation for in-between samples (warm-start for next scale)
                 for i in range(len(indices) - 1):
-                    start_idx = indices[i]
-                    end_idx = indices[i + 1]
+                    start_idx = int(indices[i].item())
+                    end_idx = int(indices[i + 1].item())
                     if end_idx - start_idx > 1:
                         # Create interpolation weights
                         n_interp = end_idx - start_idx - 1
@@ -1279,8 +1291,8 @@ class EnhancedScoreBasedSBDiffusionSolver:
 
                 # Handle last segment (extrapolation)
                 if len(indices) > 1 and indices[-1] < x_pred.size(0) - 1:
-                    last_idx = indices[-1]
-                    prev_idx = indices[-2]
+                    last_idx = int(indices[-1].item())
+                    prev_idx = int(indices[-2].item())
                     # Use gradient from last two coarse samples
                     grad = x_pred[last_idx] - x_pred[prev_idx]
                     for j in range(last_idx + 1, x_pred.size(0)):
@@ -1354,17 +1366,17 @@ class EnhancedScoreBasedSBDiffusionSolver:
         }
 
 
-def test_sbds_implementation():
+def test_sbds_implementation() -> None:
     """
     Test the enhanced SBDS implementation with a simple example.
     """
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    
+
     # Create a simple score model (placeholder)
     class SimpleScoreModel(nn.Module):
-        def __init__(self, dim: int = 2):
+        def __init__(self, dim: int = 2) -> None:
             super().__init__()
             self.net = nn.Sequential(
                 nn.Linear(dim + 1, 128),
@@ -1373,19 +1385,21 @@ def test_sbds_implementation():
                 nn.ReLU(),
                 nn.Linear(128, dim)
             )
-        
-        def forward(self, x, t):
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
             # Concatenate x and t
             t = t.reshape(-1, 1)
             if x.dim() > 2:
                 original_shape = x.shape
                 x = x.reshape(x.shape[0], -1)
                 xt = torch.cat([x, t], dim=1)
-                out = self.net(xt)
-                return out.reshape(original_shape)
+                out: torch.Tensor = self.net(xt)
+                result: torch.Tensor = out.reshape(original_shape)
+                return result
             else:
                 xt = torch.cat([x, t], dim=1)
-                return self.net(xt)
+                result = self.net(xt)
+                return result
     
     # Initialize components
     score_model = SimpleScoreModel(dim=2).to(device)
@@ -1441,15 +1455,14 @@ def test_sbds_implementation():
     print("\nConvergence rate estimates:")
     for key, value in convergence.items():
         print(f"  {key}: {value:.6f}")
-    
-    return samples
+
+    print(f"\nTest complete. Generated {samples.shape} samples.")
 
 
-def test_mathematical_correctness():
+def test_mathematical_correctness() -> None:
     """
     Unit tests for mathematical correctness of key components.
     """
-    import torch
     print("Running mathematical correctness tests...")
     
     # Test 1: Kernel derivative correctness
@@ -1482,8 +1495,14 @@ def test_mathematical_correctness():
     
     # Test 2: Probability flow ODE drift
     print("\n2. Testing probability flow ODE drift...")
+
+    # Wrap lambda in nn.Module for type safety
+    class SimpleScore(nn.Module):
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            return -x
+
     solver = EnhancedScoreBasedSBDiffusionSolver(
-        score_model=lambda x, t: -x,  # Simple score
+        score_model=SimpleScore(),
         noise_schedule=lambda t: np.exp(-5 * t),  # Exponential schedule
         device=torch.device('cpu')
     )
