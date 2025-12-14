@@ -8,7 +8,6 @@ from typing import Tuple
 import numpy as np
 import torch
 
-from .constants import EPSILON_CLAMP
 from .logger import logger
 
 # Try to import Triton acceleration
@@ -16,7 +15,7 @@ try:
     from .triton_kernels import TRITON_AVAILABLE, triton_sinkhorn_update
 except ImportError:
     TRITON_AVAILABLE = False
-    triton_sinkhorn_update = None
+    triton_sinkhorn_update = None  # type: ignore[assignment]
 
 __all__ = ["OptimizedSinkhornKernel"]
 
@@ -261,6 +260,10 @@ class OptimizedSinkhornKernel:
         y_sq = (y.float() * y.float()).sum(dim=1)
 
         # Sinkhorn iterations using Triton
+        # Note: triton_sinkhorn_update is guaranteed non-None here because
+        # _sinkhorn_triton is only called when use_triton=True, which requires
+        # TRITON_AVAILABLE=True and thus triton_sinkhorn_update is imported
+        assert triton_sinkhorn_update is not None, "Triton kernel not available"
         for _ in range(n_iter):
             # Update log_u
             log_u = triton_sinkhorn_update(
