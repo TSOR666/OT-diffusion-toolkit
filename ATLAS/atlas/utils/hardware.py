@@ -124,7 +124,7 @@ def _detect_cuda_capabilities() -> HardwareCapabilities:
     tf32_enabled = False
     if tf32_available:
         try:
-            tf32_enabled = torch.backends.cuda.matmul.allow_tf32
+            tf32_enabled = bool(torch.backends.cuda.matmul.allow_tf32)
         except AttributeError:
             tf32_enabled = False
 

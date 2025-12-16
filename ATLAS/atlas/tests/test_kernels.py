@@ -42,6 +42,38 @@ def test_rff_kernel_operator_shape() -> None:
     assert out.shape == v.shape
 
 
+def test_rff_kernel_operator_cauchy_clamps_extreme_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_randn(
+        *size: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+        **_: object,
+    ) -> torch.Tensor:
+        if not calls:
+            calls.append("numer")
+            return torch.full(size, 1e8, device=device, dtype=dtype)
+        calls.append("denom")
+        return torch.full(size, 1e-12, device=device, dtype=dtype)
+
+    monkeypatch.setattr(torch, "randn", fake_randn)
+
+    op = RFFKernelOperator(
+        input_dim=2,
+        feature_dim=8,
+        kernel_type="cauchy",
+        epsilon=1.0,
+        device=torch.device("cpu"),
+        orthogonal=False,
+        multi_scale=False,
+        seed=0,
+    )
+    assert len(calls) == 2
+    assert torch.isfinite(op.weights[0]).all()
+    assert float(op.weights[0].abs().max()) <= 1e4
+
+
 def test_nystrom_kernel_operator_shape() -> None:
     landmarks = _random_points(6, 4)
     op = NystromKernelOperator(

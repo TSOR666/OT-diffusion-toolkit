@@ -116,6 +116,9 @@ class RFFKernelOperator(KernelOperator):
                 # Clamp denominator away from zero to prevent inf
                 denom = torch.sign(denom) * torch.clamp(denom.abs(), min=1e-7)
                 weights = numer / denom
+                cauchy_clip = 1e4
+                weights = torch.nan_to_num(weights, nan=0.0, posinf=cauchy_clip, neginf=-cauchy_clip)
+                weights = torch.clamp(weights, min=-cauchy_clip, max=cauchy_clip)
             else:
                 raise ValueError(f"Unsupported kernel type for sampling: {self.kernel_type}")
         return weights * scale

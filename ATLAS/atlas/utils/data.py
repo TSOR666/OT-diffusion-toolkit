@@ -22,7 +22,7 @@ else:  # pragma: no cover - import path when torchvision available
     _TORCHVISION_ERROR = None
 
 
-def _build_transform(config: DatasetConfig) -> transforms.Compose:
+def _build_transform(config: DatasetConfig) -> Any:
     if transforms is None:
         raise ImportError(
             "torchvision is required for dataset transforms. Install torchvision or "
@@ -54,7 +54,10 @@ def _build_transform(config: DatasetConfig) -> transforms.Compose:
 def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Dataset[Any]:
     """Instantiate a dataset based on the provided configuration."""
 
-    split = split or config.extra.get("split", "train")
+    split_value = split
+    if split_value is None:
+        extra_split = config.extra.get("split")
+        split_value = extra_split if isinstance(extra_split, str) and extra_split else "train"
     transform = _build_transform(config)
     name = config.name.lower()
     root = Path(config.root)
@@ -80,7 +83,7 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
         target_type = config.extra.get("target_type", "attr")
         return datasets.CelebA(
             root=str(root),
-            split=split,
+            split=split_value,
             transform=transform,
             download=config.download,
             target_type=target_type,
@@ -128,16 +131,7 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
             ) from _TORCHVISION_ERROR
         size = config.fake_size or max((config.batch_size or 32) * 100, 1)
         image_size = (config.channels, config.resolution, config.resolution)
-        fake_transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.5] * config.channels,
-                    std=[0.5] * config.channels,
-                ),
-            ]
-        )
-        return datasets.FakeData(size=size, image_size=image_size, transform=fake_transform)
+        return datasets.FakeData(size=size, image_size=image_size, transform=transform)
 
     raise ValueError(
         f"Unsupported dataset '{config.name}'. "

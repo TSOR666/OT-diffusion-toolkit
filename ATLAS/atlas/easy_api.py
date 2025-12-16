@@ -405,6 +405,7 @@ class EasySampler:
         timesteps: int = 50,
         guidance_scale: float = 7.5,
         seed: Optional[int] = None,
+        *,
         return_intermediates: Literal[False] = False,
     ) -> torch.Tensor: ...
 
@@ -417,7 +418,8 @@ class EasySampler:
         timesteps: int = 50,
         guidance_scale: float = 7.5,
         seed: Optional[int] = None,
-        return_intermediates: Literal[True] = True,
+        *,
+        return_intermediates: Literal[True],
     ) -> tuple[torch.Tensor, list[torch.Tensor]]: ...
 
     def generate(
@@ -527,6 +529,7 @@ class EasySampler:
             remaining = total_samples - samples_generated
             current_batch_size = min(batch_size, remaining)
             attempt_batch = current_batch_size
+            batch_intermediates: list[torch.Tensor] = []
 
             while True:
                 shape = (attempt_batch, 4, latent_size, latent_size)

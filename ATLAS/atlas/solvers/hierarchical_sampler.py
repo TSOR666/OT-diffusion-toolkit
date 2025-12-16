@@ -228,6 +228,7 @@ class AdvancedHierarchicalDiffusionSampler:
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
         initial_state: Optional[torch.Tensor] = None,
+        *,
         return_intermediates: Literal[False] = False,
     ) -> torch.Tensor: ...
 
@@ -243,7 +244,8 @@ class AdvancedHierarchicalDiffusionSampler:
         prompts: Optional[List[str]] = None,
         negative_prompts: Optional[List[str]] = None,
         initial_state: Optional[torch.Tensor] = None,
-        return_intermediates: Literal[True] = True,
+        *,
+        return_intermediates: Literal[True],
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]: ...
 
     def sample(
@@ -415,6 +417,7 @@ class AdvancedHierarchicalDiffusionSampler:
                 )
 
             # Main sampling loop with error handling
+            idx = -1
             try:
                 for idx in iterator:
                     t_curr = float(schedule[idx])
