@@ -7,7 +7,7 @@ from collections import OrderedDict
 from contextlib import nullcontext
 from functools import partial
 from collections.abc import Callable
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
 import torch
@@ -1032,7 +1032,8 @@ class SchroedingerBridgeSolver:
             pairwise_weights: Optional[torch.Tensor] = None
             if callable(pairwise_kernel):
                 try:
-                    pairwise_weights = pairwise_kernel(z_flat, x_curr_flat)
+                    pairwise_fn = cast(Callable[[torch.Tensor, torch.Tensor], torch.Tensor], pairwise_kernel)
+                    pairwise_weights = pairwise_fn(z_flat, x_curr_flat)
                 except NotImplementedError:
                     pairwise_weights = None
                 except Exception as exc:  # pragma: no cover - defensive
@@ -1055,12 +1056,22 @@ class SchroedingerBridgeSolver:
                     raise RuntimeError("Transport map has zero-weight rows; cannot normalize.")
                 row_sums = torch.clamp(row_sums, min=1e-10)
                 P_zx_norm = P_zx / row_sums
-                row_sum_check = P_zx_norm.sum(dim=1)
+
+                # Second normalization pass to reduce fp16/accumulation drift.
+                row_sum_check = P_zx_norm.sum(dim=1, keepdim=True)
+                if not torch.all(row_sum_check > 0):
+                    raise RuntimeError(
+                        "Transport map has zero-weight rows after normalization; cannot renormalize."
+                    )
+                row_sum_check = torch.clamp(row_sum_check, min=1e-10)
+                P_zx_norm = P_zx_norm / row_sum_check
+
+                row_sum_check_flat = P_zx_norm.sum(dim=1)
                 atol = 1e-3 if P_zx_norm.dtype == torch.float16 else 1e-4
-                if not torch.allclose(row_sum_check, torch.ones_like(row_sum_check), atol=atol):
+                if not torch.allclose(row_sum_check_flat, torch.ones_like(row_sum_check_flat), atol=atol):
                     self.logger.warning(
                         "Row-stochasticity drift detected in transport map: max deviation %.3e",
-                        float(torch.max(torch.abs(row_sum_check - 1.0))),
+                        float(torch.max(torch.abs(row_sum_check_flat - 1.0))),
                     )
                 z_next = P_zx_norm @ x_next_flat  # (batch_z, batch_x) @ (batch_x, d) -> (batch_z, d)
             elif isinstance(kernel_op, FFTKernelOperator):
