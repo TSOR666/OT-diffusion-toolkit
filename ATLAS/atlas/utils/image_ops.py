@@ -9,17 +9,19 @@ __all__ = ["gaussian_blur", "separable_gaussian_blur"]
 
 _GaussianBlurFn = Callable[[torch.Tensor, list[int], Optional[list[float]]], torch.Tensor]
 
-_torch_gaussian_blur: _GaussianBlurFn | None
+_torch_gaussian_blur: _GaussianBlurFn | None = None
 try:
-    from torch.nn.functional import gaussian_blur as _torch_gaussian_blur  # type: ignore[attr-defined]
+    from torch.nn.functional import gaussian_blur as _imported_torch_blur  # type: ignore[attr-defined]
+    _torch_gaussian_blur = _imported_torch_blur
 except ImportError:  # pragma: no cover - older torch versions
-    _torch_gaussian_blur = None
+    pass
 
-_torchvision_gaussian_blur: _GaussianBlurFn | None
+_torchvision_gaussian_blur: _GaussianBlurFn | None = None
 try:
-    from torchvision.transforms.functional import gaussian_blur as _torchvision_gaussian_blur
+    from torchvision.transforms.functional import gaussian_blur as _imported_tv_blur
+    _torchvision_gaussian_blur = _imported_tv_blur
 except ImportError:  # pragma: no cover - optional torchvision dependency
-    _torchvision_gaussian_blur = None
+    pass
 
 
 def gaussian_blur(
