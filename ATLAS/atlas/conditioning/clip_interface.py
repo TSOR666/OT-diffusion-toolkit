@@ -30,7 +30,7 @@ class CLIPConditioningInterface:
 
     def _setup_clip(self) -> None:
         try:
-            import open_clip  # type: ignore[reportMissingImports]
+            import open_clip
         except ImportError:
             logging.warning("open_clip not found; CLIP conditioning disabled.")
             return
