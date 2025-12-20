@@ -24,13 +24,11 @@ logger = common.logger
 _randn_like_compat = common._randn_like_compat
 compile_function_fixed = common.compile_function_fixed
 TRITON_AVAILABLE = common.TRITON_AVAILABLE
-check_triton_availability = common.check_triton_availability
-log_sum_exp_stabilized = common.log_sum_exp_stabilized
+check_tensor_finite = common.check_tensor_finite
+nan_checks_enabled = common.nan_checks_enabled
 autocast = cast(Any, common).autocast
 AUTOCAST_AVAILABLE = common.AUTOCAST_AVAILABLE
 Version = cast(Any, common).Version
-NUMPY_AVAILABLE = common.NUMPY_AVAILABLE
-np = cast(Any, getattr(common, "np", None))
 TQDM_AVAILABLE = common.TQDM_AVAILABLE
 tqdm = cast(Any, common).tqdm
 launch_triton_kernel_safe = getattr(common, "launch_triton_kernel_safe", None)
@@ -68,7 +66,7 @@ class FastSBOTSolver(nn.Module):
         config: Optional[FastSBOTConfig] = None,
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         persistent_cache: Optional[Dict[str, MemoryEfficientCacheFixed]] = None
-    ):
+    ) -> None:
         """Initialize the FastSB-OT Solver with production polish and enhanced sampling."""
         super().__init__()
 
@@ -99,6 +97,9 @@ class FastSBOTSolver(nn.Module):
 
         self.kernel_module = KernelModule(self.config, device)
         self.transport_module = TransportModule(self.config, device)
+
+        self.momentum_transport: Optional[MomentumTransport] = None
+        self.hierarchical_bridge: Optional[HierarchicalBridge] = None
 
         if self.config.use_momentum_transport:
             self.momentum_transport = MomentumTransport(self.config.momentum_beta, device)
@@ -150,6 +151,8 @@ class FastSBOTSolver(nn.Module):
         self.noise_schedule_cache: Dict[float, float] = {}
         self._noise_schedule_lock = threading.Lock()
         self._warned_fft_determinism = False
+        self._cpu_autocast_warned = False
+        self._guidance_deprecated_warned = False
 
         # Validate noise schedule monotonicity
         self._validate_noise_schedule()
@@ -280,7 +283,7 @@ class FastSBOTSolver(nn.Module):
         elif self.device.type == "cpu" and AUTOCAST_AVAILABLE:
             # CPU autocast requires PyTorch 1.11+ for bfloat16 support
             allow = self.config.use_mixed_precision and Version(torch.__version__) >= Version("1.11")
-            if self.config.use_mixed_precision and not allow and not hasattr(self, '_cpu_autocast_warned'):
+            if self.config.use_mixed_precision and not allow and not self._cpu_autocast_warned:
                 logger.info("CPU autocast disabled: PyTorch < 1.11 doesn't support bfloat16 autocast on CPU. "
                             "Upgrade to PyTorch 1.11+ for CPU mixed precision support.")
                 self._cpu_autocast_warned = True
@@ -351,7 +354,7 @@ class FastSBOTSolver(nn.Module):
             with self._amp_ctx():
                 _ = self.score_model(x, t)
 
-        if self.config.use_momentum_transport:
+        if self.momentum_transport is not None:
             self.momentum_transport.reset_velocity()
 
         if os.environ.get('FASTSBOT_WARMUP_SYNC', '0') == '1':
@@ -395,6 +398,8 @@ class FastSBOTSolver(nn.Module):
 
         POLISH: Suppresses strict mode warning when called from sample_improved
         """
+        if nan_checks_enabled(self.config):
+            check_tensor_finite("x", x, enabled=True)
         # POLISH: Smarter strict mode warning - don't warn from sample_improved
         if cache_key is None:
             if (os.environ.get("FASTSBOT_STRICT", "0") == "1" and
@@ -506,6 +511,10 @@ class FastSBOTSolver(nn.Module):
 
     def compute_score_patches_fixed(self, x: torch.Tensor, t: float, run_uid: Optional[int] = None) -> torch.Tensor:
         """Patch processing with TIME in cache key"""
+        if nan_checks_enabled(self.config):
+            check_tensor_finite("x", x, enabled=True)
+        if x.dim() != 4:
+            raise ValueError("compute_score_patches_fixed expects 4D input (B,C,H,W)")
         B, C, H, W = x.shape
 
         if H * W < 256 * 256:
@@ -653,11 +662,44 @@ class FastSBOTSolver(nn.Module):
 
     # ENHANCED SAMPLING METHODS
 
+    def _quantile_deterministic(
+        self,
+        values: torch.Tensor,
+        q: float,
+        dim: int,
+        keepdim: bool = True,
+    ) -> torch.Tensor:
+        """Deterministic quantile fallback using sort + linear interpolation."""
+        if not (0.0 <= q <= 1.0):
+            raise ValueError(f"quantile q must be in [0,1], got {q}")
+        if values.numel() == 0:
+            raise ValueError("quantile requires a non-empty tensor")
+
+        sorted_vals, _ = torch.sort(values, dim=dim)
+        n = values.shape[dim]
+        if n == 1:
+            out = sorted_vals
+        else:
+            rank = q * (n - 1)
+            lower = int(math.floor(rank))
+            upper = min(n - 1, lower + 1)
+            if lower == upper:
+                out = sorted_vals.select(dim, lower)
+            else:
+                lower_val = sorted_vals.select(dim, lower)
+                upper_val = sorted_vals.select(dim, upper)
+                out = lower_val + (upper_val - lower_val) * (rank - lower)
+        if keepdim and out.dim() < values.dim():
+            out = out.unsqueeze(dim)
+        return out
+
     def dynamic_threshold(self, x0_pred: torch.Tensor, percentile: Optional[float] = None) -> torch.Tensor:
         """Dynamic thresholding for stable sampling
 
         POLISH: Added adaptive floor option
         """
+        if nan_checks_enabled(self.config):
+            check_tensor_finite("x0_pred", x0_pred, enabled=True)
         if percentile is None:
             percentile = self.config.dynamic_thresholding_percentile
 
@@ -674,16 +716,8 @@ class FastSBOTSolver(nn.Module):
                 dim=1,
                 keepdim=True
             )
-        except AttributeError:
-            # Fallback for old PyTorch without quantile
-            if NUMPY_AVAILABLE:
-                s_np = np.quantile(x0_pred_flat.abs().cpu().numpy(), percentile, axis=1, keepdims=True)
-                s = torch.tensor(s_np, device=x0_pred.device, dtype=torch.float32)
-            else:
-                # Ultra-fallback: use kthvalue
-                k = max(1, int(percentile * x0_pred_flat.shape[1]))
-                s = x0_pred_flat.abs().kthvalue(k, dim=1, keepdim=True).values
-        # Note: fallback paths (NumPy/kthvalue) can yield slightly different thresholds across versions.
+        except (AttributeError, TypeError, RuntimeError):
+            s = self._quantile_deterministic(x0_pred_flat.abs(), percentile, dim=1, keepdim=True)
 
         # POLISH: Adaptive floor based on content
         if self.config.dynamic_thresholding_adaptive_floor:
@@ -871,11 +905,17 @@ class FastSBOTSolver(nn.Module):
     ) -> torch.Tensor:
         """Improved sampling with better score matching and DDIM support
 
+        Shapes:
+            - shape/init_samples: (B, C, H, W)
+            - return: (B, C, H, W)
+
         POLISH: Fixed guidance to scale score direction, not just noise
         """
         # Ensure no autograd for memory efficiency
         no_grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
         with no_grad_ctx():
+            if len(shape) != 4:
+                raise ValueError(f"shape must be (B, C, H, W), got {shape}")
             # Use config defaults if not specified
             if guidance_scale is None:
                 guidance_scale = self.config.guidance_scale
@@ -883,6 +923,7 @@ class FastSBOTSolver(nn.Module):
                 use_ddim = self.config.use_ddim_sampling
             if eta is None:
                 eta = self.config.ddim_eta
+            nan_checks = nan_checks_enabled(self.config)
 
             # Validate timesteps
             if len(timesteps) < 2:
@@ -929,6 +970,12 @@ class FastSBOTSolver(nn.Module):
 
             # Initialize samples
             if init_samples is not None:
+                if tuple(init_samples.shape) != tuple(shape):
+                    raise ValueError(
+                        f"init_samples shape {tuple(init_samples.shape)} does not match requested shape {shape}"
+                    )
+                if nan_checks:
+                    check_tensor_finite("init_samples", init_samples, enabled=True)
                 x_t = init_samples.to(self.device, non_blocking=True)
             else:
                 gen = getattr(self.config, 'generator', None)
@@ -939,9 +986,13 @@ class FastSBOTSolver(nn.Module):
                     x_t = x_t.contiguous(memory_format=torch.channels_last)
                 except TypeError:
                     x_t = x_t.contiguous()
+            if nan_checks:
+                check_tensor_finite("x_t", x_t, enabled=True)
+            if nan_checks:
+                check_tensor_finite("x_t", x_t, enabled=True)
 
             # Reset momentum if using momentum transport
-            if self.config.use_momentum_transport:
+            if self.momentum_transport is not None:
                 self.momentum_transport.reset_velocity()
 
             # Create iterator
@@ -982,7 +1033,7 @@ class FastSBOTSolver(nn.Module):
                     x_t = self.ddpm_step_improved(x_t, guided_noise, t_curr, t_next)
 
                 # No-NaN invariant check for debugging
-                if not torch.isfinite(x_t).all():
+                if nan_checks and not torch.isfinite(x_t).all():
                     raise RuntimeError(
                         f"NaN/Inf detected in sampling at step transition "
                         f"t_curr={t_curr:.4f} -> t_next={t_next:.4f}. "
@@ -1003,6 +1054,8 @@ class FastSBOTSolver(nn.Module):
 
             # Final clamping
             x_t = torch.clamp(x_t, -1, 1)
+            if nan_checks:
+                check_tensor_finite("samples", x_t, enabled=True)
 
             return x_t
 
@@ -1016,7 +1069,7 @@ class FastSBOTSolver(nn.Module):
         POLISH: Using clearer variable names (alpha_bar_t)
         """
         # Warn about deprecated API
-        if not hasattr(self, '_guidance_deprecated_warned'):
+        if not self._guidance_deprecated_warned:
             logger.info("apply_guidance() is deprecated. The improved sampling path in sample_improved() "
                         "now applies guidance before each step. Consider using sample_improved() instead.")
             self._guidance_deprecated_warned = True
@@ -1288,12 +1341,12 @@ class FastSBOTSolver(nn.Module):
             return drift_aux.to(base.dtype)
 
         # Hierarchical bridge transport
-        if self.config.use_hierarchical_bridge and x_new.dim() == 4:
+        if self.hierarchical_bridge is not None and x_new.dim() == 4:
             drift = _aux_drift(x_new)
             x_new = self.hierarchical_bridge.compute_multiscale_transport(x_new, drift, alpha_bar_val)
 
         # Momentum transport
-        if self.config.use_momentum_transport:
+        if self.momentum_transport is not None:
             drift = _aux_drift(x_new)
             x_new = self.momentum_transport.apply_transport(x_new, drift, alpha_bar_val)
 
@@ -1320,6 +1373,10 @@ class FastSBOTSolver(nn.Module):
 
         Returns:
             Final samples or (samples, trajectory) if return_trajectory=True
+
+        Shapes:
+            - shape/init_samples: (B, C, H, W)
+            - return: (B, C, H, W)
         """
         # Use no_grad for memory efficiency
         no_grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
@@ -1328,6 +1385,7 @@ class FastSBOTSolver(nn.Module):
                 raise ValueError("timesteps must have length  2")
             if len(shape) != 4:
                 raise ValueError(f"shape must be (B, C, H, W), got {shape}")
+            nan_checks = nan_checks_enabled(self.config)
 
             # Proper discrete timestep conversion
             if self.config.discrete_timesteps:
@@ -1357,6 +1415,8 @@ class FastSBOTSolver(nn.Module):
                     raise ValueError(
                         f"init_samples shape {tuple(init_samples.shape)} does not match requested shape {shape}"
                     )
+                if nan_checks:
+                    check_tensor_finite("init_samples", init_samples, enabled=True)
                 x_t = init_samples.to(self.device, dtype=self.amp_dtype, non_blocking=True)
             else:
                 gen = getattr(self.config, 'generator', None)
@@ -1371,31 +1431,40 @@ class FastSBOTSolver(nn.Module):
             trajectory = [x_t.clone()] if return_trajectory else []
 
             # Precompute FFT kernels if needed
-            if x_t.dim() == 4 and x_t.shape[-1] >= 64:
+            kernel_fft = None
+            freq_weights = None
+            use_fft = self.config.use_fft_transport and x_t.dim() == 4 and x_t.shape[-1] >= 64
+            if use_fft:
                 deterministic_enabled = False
                 if hasattr(torch, "are_deterministic_algorithms_enabled"):
                     deterministic_enabled = torch.are_deterministic_algorithms_enabled()
                 deterministic_enabled = deterministic_enabled or bool(self.config.deterministic)
                 deterministic_enabled = deterministic_enabled or os.environ.get("FASTSBOT_DETERMINISTIC") == "1"
-                if deterministic_enabled and x_t.is_cuda and not self._warned_fft_determinism:
-                    logger.warning(
-                        "Deterministic mode requested with FFT-based transport; CUDA FFTs may be nondeterministic."
-                    )
-                    self._warned_fft_determinism = True
+                if deterministic_enabled and self.config.deterministic_fft_fallback:
+                    if not self._warned_fft_determinism:
+                        logger.warning(
+                            "Deterministic mode requested; disabling FFT transport. "
+                            "Set deterministic_fft_fallback=False to allow FFT transport."
+                        )
+                        self._warned_fft_determinism = True
+                else:
+                    if deterministic_enabled and x_t.is_cuda and not self._warned_fft_determinism:
+                        logger.warning(
+                            "Deterministic mode requested with FFT-based transport; CUDA FFTs may be nondeterministic. "
+                            "Set use_fft_transport=False for deterministic fallback."
+                        )
+                        self._warned_fft_determinism = True
 
-                sigma = 0.25 * max(x_t.shape[-2:])
-                kernel_fft = self.kernel_module.compute_gaussian_kernel_fft(
-                    x_t.shape[2:], sigma, x_t.device
-                )
-                freq_weights = self.kernel_module.get_frequency_weights(
-                    x_t.shape[2:], str(x_t.device)
-                ) if self.config.freq_weighting else None
-            else:
-                kernel_fft = None
-                freq_weights = None
+                    sigma = 0.25 * max(x_t.shape[-2:])
+                    kernel_fft = self.kernel_module.compute_gaussian_kernel_fft(
+                        x_t.shape[2:], sigma, x_t.device
+                    )
+                    freq_weights = self.kernel_module.get_frequency_weights(
+                        x_t.shape[2:], str(x_t.device)
+                    ) if self.config.freq_weighting else None
 
             # Reset momentum
-            if self.config.use_momentum_transport:
+            if self.momentum_transport is not None:
                 self.momentum_transport.reset_velocity()
 
             # Main sampling loop
@@ -1448,6 +1517,8 @@ class FastSBOTSolver(nn.Module):
 
             # Final clamp
             x_t = torch.clamp(x_t, -1, 1)
+            if nan_checks:
+                check_tensor_finite("samples", x_t, enabled=True)
 
             if return_trajectory:
                 trajectory.append(x_t)
@@ -1472,7 +1543,15 @@ class FastSBOTSolver(nn.Module):
 
         Returns:
             Transported samples
+
+        Shapes:
+            - source_batch/target_batch: (B, C, H, W)
+            - return: (B, C, H, W)
         """
+        nan_checks = nan_checks_enabled(self.config)
+        if nan_checks:
+            check_tensor_finite("source_batch", source_batch, enabled=True)
+            check_tensor_finite("target_batch", target_batch, enabled=True)
         if source_batch.shape != target_batch.shape:
             raise ValueError(f"Shape mismatch: source {source_batch.shape} != target {target_batch.shape}")
 
@@ -1653,7 +1732,7 @@ class FastSBOTSolver(nn.Module):
         self.kernel_module.fisher_cache.reset()
         self._overlap_cache.clear()
 
-        if hasattr(self, 'momentum_transport'):
+        if self.momentum_transport is not None:
             self.momentum_transport.reset_velocity()
 
         if torch.cuda.is_available():

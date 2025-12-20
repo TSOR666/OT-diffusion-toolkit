@@ -44,4 +44,10 @@ packages = ["fastsb_ot"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-testpaths = ["fastsb_ot/tests"]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["fastsb_ot"]
+mypy_path = ["typings"]

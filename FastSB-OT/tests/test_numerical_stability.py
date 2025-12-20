@@ -57,20 +57,16 @@ class TestCatastrophicInputs:
         x_nan = torch.full((2, 3, 32, 32), float('nan'), device=device)
         noise_pred = torch.randn_like(x_nan)
 
-        # DDIM should handle NaN gracefully (may produce NaN output, but shouldn't crash)
-        x_next = solver.ddim_step(x_nan, noise_pred, t_curr=0.5, t_next=0.4, eta=0.0)
-        # The result will contain NaN, which should be caught by invariant check in sampling
-        assert not torch.isfinite(x_next).all()
+        with pytest.raises(ValueError):
+            _ = solver.ddim_step(x_nan, noise_pred, t_curr=0.5, t_next=0.4, eta=0.0)
 
     def test_inf_input_handling(self, solver, device):
         """Solver should handle Inf inputs without crashing."""
         x_inf = torch.full((2, 3, 32, 32), float('inf'), device=device)
         noise_pred = torch.randn_like(x_inf)
 
-        # Should produce output (may be inf, but shouldn't crash)
-        x_next = solver.ddim_step(x_inf, noise_pred, t_curr=0.5, t_next=0.4, eta=0.0)
-        # Check it didn't crash (even if result is inf)
-        assert x_next.shape == x_inf.shape
+        with pytest.raises(ValueError):
+            _ = solver.ddim_step(x_inf, noise_pred, t_curr=0.5, t_next=0.4, eta=0.0)
 
     def test_extreme_magnitude_inputs(self, solver, device):
         """Test solver with very large/small magnitude inputs."""
@@ -215,6 +211,35 @@ class TestDivisionByZeroProtection:
         # overlap_count would be 1 everywhere (not 0), so this is safe.
         # The validation catches misconfiguration, not normal use.
         pass  # Validation exists, tested via code review
+
+
+class TestMixedPrecisionEdgeCases:
+    """Mixed precision stability coverage."""
+
+    def test_sample_improved_mixed_precision(self, noise_schedule):
+        """Ensure mixed precision sampling stays finite."""
+        if not torch.cuda.is_available():
+            pytest.skip("Mixed precision test requires CUDA")
+        device = torch.device("cuda")
+
+        config = FastSBOTConfig(
+            quality="draft",
+            use_mixed_precision=True,
+            warmup=False,
+            use_dynamic_compilation=False,
+            use_triton_kernels=False,
+            use_momentum_transport=False,
+            use_hierarchical_bridge=False,
+            seed=123,
+        )
+        model = MockScoreModel().to(device)
+        solver = FastSBOTSolver(model, noise_schedule, config, device)
+
+        shape = (1, 3, 16, 16)
+        timesteps = [1.0, 0.5, 0.0]
+        samples = solver.sample_improved(shape, timesteps, verbose=False, use_ddim=True, eta=0.0)
+
+        assert torch.isfinite(samples).all()
 
 
 if __name__ == "__main__":

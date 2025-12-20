@@ -29,10 +29,10 @@ class TestSlicedOT:
 
     def test_sliced_ot_deterministic(self, device):
         """Test sliced OT is deterministic with same generator."""
-        gen1 = torch.Generator(device='cpu')
+        gen1 = torch.Generator(device=device)
         gen1.manual_seed(42)
 
-        gen2 = torch.Generator(device='cpu')
+        gen2 = torch.Generator(device=device)
         gen2.manual_seed(42)
 
         ot1 = SlicedOptimalTransport(generator=gen1)
@@ -83,6 +83,22 @@ class TestSlicedOT:
         expected = 1.0 / N
         torch.testing.assert_close(row_sums, torch.full_like(row_sums, expected), rtol=1e-2, atol=1e-2)
         torch.testing.assert_close(col_sums, torch.full_like(col_sums, expected), rtol=1e-2, atol=1e-2)
+
+    def test_sinkhorn_mass_validation_trips(self, device):
+        """Test mass conservation validation catches non-converged plans."""
+        ot = SlicedOptimalTransport(
+            sinkhorn_iters=1,
+            sinkhorn_tol=1e-9,
+            runtime_asserts=True,
+            sinkhorn_mass_tolerance=1e-6
+        )
+
+        x = torch.randn(1, 20, 2, device=device)
+        y = torch.randn(1, 20, 2, device=device)
+        C = torch.sum((x.unsqueeze(2) - y.unsqueeze(1)) ** 2, dim=-1)
+
+        with pytest.raises(ValueError):
+            _ = ot._sinkhorn_batch_fixed(C, eps=0.1)
 
     def test_barycentric_projection(self, device):
         """Test barycentric projection is correctly normalized."""

@@ -7,6 +7,10 @@ from typing import Callable, Protocol, Union
 import torch
 import torch.nn as nn
 
+from . import common
+
+check_tensor_finite = common.check_tensor_finite
+nan_checks_enabled = common.nan_checks_enabled
 __all__ = [
     "NoisePredictorToScoreWrapper",
     "wrap_noise_predictor",
@@ -44,6 +48,8 @@ class NoisePredictorToScoreWrapper(nn.Module):
             self.to(device)
 
     def forward(self, x: torch.Tensor, t: Union[torch.Tensor, float]) -> torch.Tensor:
+        if nan_checks_enabled(None):
+            check_tensor_finite("x", x, enabled=True)
         eps = self.noise_model(x, t)
         sigma = self._sigma_from_t(t, x)
 

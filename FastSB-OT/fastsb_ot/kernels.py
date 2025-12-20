@@ -23,6 +23,8 @@ fused_drift_transport_kernel_fixed = getattr(common, "fused_drift_transport_kern
 fisher_diagonal_kernel_fixed = getattr(common, "fisher_diagonal_kernel_fixed", None)
 check_triton_availability = common.check_triton_availability
 get_optimal_block_size = common.get_optimal_block_size
+check_tensor_finite = common.check_tensor_finite
+nan_checks_enabled = common.nan_checks_enabled
 
 __all__ = ["KernelModule"]
 
@@ -30,7 +32,7 @@ __all__ = ["KernelModule"]
 class KernelModule(nn.Module):
     """Optimized kernel operations module with Fisher geometry support"""
 
-    def __init__(self, config: FastSBOTConfig, device: torch.device):
+    def __init__(self, config: FastSBOTConfig, device: torch.device) -> None:
         super().__init__()
         self.config = config
         self.device = device
@@ -63,7 +65,12 @@ class KernelModule(nn.Module):
         self.register_buffer('gaussian_kernel', gaussian_kernel.view(1, 1, 3, 3), persistent=False)
 
     def compute_gaussian_kernel_fft(self, shape: Tuple[int, ...], sigma: float, device: torch.device) -> torch.Tensor:
-        """Cache frequency grids with LRU, device-agnostic"""
+        """Cache frequency grids with LRU, device-agnostic.
+
+        Shapes:
+            - shape: spatial dims (H, W) or (D, H, W)
+            - return: rFFT grid shaped to match rfftn output
+        """
         sigma = max(1e-3, round(float(sigma), 4))
 
         cache_key = (*shape, sigma, str(device))
@@ -176,7 +183,14 @@ class KernelModule(nn.Module):
             score: current score estimate
             t: a scalar used only for cache bucketing (can be 0.0 if alpha is provided)
             alpha: (t) value; mandatory for non-linear schedules to avoid incorrect scaling
+
+        Shapes:
+            - x, score: same shape (B, C, H, W) or (B, N, d)
+            - return: same shape as score
         """
+        if nan_checks_enabled(self.config):
+            check_tensor_finite("x", x, enabled=True)
+            check_tensor_finite("score", score, enabled=True)
         if alpha is None:
             raise ValueError(
                 "alpha must be provided to estimate_fisher_diagonal; falling back to alpha=1-t "

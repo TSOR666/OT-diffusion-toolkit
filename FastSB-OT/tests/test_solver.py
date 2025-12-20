@@ -4,6 +4,7 @@ import math
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from fastsb_ot import FastSBOTConfig, FastSBOTSolver, make_schedule
 from fastsb_ot.kernels import KernelModule
@@ -357,6 +358,76 @@ class TestRegressionGaps:
 
         assert score.grad is not None
         assert torch.isfinite(score.grad).all()
+
+
+class TestCheckpointAndOverfit:
+    """Checkpoint round-trip and tiny overfit coverage."""
+
+    def test_overfit_tiny_model(self, device):
+        """Ensure a tiny model can overfit a single batch."""
+        torch.manual_seed(0)
+        model = MockScoreModel().to(device)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.2)
+
+        x = torch.randn(2, 3, 8, 8, device=device)
+        target = torch.zeros_like(x)
+        t = torch.tensor([0.5, 0.5], device=device)
+
+        loss_start = F.mse_loss(model(x, t), target).item()
+        for _ in range(25):
+            optimizer.zero_grad(set_to_none=True)
+            loss = F.mse_loss(model(x, t), target)
+            loss.backward()
+            optimizer.step()
+        loss_end = F.mse_loss(model(x, t), target).item()
+
+        assert loss_end < loss_start
+
+    def test_checkpoint_roundtrip(self, noise_schedule, device, tmp_path):
+        """Ensure checkpoint save/load preserves model outputs used by the solver."""
+        model = MockScoreModel().to(device)
+        cfg = FastSBOTConfig(
+            quality="draft",
+            warmup=False,
+            use_mixed_precision=False,
+            use_dynamic_compilation=False,
+            use_triton_kernels=False,
+            use_momentum_transport=False,
+            use_hierarchical_bridge=False,
+            seed=123,
+        )
+        solver = FastSBOTSolver(model, noise_schedule, cfg, device)
+
+        x = torch.randn(1, 3, 8, 8, device=device)
+        score_before = solver.compute_score_cached(x, 0.5)
+
+        ckpt_path = tmp_path / "model.pt"
+        torch.save(model.state_dict(), ckpt_path)
+
+        model_loaded = MockScoreModel().to(device)
+        state = torch.load(ckpt_path, map_location=device)
+        model_loaded.load_state_dict(state)
+        solver_loaded = FastSBOTSolver(model_loaded, noise_schedule, cfg, device)
+
+        score_after = solver_loaded.compute_score_cached(x, 0.5)
+        torch.testing.assert_close(score_before, score_after)
+
+
+class TestDeterministicFallbacks:
+    """Tests for deterministic fallback paths."""
+
+    def test_dynamic_threshold_fallback_deterministic(self, solver, device, monkeypatch):
+        """Fallback quantile path should be deterministic."""
+        def _raise_quantile(*args, **kwargs):
+            raise AttributeError("quantile not available")
+
+        monkeypatch.setattr(torch, "quantile", _raise_quantile)
+        x = torch.randn(2, 3, 4, 4, device=device)
+
+        out1 = solver.dynamic_threshold(x)
+        out2 = solver.dynamic_threshold(x)
+
+        torch.testing.assert_close(out1, out2)
 
 
 if __name__ == "__main__":
