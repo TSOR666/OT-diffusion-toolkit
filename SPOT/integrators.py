@@ -173,31 +173,37 @@ class DDIMIntegrator:
 
             # Correct formula: x0 = (x + sigma^2 * score) / alpha
             pred_x0 = (x.float() + sigma_curr_sq.to(x.device) * score.float()) / (alpha_curr_32.to(x.device) + EPSILON_CLAMP)
-            pred_x0 = pred_x0.to(x.dtype)
+            score_32 = score.float()
+            # Convert score -> epsilon (noise prediction).
+            epsilon = -sigma_curr_32 * score_32
 
-        # Compute direction pointing to x_t
-        # The noise component is ε = -σ * score
-        sigma_next_sq = (sigma_next.to(x.dtype) ** 2)
-        direction = -sigma_next_sq * score
+            alpha_next_32 = alpha_next.float()
+            sigma_next_32 = sigma_next.float()
+            sigma_next_sq = sigma_next_32 ** 2
 
-        # DDIM sampling formula: x_{t+1} = α_{t+1} * x_0 + σ_{t+1} * ε
-        x_next = alpha_next.to(x.dtype) * pred_x0 + direction
-
-        # Add stochastic component if eta > 0
-        if self.eta > 0 and t_next > 0:
-            sigma_eta = (
-                self.eta
-                * ((sigma_next ** 2 - sigma_curr ** 2 * (sigma_next / sigma_curr) ** 2).sqrt())
-            ).to(x.dtype)
-
-            if generator is not None:
-                noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
+            if self.eta > 0 and t_next > 0:
+                alpha_curr_sq = alpha_curr_32 ** 2
+                alpha_next_sq = alpha_next_32 ** 2
+                ratio = sigma_next_sq / (sigma_curr_sq + EPSILON_CLAMP)
+                alpha_ratio_sq = alpha_curr_sq / (alpha_next_sq + EPSILON_CLAMP)
+                sigma_eta_sq = (self.eta ** 2) * ratio * (1.0 - alpha_ratio_sq).clamp_min(0.0)
             else:
-                noise = torch.randn_like(x)
+                sigma_eta_sq = torch.zeros_like(sigma_next_sq)
 
-            x_next = x_next + sigma_eta * noise
+            sigma_hat = (sigma_next_sq - sigma_eta_sq).clamp_min(0.0).sqrt()
 
-        return x_next
+            # DDIM sampling formula: x_{t+1} = alpha_{t+1} * x_0 + sigma_hat * epsilon + sigma_eta * z
+            x_next = alpha_next_32 * pred_x0 + sigma_hat * epsilon
+
+            if self.eta > 0 and t_next > 0:
+                sigma_eta = sigma_eta_sq.sqrt()
+                if generator is not None:
+                    noise = torch.randn(x.shape, device=x.device, dtype=torch.float32, generator=generator)
+                else:
+                    noise = torch.randn(x.shape, device=x.device, dtype=torch.float32)
+                x_next = x_next + sigma_eta * noise
+
+        return x_next.to(x.dtype)
 
 
 class AdaptiveIntegrator:
