@@ -1103,8 +1103,8 @@ class ProductionSPOTSolver:
 
                             beta_t = self.noise_schedule.beta(t_tensor).to(x.dtype)
                             
-                            # Probability-flow ODE drift: -0.5 * beta * x - 0.5 * beta * score
-                            return -0.5 * beta_t * x - 0.5 * beta_t * s
+                            # Probability-flow ODE drift: -0.5 * beta * x - beta * score
+                            return -0.5 * beta_t * x - beta_t * s
                         
                         def compute_eps_at(t_scalar):
                             eps_base = self.config.eps

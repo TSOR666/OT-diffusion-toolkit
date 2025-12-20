@@ -92,13 +92,13 @@ class HeunIntegrator:
         beta_curr = _beta_from_schedule(self.schedule, t_curr)
         beta_next = _beta_from_schedule(self.schedule, t_next)
 
-        # Probability-flow ODE drift: -0.5*beta*x - 0.5*beta*score
-        drift_curr = -0.5 * beta_curr * x - 0.5 * beta_curr * score_curr
+        # Probability-flow ODE drift: -0.5*beta*x - beta*score
+        drift_curr = -0.5 * beta_curr * x - beta_curr * score_curr
         x_pred = x + drift_curr * dt
 
         # Corrector step (evaluate score at predicted point)
         score_next = score_fn(x_pred, t_next)
-        drift_next = -0.5 * beta_next * x_pred - 0.5 * beta_next * score_next
+        drift_next = -0.5 * beta_next * x_pred - beta_next * score_next
 
         # Trapezoidal rule (average of drifts)
         x_next = x + 0.5 * (drift_curr + drift_next) * dt
@@ -347,7 +347,7 @@ class AdaptiveIntegrator:
         def drift(x_val, t_val):
             beta = _beta_from_schedule(self.schedule, float(t_val))
             score = score_fn(x_val, t_val)
-            return -0.5 * beta * x_val - 0.5 * beta * score
+            return -0.5 * beta * x_val - beta * score
 
         # Simple embedded RK method (Heun with Euler comparison)
         k1 = drift(x, t)
@@ -395,7 +395,7 @@ class EulerIntegrator:
     ) -> torch.Tensor:
         """Take one explicit Euler step.
 
-        Probability-flow ODE drift: f(x,t) = -0.5*beta(t)*x - 0.5*beta(t)*score(x,t)
+        Probability-flow ODE drift: f(x,t) = -0.5*beta(t)*x - beta(t)*score(x,t)
 
         Args:
             x: Current state
@@ -413,7 +413,7 @@ class EulerIntegrator:
 
         # Explicit Euler update
         dt = t_next - t_curr
-        drift = -0.5 * beta_curr * x - 0.5 * beta_curr * score
+        drift = -0.5 * beta_curr * x - beta_curr * score
         x_next = x + drift * dt
 
         return x_next
