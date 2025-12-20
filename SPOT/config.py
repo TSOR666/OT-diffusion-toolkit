@@ -4,8 +4,6 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 
-from .constants import DEFAULT_DPM_ORDER, DEFAULT_SINKHORN_ITERATIONS
-
 __all__ = ["SolverConfig"]
 
 

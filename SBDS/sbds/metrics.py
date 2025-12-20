@@ -5,20 +5,31 @@ from __future__ import annotations
 import json
 import time
 import warnings
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, TypedDict, Union
 
 import numpy as np
 import torch
 
 
+class _MetricsDict(TypedDict):
+    """Type definition for metrics dictionary."""
+
+    step_times: List[float]
+    timesteps: List[float]
+    transport_costs: List[float]
+    memory_usage: List[float]
+    module_flops: Dict[str, List[float]]
+    convergence_rates: List[float]
+
+
 class MetricsLogger:
     """Logger for tracking performance metrics during sampling."""
 
-    def __init__(self, log_file: Optional[str] = None):
+    def __init__(self, log_file: Optional[str] = None) -> None:
         """Initialize the metrics logger."""
 
         self.log_file = log_file
-        self.metrics = {
+        self.metrics: _MetricsDict = {
             "step_times": [],
             "timesteps": [],
             "transport_costs": [],
@@ -26,7 +37,7 @@ class MetricsLogger:
             "module_flops": {},
             "convergence_rates": [],
         }
-        self.step_start_time = None
+        self.step_start_time: Optional[float] = None
 
     def start_step(self) -> None:
         """Mark the start of a sampling step."""
@@ -58,13 +69,13 @@ class MetricsLogger:
 
         self.step_start_time = None
 
-    def log_module_flops(self, module_name: str, flops: float) -> None:
+    def log_module_flops(self, module_name: str, flops: Union[int, float, np.integer[Any], np.floating[Any]]) -> None:
         """Log approximate FLOPs for a module."""
 
         if module_name not in self.metrics["module_flops"]:
             self.metrics["module_flops"][module_name] = []
 
-        self.metrics["module_flops"][module_name].append(float(self._to_float(flops)))
+        self.metrics["module_flops"][module_name].append(float(flops))
 
     def log_convergence_rate(self, rate: float) -> None:
         """Log convergence rate for theoretical analysis."""

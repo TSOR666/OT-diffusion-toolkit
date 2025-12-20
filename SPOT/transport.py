@@ -26,10 +26,11 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
     # Ensure stride is at least 1 to avoid division by zero
     stride = stride or max(1, patch_size // 2)
 
-    unfold_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.nn.Unfold] = {}
-    fold_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.nn.Fold] = {}
+    # Cache key: (C, H, W, patch_size, stride, device, dtype)
+    unfold_cache: Dict[Tuple[int, int, int, int, int, torch.device, torch.dtype], torch.nn.Unfold] = {}
+    fold_cache: Dict[Tuple[int, int, int, int, int, torch.device, torch.dtype], torch.nn.Fold] = {}
     # Store norm in fp32 to avoid precision loss when normalizing overlapping patches
-    norm_cache: Dict[Tuple[int, int, int, int, torch.device, torch.dtype], torch.Tensor] = {}
+    norm_cache: Dict[Tuple[int, int, int, int, int, torch.device, torch.dtype], torch.Tensor] = {}
 
     def factory(x_img: torch.Tensor, y_img: torch.Tensor, eps: float):
         if x_img.dim() != 4 or y_img.dim() != 4:

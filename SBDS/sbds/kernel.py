@@ -13,6 +13,10 @@ import torch.nn as nn
 class KernelDerivativeRFF(nn.Module):
     """Random Fourier Feature approximation supporting kernel derivatives."""
 
+    # Type hints for registered buffers
+    weights: torch.Tensor
+    offset: torch.Tensor
+
     def __init__(
         self,
         input_dim: int,
