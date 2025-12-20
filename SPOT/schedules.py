@@ -127,9 +127,12 @@ class LinearSchedule:
         return alpha.to(self.dtype), sigma.to(self.dtype)
 
     def lambda_(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
-        alpha, sigma = self.alpha_sigma(t)
-        a32, s32 = alpha.float(), sigma.float()
-        out = torch.log((a32 * a32) / (s32 * s32 + EPSILON_CLAMP))
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
+        beta0, beta1 = self.beta_start, self.beta_end
+        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32
+        alpha_bar = torch.exp(-integral)
+        sigma_sq = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)
+        out = torch.log(alpha_bar / sigma_sq)
         if __debug__:
             assert out.dtype == torch.float32, f"(t) must be fp32, got {out.dtype}"
         return out
@@ -144,8 +147,10 @@ class LinearSchedule:
         beta_t = self.beta_start + (self.beta_end - self.beta_start) * t32
 
         # Relation for VP-style schedules: -d lambda/dt = beta(t) / (1 - alpha_bar(t))
-        alpha, _ = self.alpha_sigma(t32)
-        alpha_bar = (alpha.float() * alpha.float()).clamp(0.0, 1.0)
+        # Compute alpha_bar in float32 directly to avoid precision loss for small variances.
+        beta0, beta1 = self.beta_start, self.beta_end
+        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32
+        alpha_bar = torch.exp(-integral)
         denom = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)
         beta_lambda = beta_t / denom
 
