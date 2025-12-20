@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """
 FastSB-OT: Production Solver - FINAL POLISHED+
 Core solver implementation with all critical patches, production hardening, and final polish.
@@ -24,9 +23,24 @@ import json
 import inspect
 import threading
 import logging
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from contextlib import contextmanager
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
+    cast,
+)
 from collections import OrderedDict
 from functools import wraps
+
+triton: Any
+tl: Any
 
 # CORRECTNESS FIX: Fallback for packaging import
 try:
@@ -40,6 +54,7 @@ except Exception:
             return False  # Conservative: assume older version
 
 # Try to import numpy (optional for stats)
+np: Any
 try:
     import numpy as np
     NUMPY_AVAILABLE = True
@@ -55,26 +70,41 @@ logger.addHandler(logging.NullHandler())
 BUILD_HASH = "2025.01.07.020"  # Production final polished+ build
 
 # Try to import autocast and nullcontext at top level
+AutocastFn = Callable[..., ContextManager[Any]]
+
+
+def _autocast_fallback(
+    device_type: str, dtype: Optional[torch.dtype] = None, enabled: bool = True
+) -> ContextManager[Any]:
+    @contextmanager
+    def noop() -> Iterator[None]:
+        yield
+
+    return noop()
+
+
 try:
-    from torch import autocast
+    from torch import autocast as _torch_autocast
+
+    autocast: AutocastFn = _torch_autocast
     AUTOCAST_AVAILABLE = True
 except ImportError:
     AUTOCAST_AVAILABLE = False
-    def autocast(device_type, dtype=None, enabled=True):
-        from contextlib import contextmanager
-        @contextmanager
-        def noop():
-            yield
-        return noop()
+    autocast = _autocast_fallback
 
 # Try to import tqdm gracefully
+def _tqdm_fallback(iterable: Iterable[Any], desc: Optional[str] = None, **kwargs: Any) -> Iterable[Any]:
+    return iterable
+
+
 try:
-    from tqdm import tqdm  # type: ignore[import-untyped]
+    from tqdm import tqdm as _tqdm
+
+    tqdm: Callable[..., Any] = _tqdm
     TQDM_AVAILABLE = True
 except ImportError:
     TQDM_AVAILABLE = False
-    def tqdm(iterable, desc=None, **kwargs):  # type: ignore[no-untyped-def]
-        return iterable
+    tqdm = _tqdm_fallback
 
 # PyTorch cross-version RNG compatibility helper
 def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
@@ -93,8 +123,27 @@ def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = N
     else:
         return torch.randn_like(x)
 
+def tensor_fingerprint(tensor: torch.Tensor, sample_count: int = 8) -> str:
+    """Generate a lightweight content fingerprint for cache keys."""
+    fp = tensor.detach().reshape(-1)
+    numel = fp.numel()
+    if numel == 0:
+        return "empty"
+    if numel <= sample_count:
+        sample = fp.float()
+    else:
+        step = (numel - 1) / (sample_count - 1)
+        indices = [int(round(i * step)) for i in range(sample_count)]
+        idx = torch.tensor(indices, device=fp.device, dtype=torch.long)
+        sample = fp.index_select(0, idx).float()
+
+    chk_sum = float(sample.sum().item())
+    chk_sq = float((sample * sample).sum().item())
+    chk_max = float(sample.abs().max().item())
+    return f"sum{chk_sum:.6e}_sq{chk_sq:.6e}_max{chk_max:.6e}_n{numel}"
+
 # Opt-in CUDA optimizations with env var
-def setup_cuda_optimizations():
+def setup_cuda_optimizations() -> None:
     """Safe CUDA setup with opt-in TF32 configuration"""
     if not torch.cuda.is_available():
         return
@@ -121,7 +170,8 @@ def setup_cuda_optimizations():
     # Only configure memory allocation if explicitly requested
     if os.environ.get('FASTSBOT_SET_ALLOC_CONF', '0') == '1':
         # Warn if allocator already initialized
-        if hasattr(torch.cuda, "is_initialized") and torch.cuda.is_initialized():
+        is_initialized_fn = cast(Optional[Callable[[], bool]], getattr(torch.cuda, "is_initialized", None))
+        if is_initialized_fn is not None and is_initialized_fn():
             logger.warning("PYTORCH_CUDA_ALLOC_CONF set after CUDA init; it may not take effect in this process. "
                            "Import this module before any CUDA operations for allocator settings to apply.")
 
@@ -150,10 +200,10 @@ def setup_cuda_optimizations():
 setup_cuda_optimizations()
 
 # Triton availability check with sentinel
-_TRITON_AVAILABLE = None
-_TRITON_IMPORTS = None
+_TRITON_AVAILABLE: Optional[bool] = None
+_TRITON_IMPORTS: Optional[Tuple[Any, Any, Any, Any]] = None
 
-def check_triton_availability():
+def check_triton_availability() -> Tuple[bool, Optional[Tuple[Any, Any, Any, Any]]]:
     """Check Triton availability once and cache result"""
     global _TRITON_AVAILABLE, _TRITON_IMPORTS
 
@@ -161,12 +211,12 @@ def check_triton_availability():
         return _TRITON_AVAILABLE, _TRITON_IMPORTS
 
     try:
-        import triton
-        import triton.language as tl
+        import triton  # type: ignore[import-not-found]
+        import triton.language as tl  # type: ignore[import-not-found]
         from triton import next_power_of_two
 
         # Define sigmoid for Triton (local helper)
-        def tl_sigmoid(x):
+        def tl_sigmoid(x: Any) -> Any:
             return 1 / (1 + tl.exp(-x))
 
         _TRITON_AVAILABLE = True
@@ -188,12 +238,12 @@ if COMPILE_AVAILABLE:
     _compile_sig = inspect.signature(torch.compile)
     _TORCH_COMPILE_ACCEPTS_DYNAMIC = 'dynamic' in _compile_sig.parameters
 
-_CACHED_DEVICE_PROPERTIES = {}
+_CACHED_DEVICE_PROPERTIES: Dict[int, Any] = {}
 
 # Cache pi tensor to avoid repeated allocations
 _PI_TENSOR_CACHE = {}
 
-def get_pi_tensor(device, dtype):
+def get_pi_tensor(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Get cached pi tensor for device/dtype"""
     key = (str(device), str(dtype))
     if key not in _PI_TENSOR_CACHE:
@@ -201,19 +251,19 @@ def get_pi_tensor(device, dtype):
     return _PI_TENSOR_CACHE[key]
 
 # Global compilation cache with build hash versioning
-_GLOBAL_COMPILE_CACHE = OrderedDict()
+_GLOBAL_COMPILE_CACHE: "OrderedDict[Any, Tuple[Any, int]]" = OrderedDict()
 _CACHE_LOCK = threading.Lock()
-_CACHE_SIZE_BYTES = 0
+_CACHE_SIZE_BYTES: int = 0
 _CACHE_VERSION = (3, 14, torch.__version__, BUILD_HASH)
 
 # Global inflight tracking
-_GLOBAL_INFLIGHT = {}
+_GLOBAL_INFLIGHT: Dict[Any, Any] = {}
 _INFLIGHT_LOCK = threading.Lock()
 
 # Track which signatures have already warned about timeout
-_TIMEOUT_WARNED = set()
+_TIMEOUT_WARNED: set[Any] = set()
 
-def clear_global_compile_cache():
+def clear_global_compile_cache() -> None:
     """Expose API to clear global compile cache"""
     global _GLOBAL_COMPILE_CACHE, _CACHE_SIZE_BYTES
     with _CACHE_LOCK:
@@ -221,7 +271,7 @@ def clear_global_compile_cache():
         _CACHE_SIZE_BYTES = 0
     logger.info("Global compile cache cleared")
 
-def _estimate_cache_size(obj) -> int:
+def _estimate_cache_size(obj: Any) -> int:
     """Better cache size estimation with multi-GPU awareness"""
     try:
         if hasattr(obj, '__code__') and hasattr(obj.__code__, 'co_filename'):
@@ -241,7 +291,7 @@ def _estimate_cache_size(obj) -> int:
     else:
         return 1 * 1024 * 1024
 
-def _make_stable_signature(obj) -> str:
+def _make_stable_signature(obj: Any) -> str:
     """Create stable signature for non-tensor objects"""
     try:
         if isinstance(obj, (str, int, float, bool, type(None))):
@@ -255,11 +305,17 @@ def _make_stable_signature(obj) -> str:
     except Exception:
         return str(type(obj))
 
-def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=256,
-                          max_cache_size_mb=1024, use_global_cache=True, enable_cpu_compile=None,
-                          compile_timeout=30.0):
+def compile_function_fixed(
+    mode: str = "reduce-overhead",
+    dynamic: bool = True,
+    max_cache_size: int = 256,
+    max_cache_size_mb: int = 1024,
+    use_global_cache: bool = True,
+    enable_cpu_compile: Optional[bool] = None,
+    compile_timeout: float = 30.0,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Thread-safe compilation with timeout and guaranteed event release."""
-    def decorator(func):
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         if not COMPILE_AVAILABLE:
             return func
 
@@ -271,6 +327,8 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
         if not (torch.cuda.is_available() or cpu_compile):
             return func
 
+        func_any: Any = cast(Any, func)
+
         if use_global_cache:
             cache = _GLOBAL_COMPILE_CACHE
             cache_lock = _CACHE_LOCK
@@ -278,26 +336,26 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
             inflight_lock = _INFLIGHT_LOCK
             base_func_key = f"{func.__module__}.{func.__qualname__}"
         else:
-            if not hasattr(func, '_compiled_cache'):
-                func._compiled_cache = OrderedDict()
-                func._cache_lock = threading.Lock()
-                func._cache_size_bytes = 0
-                func._inflight = {}
-                func._inflight_lock = threading.Lock()
-            cache = func._compiled_cache
-            cache_lock = func._cache_lock
-            inflight = func._inflight
-            inflight_lock = func._inflight_lock
+            if not hasattr(func_any, '_compiled_cache'):
+                func_any._compiled_cache = OrderedDict()
+                func_any._cache_lock = threading.Lock()
+                func_any._cache_size_bytes = 0
+                func_any._inflight = {}
+                func_any._inflight_lock = threading.Lock()
+            cache = func_any._compiled_cache
+            cache_lock = func_any._cache_lock
+            inflight = func_any._inflight
+            inflight_lock = func_any._inflight_lock
             base_func_key = "local"
 
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             global _CACHE_SIZE_BYTES
             compiled_fn = None
             need_compile = False
             evt = None
 
-            def make_tensor_sig(arg):
+            def make_tensor_sig(arg: Any) -> Optional[Tuple[Any, ...]]:
                 # Signature based on tensor metadata, not values (intentional for compile cache)
                 if isinstance(arg, torch.Tensor):
                     try:
@@ -346,13 +404,13 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
 
             if need_compile:
                 estimated_size = _estimate_cache_size(func)
-                compile_kwargs = {"mode": mode, "fullgraph": False}
+                compile_kwargs: Dict[str, Any] = {"mode": mode, "fullgraph": False}
                 if _TORCH_COMPILE_ACCEPTS_DYNAMIC:
                     compile_kwargs["dynamic"] = dynamic
 
                 # Wrap compilation in try/finally to guarantee event release
                 try:
-                    compiled_local = torch.compile(func, **compile_kwargs)
+                    compiled_local = cast(Callable[..., Any], torch.compile)(func, **compile_kwargs)
                     is_eager = False
                 except Exception as e:
                     logger.warning(f"torch.compile failed, falling back to eager mode: {e}")
@@ -373,11 +431,11 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
                                         _CACHE_SIZE_BYTES -= old_size
                                     _CACHE_SIZE_BYTES = max(0, _CACHE_SIZE_BYTES) + estimated_size
                                 else:
-                                    while ((func._cache_size_bytes + estimated_size > max_size_bytes) or
+                                    while ((func_any._cache_size_bytes + estimated_size > max_size_bytes) or
                                            (len(cache) >= max_cache_size)) and cache:
                                         _, old_size = cache.popitem(last=False)[1]
-                                        func._cache_size_bytes -= old_size
-                                    func._cache_size_bytes = max(0, func._cache_size_bytes) + estimated_size
+                                        func_any._cache_size_bytes -= old_size
+                                    func_any._cache_size_bytes = max(0, func_any._cache_size_bytes) + estimated_size
                             cache[final_key] = (compiled_local, estimated_size)
                         compiled_fn = cache[final_key][0]
 
@@ -423,11 +481,11 @@ def compile_function_fixed(mode="reduce-overhead", dynamic=True, max_cache_size=
         return wrapper
     return decorator
 
-def fastsbot_next_power_of_two(n):
+def fastsbot_next_power_of_two(n: int) -> int:
     """Helper to find next power of two (renamed to avoid confusion with Triton's)"""
     return 1 << (n - 1).bit_length()
 
-def get_optimal_block_size(n_elements, device_capability=None):
+def get_optimal_block_size(n_elements: int, device_capability: Optional[Tuple[int, int]] = None) -> int:
     """Hardware-aware block size selection"""
     if device_capability is None and torch.cuda.is_available():
         device_capability = torch.cuda.get_device_capability()
@@ -442,22 +500,27 @@ def get_optimal_block_size(n_elements, device_capability=None):
 
 # Triton kernels with proper imports and caching
 if TRITON_AVAILABLE:
-    triton, tl, triton_next_power_of_two, tl_sigmoid = check_triton_availability()[1]
+    triton_imports = check_triton_availability()[1]
+    assert triton_imports is not None
+    triton, tl, triton_next_power_of_two, tl_sigmoid = triton_imports
+    triton_jit = cast(Callable[[Callable[..., Any]], Callable[..., Any]], triton.jit)
 
-    @triton.jit
+    @triton_jit
     def fused_drift_transport_kernel_fixed(
-        x_ptr, drift_ptr, out_ptr,
-        scale_ptr,  # Pointer to scalar value (1-elem tensor)
+        x_ptr: Any,
+        drift_ptr: Any,
+        out_ptr: Any,
+        scale_ptr: Any,  # Pointer to scalar value (1-elem tensor)
         N: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr
-    ):
+        BLOCK_SIZE: tl.constexpr,
+    ) -> None:
         """Proper bounds checking prevents race conditions"""
         # Local helpers to avoid monkey-patching
-        def wmin(a, b):
+        def wmin(a: Any, b: Any) -> Any:
             return tl.where(a < b, a, b)
-        def wmax(a, b):
+        def wmax(a: Any, b: Any) -> Any:
             return tl.where(a > b, a, b)
-        def wabs(x):
+        def wabs(x: Any) -> Any:
             return tl.where(x >= 0, x, -x)
 
         pid = tl.program_id(0)
@@ -480,18 +543,15 @@ if TRITON_AVAILABLE:
 
         tl.store(out_ptr + offsets, out, mask=mask)
 
-    @triton.jit
+    @triton_jit
     def fisher_diagonal_kernel_fixed(
-        score_ptr, out_ptr,
-        alpha_value,  # runtime scalar, not constexpr (we pass )
+        score_ptr: Any,
+        out_ptr: Any,
+        alpha_value: Any,  # runtime scalar, not constexpr (we pass )
         N: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr
-    ):
+        BLOCK_SIZE: tl.constexpr,
+    ) -> None:
         """Proper masking for Fisher diagonal computation"""
-        # Local helper
-        def wabs(x):
-            return tl.where(x >= 0, x, -x)
-
         pid = tl.program_id(0)
         block_start = pid * BLOCK_SIZE
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -500,12 +560,18 @@ if TRITON_AVAILABLE:
 
         score = tl.load(score_ptr + offsets, mask=mask, other=0.0)
         adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_value)  # runtime computation based on 
-        fisher = wabs(score) + adaptive_eps
+        fisher = score * score + adaptive_eps
 
         tl.store(out_ptr + offsets, fisher, mask=mask)
 
-    def launch_triton_kernel_safe(kernel, *args, n_elements, kernel_type="default",
-                                 eps=1e-3, alpha=None):
+    def launch_triton_kernel_safe(
+        kernel: Any,
+        *args: Any,
+        n_elements: int,
+        kernel_type: str = "default",
+        eps: float = 1e-3,
+        alpha: Optional[float] = None,
+    ) -> None:
         """Hardware-aware kernel launch with kernel type"""
         BLOCK_SIZE = min(512, triton_next_power_of_two(n_elements))
 
