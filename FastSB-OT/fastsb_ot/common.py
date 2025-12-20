@@ -69,6 +69,34 @@ logger.addHandler(logging.NullHandler())
 # Build hash for cache versioning
 BUILD_HASH = "2025.01.07.020"  # Production final polished+ build
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read boolean flags from the environment with a default."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def runtime_asserts_enabled(config: Any = None) -> bool:
+    """Return whether runtime asserts are enabled (config + env override)."""
+    default = True if config is None else bool(getattr(config, "runtime_asserts", True))
+    return _env_flag("FASTSBOT_ASSERTS", default)
+
+
+def nan_checks_enabled(config: Any = None) -> bool:
+    """Return whether NaN/Inf checks are enabled (config + env override)."""
+    default = True if config is None else bool(getattr(config, "nan_checks", True))
+    return _env_flag("FASTSBOT_NAN_CHECKS", default)
+
+
+def check_tensor_finite(name: str, tensor: torch.Tensor, *, enabled: bool) -> None:
+    """Raise if tensor contains NaN/Inf when checks are enabled."""
+    if not enabled:
+        return
+    if not torch.isfinite(tensor).all().item():
+        raise ValueError(f"{name} contains NaN/Inf values.")
+
 # Try to import autocast and nullcontext at top level
 AutocastFn = Callable[..., ContextManager[Any]]
 
@@ -211,8 +239,8 @@ def check_triton_availability() -> Tuple[bool, Optional[Tuple[Any, Any, Any, Any
         return _TRITON_AVAILABLE, _TRITON_IMPORTS
 
     try:
-        import triton  # type: ignore[import-not-found]
-        import triton.language as tl  # type: ignore[import-not-found]
+        import triton
+        import triton.language as tl
         from triton import next_power_of_two
 
         # Define sigmoid for Triton (local helper)

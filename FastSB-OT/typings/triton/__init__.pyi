@@ -1,0 +1,9 @@
+from typing import Any, Callable, TypeVar
+
+from . import language
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+def jit(fn: _F) -> _F: ...
+def cdiv(a: int, b: int) -> int: ...
+def next_power_of_two(n: int) -> int: ...

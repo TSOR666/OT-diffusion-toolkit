@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import math
-import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -13,9 +12,11 @@ import torch.nn.functional as F
 from . import common
 from .config import FastSBOTConfig
 
-logger = common.logger
 compile_function_fixed = common.compile_function_fixed
 log_sum_exp_stabilized = common.log_sum_exp_stabilized
+check_tensor_finite = common.check_tensor_finite
+runtime_asserts_enabled = common.runtime_asserts_enabled
+nan_checks_enabled = common.nan_checks_enabled
 
 __all__ = [
     "SlicedOptimalTransport",
@@ -35,12 +36,18 @@ class SlicedOptimalTransport:
         sinkhorn_tol: float = 1e-5,
         projection_fn: Optional[Callable[[int, int], int]] = None,
         generator: Optional[torch.Generator] = None,
+        runtime_asserts: bool = True,
+        nan_checks: bool = True,
+        sinkhorn_mass_tolerance: float = 2e-2,
     ) -> None:
         self.memory_limit_bytes = memory_limit_mb * 1024 * 1024
         self.sinkhorn_iters = sinkhorn_iters
         self.sinkhorn_tol = sinkhorn_tol
         self.projection_fn = projection_fn
         self.generator = generator
+        self.runtime_asserts = runtime_asserts
+        self.nan_checks = nan_checks
+        self.sinkhorn_mass_tolerance = sinkhorn_mass_tolerance
 
     def should_use_sliced(self, x_batch: torch.Tensor) -> bool:
         """Determine if we should use sliced OT based on memory.
@@ -87,7 +94,15 @@ class SlicedOptimalTransport:
 
     def transport(self, x_batch: torch.Tensor, y_batch: torch.Tensor,
                   eps: Union[float, torch.Tensor], n_projections: int = 100) -> torch.Tensor:
-        """Choose between full and sliced OT based on memory"""
+        """Choose between full and sliced OT based on memory.
+
+        Shapes:
+            - x_batch, y_batch: (B, N, d) or (B, C, H, W) or (B, N)
+            - return: same shape as inputs
+        """
+        if self.nan_checks:
+            check_tensor_finite("x_batch", x_batch, enabled=True)
+            check_tensor_finite("y_batch", y_batch, enabled=True)
         x_points, restore = self._reshape_to_points(x_batch)
         y_points, _ = self._reshape_to_points(y_batch)
 
@@ -114,54 +129,80 @@ class SlicedOptimalTransport:
 
         return restore(result)
 
+    def _projection_chunk_size(self, batch: int, points: int, element_size: int, max_projections: int) -> int:
+        bytes_per_proj = batch * points * (3 * element_size + 8)
+        if bytes_per_proj <= 0:
+            return max_projections
+        budget = max(self.memory_limit_bytes // 2, bytes_per_proj)
+        return max(1, min(max_projections, budget // bytes_per_proj))
+
     def _sliced_ot_fixed(self, x: torch.Tensor, y: torch.Tensor,
                         n_projections: int) -> torch.Tensor:
-        """Sliced OT with deterministic projections"""
+        """Sliced OT with deterministic projections.
+
+        Shapes:
+            - x, y: (B, N, d)
+            - return: (B, N, d)
+        """
         B, N, d = x.shape
         device = x.device
         dtype = x.dtype
 
-        if os.environ.get('FASTSBOT_ASSERTS', '0') == '1':
+        if self.runtime_asserts:
             if x.shape != y.shape:
                 raise ValueError(f"Shape mismatch: x={x.shape}, y={y.shape}")
             if x.dim() != 3:
                 raise ValueError(f"Expected 3D tensor (B,N,d), got {x.dim()}D")
 
-        transported = torch.zeros_like(x)
-        transported_proj = x.new_zeros(B, N)  # Zero-init for safety
-        x_proj = x.new_empty(B, N)
-        y_proj = y.new_empty(B, N)
+        if self.nan_checks:
+            check_tensor_finite("x", x, enabled=True)
+            check_tensor_finite("y", y, enabled=True)
 
+        transported = torch.zeros_like(x)
         gen = self.generator if self.generator is not None else torch.Generator(device=device)
 
-        for i in range(n_projections):
-            # Generate and normalize theta in FP32 for stability
-            theta = torch.randn(d, device=device, dtype=torch.float32, generator=gen)
-            theta = F.normalize(theta, dim=0, eps=1e-8)
-            theta = theta.to(dtype)  # Cast back to data dtype
+        chunk = self._projection_chunk_size(B, N, x.element_size(), n_projections)
+        done = 0
+        while done < n_projections:
+            current = min(chunk, n_projections - done)
+            theta = common._randn_like_compat(
+                torch.empty((current, d), device=device, dtype=torch.float32),
+                gen
+            )
+            theta = F.normalize(theta, dim=1, eps=1e-8).to(dtype)
 
-            torch.matmul(x.view(B, N, d), theta, out=x_proj.view(B, N))
-            torch.matmul(y.view(B, N, d), theta, out=y_proj.view(B, N))
+            x_proj = torch.matmul(x, theta.transpose(0, 1))
+            y_proj = torch.matmul(y, theta.transpose(0, 1))
 
             _, x_indices = torch.sort(x_proj, dim=1)
             y_sorted, _ = torch.sort(y_proj, dim=1)
 
+            transported_proj = torch.empty_like(x_proj)
             transported_proj.scatter_(1, x_indices, y_sorted)
 
-            diff_proj = (transported_proj - x_proj).unsqueeze(-1)
-            transported += diff_proj * theta.unsqueeze(0).unsqueeze(0)
+            diff = transported_proj - x_proj
+            transported += torch.einsum("bnp,pd->bnd", diff, theta)
+            done += current
 
         return x + transported / n_projections
 
     def _full_ot(self, x: torch.Tensor, y: torch.Tensor, eps: float) -> torch.Tensor:
-        """Full OT with FP32 Sinkhorn and matmul for numeric stability"""
+        """Full OT with FP32 Sinkhorn and matmul for numeric stability.
+
+        Shapes:
+            - x, y: (B, N, d)
+            - return: (B, N, d)
+        """
         B, N, d = x.shape
 
-        if os.environ.get('FASTSBOT_ASSERTS', '0') == '1':
+        if self.runtime_asserts:
             if x.shape != y.shape:
                 raise ValueError(f"Shape mismatch: x={x.shape}, y={y.shape}")
             if x.dim() != 3:
                 raise ValueError(f"Expected 3D tensor, got {x.dim()}D")
+        if self.nan_checks:
+            check_tensor_finite("x", x, enabled=True)
+            check_tensor_finite("y", y, enabled=True)
 
         x_expanded = x.unsqueeze(2)
         y_expanded = y.unsqueeze(1)
@@ -186,7 +227,13 @@ class SlicedOptimalTransport:
         row_marginals: Optional[torch.Tensor] = None,
         col_marginals: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Support for custom marginals, defaults to uniform"""
+        """Support for custom marginals, defaults to uniform.
+
+        Shapes:
+            - C_batch: (B, n, m)
+            - row_marginals: (B, n), col_marginals: (B, m)
+            - return: (B, n, m)
+        """
         B, n, m = C_batch.shape
 
         if max_iter is None:
@@ -230,6 +277,26 @@ class SlicedOptimalTransport:
 
         log_P = log_u.unsqueeze(-1) + K_log + log_v.unsqueeze(1)
         P = torch.exp(log_P)
+
+        if self.nan_checks:
+            check_tensor_finite("sinkhorn_plan", P, enabled=True)
+        if self.runtime_asserts:
+            if row_marginals is None:
+                expected_rows = C_batch.new_full((B, n), 1.0 / n)
+            else:
+                expected_rows = row_marginals
+            if col_marginals is None:
+                expected_cols = C_batch.new_full((B, m), 1.0 / m)
+            else:
+                expected_cols = col_marginals
+            row_err = (P.sum(dim=2) - expected_rows).abs().max()
+            col_err = (P.sum(dim=1) - expected_cols).abs().max()
+            tol_mass = max(self.sinkhorn_mass_tolerance, self.sinkhorn_tol * 10)
+            if max(row_err.item(), col_err.item()) > tol_mass:
+                raise ValueError(
+                    f"Sinkhorn mass conservation failed (row_err={row_err.item():.3e}, "
+                    f"col_err={col_err.item():.3e}, tol={tol_mass:.3e})."
+                )
 
         return P
 
@@ -418,7 +485,10 @@ class TransportModule(nn.Module):
             config._sinkhorn_iterations,
             config.sinkhorn_tolerance,
             config.sliced_ot_projection_fn,
-            generator=config.generator
+            generator=config.generator,
+            runtime_asserts=runtime_asserts_enabled(config),
+            nan_checks=nan_checks_enabled(config),
+            sinkhorn_mass_tolerance=config.sinkhorn_mass_tolerance,
         )
 
 

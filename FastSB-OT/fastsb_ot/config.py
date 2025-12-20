@@ -66,6 +66,7 @@ class FastSBOTConfig:
     memory_efficient: bool = True
     use_mixed_precision: bool = True
     use_bfloat16: bool = False
+    use_channels_last: bool = False
     max_batch_per_device: Optional[int] = None
     cache_size_mb: int = 1024
     max_cache_entries: int = 50
@@ -112,6 +113,7 @@ class FastSBOTConfig:
     # Advanced parameters
     landmark_ratio: float = 0.1
     sinkhorn_tolerance: float = 1e-6
+    sinkhorn_mass_tolerance: float = 2e-2
     critical_alpha_thresholds: List[float] = field(default_factory=lambda: [0.9, 0.5, 0.1])
     sliced_ot_projection_fn: Optional[Callable[[int, int], int]] = None
 
@@ -125,6 +127,10 @@ class FastSBOTConfig:
     enable_profiling: bool = False
     profiler_trace_path: Optional[str] = None
     log_level: str = "INFO"
+    runtime_asserts: bool = True
+    nan_checks: bool = True
+    use_fft_transport: bool = True
+    deterministic_fft_fallback: bool = True
 
     # Deterministic RNG hook
     generator: Optional[torch.Generator] = None
@@ -264,6 +270,11 @@ class FastSBOTConfig:
 
         if not (0 <= self.momentum_beta < 1.0):
             raise ValueError(f"momentum_beta must be in [0, 1), got {self.momentum_beta}")
+
+        if self.sinkhorn_mass_tolerance <= 0:
+            raise ValueError(
+                f"sinkhorn_mass_tolerance must be positive, got {self.sinkhorn_mass_tolerance}"
+            )
 
     def _apply_seed(self) -> None:
         """Apply seed for reproducibility with optional deterministic RNG"""
