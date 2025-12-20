@@ -142,7 +142,7 @@ class DPMSolverPP:
 
         denom = 2 * r
         if abs(denom) < EPSILON_CLAMP:
-            logger.debug(f"DPM-Solver denominator too small, falling back to first-order")
+            logger.debug("DPM-Solver denominator too small, falling back to first-order")
             return self._first_order_update(x, model_outputs[-1], timesteps, idx, schedule)
 
         D1 = (1 + 1 / denom) * model_outputs[-1] - 1 / denom * model_outputs[-2]
@@ -196,14 +196,14 @@ class DPMSolverPP:
         r2 = float(h_prev2.item()) / h_scalar
 
         if not (torch.isfinite(torch.tensor(r1)) and torch.isfinite(torch.tensor(r2))):
-            logger.debug(f"DPM-Solver produced non-finite ratios, falling back to second-order")
+            logger.debug("DPM-Solver produced non-finite ratios, falling back to second-order")
             return self._second_order_update(x, model_outputs[-2:], timesteps, idx, schedule)
 
         alpha_curr, sigma_curr = schedule.alpha_sigma(t_curr_tensor)
         alpha_next, _ = schedule.alpha_sigma(t_next_tensor)
 
         if abs(r1) < EPSILON_CLAMP or abs(r2) < EPSILON_CLAMP or abs(r1 + r2) < EPSILON_CLAMP:
-            logger.debug(f"DPM-Solver timestep ratios too small, falling back to second-order")
+            logger.debug("DPM-Solver timestep ratios too small, falling back to second-order")
             return self._second_order_update(x, model_outputs[-2:], timesteps, idx, schedule)
 
         # Third-order multistep coefficients (DPM-Solver++ 3M) using variable step ratios r1, r2

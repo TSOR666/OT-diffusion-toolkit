@@ -56,7 +56,10 @@ def spectral_gradient(
             [torch.fft.fftfreq(n=s, d=grid_spacing[i], device=u.device) for i, s in enumerate(spatial_shape)],
             indexing="ij",
         )
-        freq_radius = torch.sqrt(sum(f ** 2 for f in freq_grids))
+        freq_sq_sum = torch.zeros_like(freq_grids[0])
+        for f in freq_grids:
+            freq_sq_sum = freq_sq_sum + f ** 2
+        freq_radius = torch.sqrt(freq_sq_sum)
         # Cosine window: 1 at DC, tapering toward Nyquist
         nyquist = max(f.abs().max().item() for f in freq_grids) + 1e-12
         filter_tensor = 0.5 * (1 + torch.cos(np.pi * torch.clamp(freq_radius / nyquist, 0, 1)))

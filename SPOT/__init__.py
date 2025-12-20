@@ -15,8 +15,9 @@ from .selftest import main, self_test, selftest, validate_install
 from .solver import ProductionSPOTSolver
 
 # Optional advanced features (gracefully degrade if not available)
+# These imports are re-exported for the public API
 try:
-    from .integrators import (
+    from .integrators import (  # noqa: F401
         HeunIntegrator,
         DDIMIntegrator,
         AdaptiveIntegrator,
@@ -32,7 +33,7 @@ except ImportError:
     __all_integrators__ = []
 
 try:
-    from .corrector import (
+    from .corrector import (  # noqa: F401
         LangevinCorrector,
         TweedieCorrector,
         AdaptiveCorrector,
@@ -48,7 +49,7 @@ except ImportError:
     __all_correctors__ = []
 
 try:
-    from .triton_kernels import (
+    from .triton_kernels import (  # noqa: F401
         TRITON_AVAILABLE,
         triton_sinkhorn_update,
         fused_cost_softmax,

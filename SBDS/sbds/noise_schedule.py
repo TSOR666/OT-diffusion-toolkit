@@ -127,18 +127,18 @@ class EnhancedAdaptiveNoiseSchedule:
         """
         if tensor.dim() == 4:
             _, _, h, w = tensor.shape
-            target = (min(max_spatial, h), min(max_spatial, w))
-            pooled = F.adaptive_avg_pool2d(tensor, target)
+            target_2d = (min(max_spatial, h), min(max_spatial, w))
+            pooled = F.adaptive_avg_pool2d(tensor, target_2d)
             return pooled.flatten(1)
         if tensor.dim() == 5:
             _, _, d, h, w = tensor.shape
-            target = (min(max_spatial, d), min(max_spatial, h), min(max_spatial, w))
-            pooled = F.adaptive_avg_pool3d(tensor, target)
+            target_3d = (min(max_spatial, d), min(max_spatial, h), min(max_spatial, w))
+            pooled = F.adaptive_avg_pool3d(tensor, target_3d)
             return pooled.flatten(1)
         if tensor.dim() > 2:
             flat = tensor.flatten(1)
-            target = min(max_spatial**2, flat.size(1))
-            pooled = F.adaptive_avg_pool1d(flat.unsqueeze(1), target).squeeze(1)
+            target_1d = min(max_spatial**2, flat.size(1))
+            pooled = F.adaptive_avg_pool1d(flat.unsqueeze(1), target_1d).squeeze(1)
             return pooled
         return tensor.reshape(tensor.size(0), -1)
 

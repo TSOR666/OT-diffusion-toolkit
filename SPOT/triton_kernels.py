@@ -7,7 +7,6 @@ This module provides optimized GPU kernels for:
 """
 from __future__ import annotations
 
-import math
 from typing import Optional, Tuple
 
 import torch

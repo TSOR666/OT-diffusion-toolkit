@@ -76,9 +76,6 @@ class FFTOptimalTransport:
             raise ValueError(f"Expected at least one spatial dimension, got {shape}")
 
         mode, align_corners = self._select_interpolation_mode(spatial_dims)
-        interpolate_kwargs = {"mode": mode}
-        if align_corners is not None:
-            interpolate_kwargs["align_corners"] = align_corners
 
         leading = tensor.dim() - spatial_dims
         if leading < 0:
@@ -90,9 +87,14 @@ class FFTOptimalTransport:
 
         # Collapse leading dims to treat each sample independently
         collapsed = tensor.reshape(-1, *original_shape)
-        resized = F.interpolate(
-            collapsed.unsqueeze(1), size=shape, **interpolate_kwargs
-        ).squeeze(1)
+        if align_corners is not None:
+            resized = F.interpolate(
+                collapsed.unsqueeze(1), size=shape, mode=mode, align_corners=align_corners
+            ).squeeze(1)
+        else:
+            resized = F.interpolate(
+                collapsed.unsqueeze(1), size=shape, mode=mode
+            ).squeeze(1)
 
         # Restore original leading dimensions
         restored_shape = (*tensor.shape[:leading], *shape)
@@ -165,10 +167,11 @@ class FFTOptimalTransport:
         convolved = torch.fft.irfftn(result_fft, s=padded_shape, dim=spatial_dims)
 
         # Crop back to the original spatial support
-        slices = [slice(None)] * convolved.dim()
+        slices: List[slice] = [slice(None)] * convolved.dim()
         for dim, size in zip(spatial_dims, spatial_shape):
             slices[dim] = slice(0, size)
-        return convolved[tuple(slices)]
+        cropped: torch.Tensor = convolved[tuple(slices)]
+        return cropped
 
     def _compute_kernel_fft(
         self,
@@ -198,7 +201,11 @@ class FFTOptimalTransport:
             ) / max_size
             coord = coord.reshape([1 if j != idx else size for j in range(spatial_rank)])
             coords.append(coord)
-        dist_sq = sum(coord ** 2 for coord in coords)
+
+        # Initialize with zeros tensor to ensure dist_sq is always a Tensor
+        dist_sq = torch.zeros(padded_shape, device=device, dtype=dtype)
+        for coord in coords:
+            dist_sq = dist_sq + coord ** 2
 
         if self.kernel_type == "gaussian":
             kernel = torch.exp(-dist_sq / (epsilon + 1e-30))
@@ -273,19 +280,19 @@ class FFTOptimalTransport:
             if level == self.scale_levels:
                 continue
 
-            u_upsampled = self._resize_density(u_coarse, current_shape)
-            v_upsampled = self._resize_density(v_coarse, current_shape)
-
+            # Note: u_coarse and v_coarse from coarser level could be upsampled
+            # and used as warm-start, but current implementation recomputes from scratch
             mu_current = self._resize_density(mu, current_shape)
             nu_current = self._resize_density(nu, current_shape)
 
             k_fft_level, padded_shape_level = self._compute_kernel_fft(
                 current_shape, epsilon, dtype=mu.dtype, device=mu.device
             )
-            _, u_current, v_current = self._sinkhorn_fft(
+            # Results from intermediate levels are discarded; final level
+            # is recomputed at full resolution below
+            _ = self._sinkhorn_fft(
                 mu_current, nu_current, epsilon, k_fft_level, padded_shape_level
             )
-            u_coarse, v_coarse = u_current, v_current
 
         if kernel_fft is None or padded_shape is None:
             kernel_fft, padded_shape = self._compute_kernel_fft(
@@ -366,7 +373,10 @@ class FFTOptimalTransport:
         is_grid_y, grid_shape_y = self._is_grid_structured(y)
 
         if is_grid_x and is_grid_y and grid_shape_x == grid_shape_y:
-            grid_shape = grid_shape_x
+            # At this point, grid_shape_x is guaranteed to be List[int] (not None)
+            # since is_grid_x is True and grid_shape_x == grid_shape_y
+            assert grid_shape_x is not None  # Type narrowing for mypy
+            grid_shape: List[int] = grid_shape_x
 
             mu_batch = self._prepare_grid_density(x, grid_shape, weights_x)
             nu_batch = self._prepare_grid_density(y, grid_shape, weights_y)

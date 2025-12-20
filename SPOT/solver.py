@@ -6,7 +6,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -36,14 +36,17 @@ try:
         DDIMIntegrator,
         AdaptiveIntegrator,
         ExponentialIntegrator,
+        EulerIntegrator,
     )
     INTEGRATORS_AVAILABLE = True
 except ImportError:
     INTEGRATORS_AVAILABLE = False
-    HeunIntegrator = None
-    DDIMIntegrator = None
-    AdaptiveIntegrator = None
-    ExponentialIntegrator = None
+    # Type stubs for when integrators are not available
+    HeunIntegrator = None  # type: ignore[misc, assignment]
+    DDIMIntegrator = None  # type: ignore[misc, assignment]
+    AdaptiveIntegrator = None  # type: ignore[misc, assignment]
+    ExponentialIntegrator = None  # type: ignore[misc, assignment]
+    EulerIntegrator = None  # type: ignore[misc, assignment]
 
 try:
     from .corrector import (
@@ -54,9 +57,10 @@ try:
     CORRECTORS_AVAILABLE = True
 except ImportError:
     CORRECTORS_AVAILABLE = False
-    LangevinCorrector = None
-    TweedieCorrector = None
-    AdaptiveCorrector = None
+    # Type stubs for when correctors are not available
+    LangevinCorrector = None  # type: ignore[misc, assignment]
+    TweedieCorrector = None  # type: ignore[misc, assignment]
+    AdaptiveCorrector = None  # type: ignore[misc, assignment]
 
 __all__ = ["ProductionSPOTSolver"]
 
@@ -677,7 +681,7 @@ class ProductionSPOTSolver:
         )
 
         if not (torch.isfinite(log_u).all() and torch.isfinite(log_v).all()):
-            logger.debug(f"Per-pixel Sinkhorn failed, using identity transport")
+            logger.debug("Per-pixel Sinkhorn failed, using identity transport")
             self._increment_fallback()
             if self.fallback_count > self.config.max_fallbacks:
                 logger.warning(f"Excessive fallbacks ({self.fallback_count}), check configuration")
@@ -1126,9 +1130,15 @@ class ProductionSPOTSolver:
                                     return self._compute_score_optimized(x_val, t_val)
 
                                 # Different integrators have different interfaces
-                                if isinstance(self.integrator, DDIMIntegrator):
+                                # Guard isinstance checks for optional imports
+                                is_ddim = (
+                                    INTEGRATORS_AVAILABLE
+                                    and DDIMIntegrator is not None
+                                    and isinstance(self.integrator, DDIMIntegrator)
+                                )
+                                if is_ddim:
                                     # DDIM needs generator for optional stochasticity
-                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper, generator)
+                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper, generator)  # type: ignore[call-arg]
                                 elif hasattr(self.integrator, 'step'):
                                     # All other integrators (Heun, Exponential, Adaptive) use standard step interface
                                     y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper)
@@ -1153,16 +1163,28 @@ class ProductionSPOTSolver:
                                 def score_fn_wrapper(x_val, t_val):
                                     return self._compute_score_optimized(x_val, t_val)
 
-                                if isinstance(self.corrector, AdaptiveCorrector):
+                                # Guard isinstance checks for optional imports
+                                is_adaptive_corrector = (
+                                    CORRECTORS_AVAILABLE
+                                    and AdaptiveCorrector is not None
+                                    and isinstance(self.corrector, AdaptiveCorrector)
+                                )
+                                is_tweedie_corrector = (
+                                    CORRECTORS_AVAILABLE
+                                    and TweedieCorrector is not None
+                                    and isinstance(self.corrector, TweedieCorrector)
+                                )
+
+                                if is_adaptive_corrector:
                                     # Adaptive corrector needs previous sample for error estimation
                                     x_prev = y_pred if i > 0 else None
-                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, x_prev, generator)
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, x_prev, generator)  # type: ignore[call-arg]
+                                elif is_tweedie_corrector:
+                                    # Tweedie corrector doesn't need generator
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper)  # type: ignore[call-arg]
                                 else:
-                                    # Regular corrector
-                                    if isinstance(self.corrector, TweedieCorrector):
-                                        x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper)
-                                    else:
-                                        x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, generator)
+                                    # Langevin corrector needs generator
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, generator)  # type: ignore[call-arg]
 
                             x_t = self._format_tensor(x_t)
 

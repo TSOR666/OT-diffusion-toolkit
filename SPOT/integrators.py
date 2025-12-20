@@ -10,7 +10,7 @@ This module provides multiple integration schemes:
 from __future__ import annotations
 
 import math
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 
@@ -85,10 +85,7 @@ class HeunIntegrator:
         # Compute score at current time
         score_curr = score_fn(x, t_curr)
 
-        # Get noise parameters and beta
-        t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
-        t_next_tensor = torch.full((1,), t_next, device=x.device, dtype=torch.float32)
-
+        # Get beta values from schedule
         beta_curr = _beta_from_schedule(self.schedule, t_curr)
         beta_next = _beta_from_schedule(self.schedule, t_next)
 

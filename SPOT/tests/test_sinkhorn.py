@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-import math
 
 from SPOT.sinkhorn import OptimizedSinkhornKernel
 from SPOT.config import SolverConfig
@@ -73,7 +72,7 @@ class TestSinkhornBasic:
         log_u, log_v = sinkhorn_kernel.sinkhorn_log_stabilized(x, y, eps=0.1, n_iter=100)
 
         # Compute transport plan
-        N, M = x.shape[0], y.shape[0]
+        N = x.shape[0]
         C = torch.cdist(x, y, p=2).pow(2)
         log_K = -C / 0.1
         log_P = log_K + log_u[:, None] + log_v[None, :]
