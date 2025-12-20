@@ -176,5 +176,40 @@ class TestTritonKernelDeterminism:
         torch.testing.assert_close(fisher1, fisher2, rtol=0, atol=0)
 
 
+class TestTritonKernelGradients:
+    """Validate gradient safety for training paths when Triton is enabled."""
+
+    def test_fisher_gradcheck(self, config, device):
+        """Gradcheck the Fisher diagonal when gradients are required."""
+        if not TRITON_AVAILABLE:
+            pytest.skip("Triton not available")
+
+        config.use_triton_kernels = True
+        config.use_fp32_fisher = False
+        kernel_module = KernelModule(config, device)
+
+        x = torch.randn(1, 32, device=device, dtype=torch.float64)
+        score = torch.randn_like(x, dtype=torch.float64, requires_grad=True)
+
+        def fn(score_input):
+            return kernel_module.estimate_fisher_diagonal(x, score_input, t=0.5, alpha=0.8)
+
+        assert torch.autograd.gradcheck(fn, (score,), eps=1e-6, atol=1e-4, rtol=1e-3)
+
+    def test_fisher_triton_skipped_when_requires_grad(self, config, device):
+        """Ensure Triton kernels are bypassed when autograd is needed."""
+        if not TRITON_AVAILABLE:
+            pytest.skip("Triton not available")
+
+        config.use_triton_kernels = True
+        kernel_module = KernelModule(config, device)
+
+        x = torch.randn(1, 1_050_000, device=device, dtype=torch.float32)
+        score = torch.randn_like(x, requires_grad=True)
+
+        fisher = kernel_module.estimate_fisher_diagonal(x, score, t=0.5, alpha=0.8)
+        assert fisher.requires_grad
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

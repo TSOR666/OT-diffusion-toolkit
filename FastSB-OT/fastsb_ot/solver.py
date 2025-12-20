@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """Solver entry points for FastSB-OT."""
 
 from __future__ import annotations
@@ -6,9 +5,10 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from collections import OrderedDict
 from contextlib import nullcontext
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 import torch.nn as nn
@@ -26,13 +26,13 @@ compile_function_fixed = common.compile_function_fixed
 TRITON_AVAILABLE = common.TRITON_AVAILABLE
 check_triton_availability = common.check_triton_availability
 log_sum_exp_stabilized = common.log_sum_exp_stabilized
-autocast = common.autocast
+autocast = cast(Any, common).autocast
 AUTOCAST_AVAILABLE = common.AUTOCAST_AVAILABLE
-Version = common.Version
+Version = cast(Any, common).Version
 NUMPY_AVAILABLE = common.NUMPY_AVAILABLE
-np = getattr(common, "np", None)
+np = cast(Any, getattr(common, "np", None))
 TQDM_AVAILABLE = common.TQDM_AVAILABLE
-tqdm = common.tqdm
+tqdm = cast(Any, common).tqdm
 launch_triton_kernel_safe = getattr(common, "launch_triton_kernel_safe", None)
 fused_drift_transport_kernel_fixed = getattr(common, "fused_drift_transport_kernel_fixed", None)
 
@@ -64,7 +64,7 @@ class FastSBOTSolver(nn.Module):
     def __init__(
         self,
         score_model: nn.Module,
-        noise_schedule: Callable,
+        noise_schedule: Callable[[float], float],
         config: Optional[FastSBOTConfig] = None,
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         persistent_cache: Optional[Dict[str, MemoryEfficientCacheFixed]] = None
@@ -116,14 +116,14 @@ class FastSBOTSolver(nn.Module):
             if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
                 if any(isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)) for m in self.score_model.modules()):
                     try:
-                        self.score_model.to(memory_format=torch.channels_last)
+                        cast(Any, self.score_model).to(memory_format=torch.channels_last)
                     except TypeError:
                         pass  # Older PyTorch versions may not support this
 
         had_output_attr = hasattr(self.score_model, 'predicts_score') or hasattr(self.score_model, 'predicts_noise')
         self._model_outputs_score = self._infer_model_outputs_score(self.score_model)
-        self.score_model.predicts_score = self._model_outputs_score
-        self.score_model.predicts_noise = not self._model_outputs_score
+        setattr(self.score_model, "predicts_score", self._model_outputs_score)
+        setattr(self.score_model, "predicts_noise", not self._model_outputs_score)
         if not had_output_attr:
             logger.debug(
                 "Assuming score_model outputs scores. If it predicts noise (epsilon), wrap it with "
@@ -147,16 +147,18 @@ class FastSBOTSolver(nn.Module):
                 self.config.cuda_cache_flush_threshold_mb
             )
 
-        self.noise_schedule_cache = {}
+        self.noise_schedule_cache: Dict[float, float] = {}
+        self._noise_schedule_lock = threading.Lock()
+        self._warned_fft_determinism = False
 
         # Validate noise schedule monotonicity
         self._validate_noise_schedule()
 
         # Cache for patch overlap masks
-        self._overlap_cache = OrderedDict()
+        self._overlap_cache: "OrderedDict[Tuple[int, int, int, int], torch.Tensor]" = OrderedDict()
         self._overlap_cache_cap = 32  # tiny LRU
 
-        self.perf_stats = {
+        self.perf_stats: Dict[str, Any] = {
             'times_per_step': [],
             'memory_per_step': [],
             'score_cache_stats': {},
@@ -169,7 +171,7 @@ class FastSBOTSolver(nn.Module):
         if self.config.warmup and device.type == 'cuda':
             self._warmup_cuda()
 
-    def _ensure_device_generator(self):
+    def _ensure_device_generator(self) -> None:
         """Ensure that the configured RNG generator is on the active device for determinism."""
         gen = getattr(self.config, 'generator', None)
         if gen is None:
@@ -206,7 +208,7 @@ class FastSBOTSolver(nn.Module):
             return bool(getattr(model, 'predicts_score'))
         return True
 
-    def _validate_noise_schedule(self):
+    def _validate_noise_schedule(self) -> None:
         """Validate that noise_schedule returns monotonically decreasing _bar(t)"""
         # Use more probe points to catch micro-wiggles
         probe_points = [i / 32.0 for i in range(33)]  # 33 points from 0 to 1
@@ -234,7 +236,9 @@ class FastSBOTSolver(nn.Module):
         if not (0.0 <= vals[-1] <= 0.2):
             logger.warning(f"_bar(1) = {vals[-1]:.4f} is unusually high. Expected ~0.0 for pure noise.")
 
-    def _get_overlap_mask(self, H_pad: int, W_pad: int, patch_size: int, stride: int, device: torch.device) -> torch.Tensor:
+    def _get_overlap_mask(
+        self, H_pad: int, W_pad: int, patch_size: int, stride: int, device: torch.device
+    ) -> torch.Tensor:
         """Cache overlap masks for patch processing efficiency"""
         key = (H_pad, W_pad, patch_size, stride)
         mask = self._overlap_cache.get(key)
@@ -269,10 +273,10 @@ class FastSBOTSolver(nn.Module):
 
         return mask.to(device)
 
-    def _amp_ctx(self):
+    def _amp_ctx(self) -> ContextManager[Any]:
         """Get appropriate autocast context for device type with safety"""
         if self.device.type == "cuda" and AUTOCAST_AVAILABLE:
-            return autocast("cuda", dtype=self.amp_dtype, enabled=self.config.use_mixed_precision)
+            return cast(ContextManager[Any], autocast("cuda", dtype=self.amp_dtype, enabled=self.config.use_mixed_precision))
         elif self.device.type == "cpu" and AUTOCAST_AVAILABLE:
             # CPU autocast requires PyTorch 1.11+ for bfloat16 support
             allow = self.config.use_mixed_precision and Version(torch.__version__) >= Version("1.11")
@@ -280,10 +284,10 @@ class FastSBOTSolver(nn.Module):
                 logger.info("CPU autocast disabled: PyTorch < 1.11 doesn't support bfloat16 autocast on CPU. "
                             "Upgrade to PyTorch 1.11+ for CPU mixed precision support.")
                 self._cpu_autocast_warned = True
-            return autocast("cpu", dtype=torch.bfloat16, enabled=allow)
-        return nullcontext()
+            return cast(ContextManager[Any], autocast("cpu", dtype=torch.bfloat16, enabled=allow))
+        return cast(ContextManager[Any], nullcontext())
 
-    def _compile_step_function(self):
+    def _compile_step_function(self) -> None:
         """Compile step function that's actually used."""
         @compile_function_fixed(
             mode=self.config.compile_mode,
@@ -294,7 +298,14 @@ class FastSBOTSolver(nn.Module):
             enable_cpu_compile=self.config.enable_cpu_compile,
             compile_timeout=self.config.compile_timeout
         )
-        def _sample_step_compiled(x, score, alpha_bar_t, dt, kernel_fft=None, freq_weights=None):
+        def _sample_step_compiled(
+            x: torch.Tensor,
+            score: torch.Tensor,
+            alpha_bar_t: Union[float, torch.Tensor],
+            dt: torch.Tensor,
+            kernel_fft: Optional[torch.Tensor] = None,
+            freq_weights: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
             """Actually used fused sampling step - fully tensor-native
 
             POLISH: Renamed alpha_t  alpha_bar_t for clarity
@@ -311,7 +322,7 @@ class FastSBOTSolver(nn.Module):
 
         self._sample_step = _sample_step_compiled
 
-    def _warmup_cuda(self):
+    def _warmup_cuda(self) -> None:
         """Warmup CUDA kernels with gated FP32 time"""
         if self.device.type != 'cuda':
             return
@@ -349,16 +360,20 @@ class FastSBOTSolver(nn.Module):
     def _get_cached_noise_schedule(self, t: float) -> float:
         """Cache noise schedule values with 6-decimal precision"""
         t_key = round(float(t), 6)
-        if t_key not in self.noise_schedule_cache:
+        with self._noise_schedule_lock:
+            cached = self.noise_schedule_cache.get(t_key)
+            if cached is not None:
+                return cached
+
             target_size = 800
             while len(self.noise_schedule_cache) > 1000:
                 self.noise_schedule_cache.pop(next(iter(self.noise_schedule_cache)))
                 if len(self.noise_schedule_cache) <= target_size:
                     break
 
-            self.noise_schedule_cache[t_key] = float(self.noise_schedule(t_key))
-
-        return self.noise_schedule_cache[t_key]
+            value = float(self.noise_schedule(t_key))
+            self.noise_schedule_cache[t_key] = value
+            return value
 
     def _normalize_cache_key(self, key_base: str, shape: Tuple[int, ...],
                             device: torch.device, dtype: torch.dtype) -> str:
@@ -393,16 +408,11 @@ class FastSBOTSolver(nn.Module):
             else:
                 t_val = float(t)
             t_key = f"{t_val:.6f}"
-            # Content-aware fingerprint prevents stale score reuse across different x_t
-            fp = x.reshape(-1)
-            if fp.numel() >= 4:
-                sample = torch.stack([fp[0], fp[fp.numel() // 3], fp[2 * fp.numel() // 3], fp[-1]]).float()
-                chk = float(sample.sum().item())
-            else:
-                chk = float(fp.float().sum().item())
-            fingerprint = f"ptr{int(x.data_ptr())}_chk{chk:.6e}"
+            # Content-aware fingerprint prevents stale score reuse across different x_t.
+            fingerprint = common.tensor_fingerprint(x)
+            stride_sig = tuple(x.stride()) if x.is_contiguous() else "non_contig"
             cache_key = self._normalize_cache_key(
-                f"{cache_key}_t{t_key}_{fingerprint}", x.shape, x.device, x.dtype
+                f"{cache_key}_t{t_key}_{fingerprint}_stride{stride_sig}", x.shape, x.device, x.dtype
             )
 
             clone_cache = os.environ.get("FASTSBOT_CLONE_CACHE", "1") == "1"  # Default to True for safety
@@ -505,18 +515,12 @@ class FastSBOTSolver(nn.Module):
                 t_val = float(t)
             t_key = f"{t_val:.6f}"
 
-            # Add fingerprint to avoid pointer aliasing
-            fp = x.reshape(-1)
-            if fp.numel() >= 4:
-                sample = torch.stack([fp[0], fp[fp.numel()//3], fp[2*fp.numel()//3], fp[-1]]).float()
-                chk = float(sample.sum().item())
-            else:
-                chk = float(fp.float().sum().item())
-
+            fingerprint = common.tensor_fingerprint(x)
+            stride_sig = tuple(x.stride()) if x.is_contiguous() else "non_contig"
             if run_uid is not None:
-                cache_key = f"run{run_uid}_t{t_key}_small_ptr{int(x.data_ptr())}_chk{chk:.6e}"
+                cache_key = f"run{run_uid}_t{t_key}_small_{fingerprint}_stride{stride_sig}"
             else:
-                cache_key = f"t{t_key}_small_ptr{int(x.data_ptr())}_chk{chk:.6e}"
+                cache_key = f"t{t_key}_small_{fingerprint}_stride{stride_sig}"
             return self.compute_score_cached(x, t, cache_key=cache_key)
 
         if isinstance(t, torch.Tensor):
@@ -524,10 +528,12 @@ class FastSBOTSolver(nn.Module):
         else:
             t_val = float(t)
         t_key = f"{t_val:.6f}"
+        fingerprint = common.tensor_fingerprint(x)
+        stride_sig = tuple(x.stride()) if x.is_contiguous() else "non_contig"
         if run_uid is not None:
-            input_cache_key = f"patches_run{run_uid}_t{t_key}_input_ptr{int(x.data_ptr())}"
+            input_cache_key = f"patches_run{run_uid}_t{t_key}_{fingerprint}_stride{stride_sig}"
         else:
-            input_cache_key = f"patches_t{t_key}_input_ptr{int(x.data_ptr())}"
+            input_cache_key = f"patches_t{t_key}_{fingerprint}_stride{stride_sig}"
 
         input_cache_key = self._normalize_cache_key(
             input_cache_key, x.shape, x.device, x.dtype
@@ -677,6 +683,7 @@ class FastSBOTSolver(nn.Module):
                 # Ultra-fallback: use kthvalue
                 k = max(1, int(percentile * x0_pred_flat.shape[1]))
                 s = x0_pred_flat.abs().kthvalue(k, dim=1, keepdim=True).values
+        # Note: fallback paths (NumPy/kthvalue) can yield slightly different thresholds across versions.
 
         # POLISH: Adaptive floor based on content
         if self.config.dynamic_thresholding_adaptive_floor:
@@ -710,8 +717,8 @@ class FastSBOTSolver(nn.Module):
         alpha_bar_prev = self._get_cached_noise_schedule(t_next)
 
         # Predict x0 from current sample
-        sqrt_alpha_bar_curr = math.sqrt(alpha_bar_curr)
-        sqrt_one_minus_alpha_bar_curr = math.sqrt(1.0 - alpha_bar_curr)
+        sqrt_alpha_bar_curr = math.sqrt(max(0.0, alpha_bar_curr))
+        sqrt_one_minus_alpha_bar_curr = math.sqrt(max(0.0, 1.0 - alpha_bar_curr))
         x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / sqrt_alpha_bar_curr
 
         # Clip predictions for stability
@@ -729,10 +736,14 @@ class FastSBOTSolver(nn.Module):
             )
 
         # Compute DDIM variance with stochasticity parameter eta
-        sigma_t = eta * math.sqrt(max(0.0, (1 - alpha_bar_prev) / max(1 - alpha_bar_curr, 1e-12))) * math.sqrt(1 - alpha_t)
+        sigma_t = (
+            eta
+            * math.sqrt(max(0.0, (1 - alpha_bar_prev) / max(1 - alpha_bar_curr, 1e-12)))
+            * math.sqrt(max(0.0, 1 - alpha_t))
+        )
 
         # Compute mean (with protection against negative values under sqrt)
-        sqrt_alpha_bar_prev = math.sqrt(alpha_bar_prev)
+        sqrt_alpha_bar_prev = math.sqrt(max(0.0, alpha_bar_prev))
         under = max(0.0, 1.0 - alpha_bar_prev - sigma_t**2)
         pred_sample_direction = math.sqrt(under) * noise_pred
 
@@ -775,6 +786,7 @@ class FastSBOTSolver(nn.Module):
         beta_t = max(beta_t, 1e-20)
 
         # Improved variance computation
+        variance: Union[float, torch.Tensor]
         if self.config.use_learned_variance and noise_pred.shape[1] == 2 * x_t.shape[1]:
             # Model predicts both mean and variance
             c = noise_pred.shape[1]
@@ -805,7 +817,7 @@ class FastSBOTSolver(nn.Module):
                 self._learned_variance_warned = True
 
         # Compute mean with guards for tiny denominators
-        sqrt_alpha_bar_curr = math.sqrt(alpha_bar_curr)
+        sqrt_alpha_bar_curr = math.sqrt(max(0.0, alpha_bar_curr))
         sqrt_one_minus_alpha_bar_curr = math.sqrt(max(1.0 - alpha_bar_curr, 1e-12))
 
         # Predict x0 and clip
@@ -820,14 +832,15 @@ class FastSBOTSolver(nn.Module):
         # where alpha_t = alpha_bar_curr / alpha_bar_prev is the per-step alpha
         denominator = max(1 - alpha_bar_curr, 1e-12)
         alpha_t = max(alpha_bar_curr / max(alpha_bar_prev, 1e-12), 0.0)  # per-step alpha (≤ 1)
-        mean_coef1 = math.sqrt(alpha_bar_prev) * beta_t / denominator  # coefficient for x_0
-        mean_coef2 = math.sqrt(alpha_t) * (1 - alpha_bar_prev) / denominator  # coefficient for x_t
+        mean_coef1 = math.sqrt(max(0.0, alpha_bar_prev)) * beta_t / denominator  # coefficient for x_0
+        mean_coef2 = math.sqrt(max(0.0, alpha_t)) * (1 - alpha_bar_prev) / denominator  # coefficient for x_t
         mean = mean_coef1 * x0_pred + mean_coef2 * x_t
 
         # Add noise
         if t_next > 0:
             gen = getattr(self.config, 'generator', None)
             noise = _randn_like_compat(x_t, gen)
+            std_dev: Union[float, torch.Tensor]
             if torch.is_tensor(variance):
                 # Handle tensor variance (from learned variance models)
                 std_dev = torch.clamp(variance, min=0.0).sqrt()
@@ -850,11 +863,11 @@ class FastSBOTSolver(nn.Module):
         shape: Tuple[int, int, int, int],
         timesteps: List[float],
         verbose: bool = True,
-        guidance_scale: float = None,
-        use_ddim: bool = None,
-        eta: float = None,
+        guidance_scale: Optional[float] = None,
+        use_ddim: Optional[bool] = None,
+        eta: Optional[float] = None,
         init_samples: Optional[torch.Tensor] = None,
-        callback: Optional[Callable] = None,
+        callback: Optional[Callable[[float, torch.Tensor], None]] = None,
     ) -> torch.Tensor:
         """Improved sampling with better score matching and DDIM support
 
@@ -1045,7 +1058,14 @@ class FastSBOTSolver(nn.Module):
 
         return drift
 
-    def compute_fisher_transport(self, x: torch.Tensor, score: torch.Tensor, alpha_bar_t: float, dt: torch.Tensor, t_curr: float = None) -> torch.Tensor:
+    def compute_fisher_transport(
+        self,
+        x: torch.Tensor,
+        score: torch.Tensor,
+        alpha_bar_t: float,
+        dt: torch.Tensor,
+        t_curr: Optional[float] = None,
+    ) -> torch.Tensor:
         """Transport using Fisher information geometry (dt in FP32)
 
         Args:
@@ -1060,7 +1080,10 @@ class FastSBOTSolver(nn.Module):
         # The t parameter is used for cache bucketing; when alpha is provided (as here),
         # it doesn't affect computation but does affect cache efficiency
         t_for_fisher = t_curr if t_curr is not None else 0.0
-        fisher_diag = self.kernel_module.estimate_fisher_diagonal(x, score, t=t_for_fisher, alpha=alpha_bar_t)
+        fisher_diag = cast(
+            torch.Tensor,
+            self.kernel_module.estimate_fisher_diagonal(x, score, t=t_for_fisher, alpha=alpha_bar_t),
+        )
 
         if self.config.use_fp32_fisher and score.dtype in [torch.float16, torch.bfloat16]:
             score_fp32 = score.float()
@@ -1107,6 +1130,7 @@ class FastSBOTSolver(nn.Module):
             and self.config.use_triton_kernels
             and launch_triton_kernel_safe is not None
             and fused_drift_transport_kernel_fixed is not None
+            and not (x_work.requires_grad or drift_work.requires_grad)
         )
         if triton_ready and x_work.is_cuda and x_work.numel() > 65536:
             x_flat = x_work.reshape(-1).contiguous()
@@ -1125,6 +1149,8 @@ class FastSBOTSolver(nn.Module):
             scale_buf = torch.tensor([scale_float], device=x_work.device, dtype=x_work.dtype)
 
             n_elements = x_flat.numel()
+            assert launch_triton_kernel_safe is not None
+            assert fused_drift_transport_kernel_fixed is not None
             launch_triton_kernel_safe(
                 fused_drift_transport_kernel_fixed,
                 x_flat, drift_flat, out, scale_buf,
@@ -1202,7 +1228,7 @@ class FastSBOTSolver(nn.Module):
         if result_fft.dtype != torch.complex64 and result_fft.dtype != torch.complex128:
             result_fft = result_fft.to(smoothed_fft.dtype)
 
-        result = torch.fft.irfftn(result_fft, s=spatial_dims, dim=tuple(range(2, x.dim())))
+        result = cast(torch.Tensor, torch.fft.irfftn(result_fft, s=spatial_dims, dim=tuple(range(2, x.dim()))))
 
         # Cast back to original dtype
         result = result.to(original_dtype)
@@ -1300,6 +1326,8 @@ class FastSBOTSolver(nn.Module):
         with no_grad_ctx():
             if len(timesteps) < 2:
                 raise ValueError("timesteps must have length  2")
+            if len(shape) != 4:
+                raise ValueError(f"shape must be (B, C, H, W), got {shape}")
 
             # Proper discrete timestep conversion
             if self.config.discrete_timesteps:
@@ -1344,6 +1372,17 @@ class FastSBOTSolver(nn.Module):
 
             # Precompute FFT kernels if needed
             if x_t.dim() == 4 and x_t.shape[-1] >= 64:
+                deterministic_enabled = False
+                if hasattr(torch, "are_deterministic_algorithms_enabled"):
+                    deterministic_enabled = torch.are_deterministic_algorithms_enabled()
+                deterministic_enabled = deterministic_enabled or bool(self.config.deterministic)
+                deterministic_enabled = deterministic_enabled or os.environ.get("FASTSBOT_DETERMINISTIC") == "1"
+                if deterministic_enabled and x_t.is_cuda and not self._warned_fft_determinism:
+                    logger.warning(
+                        "Deterministic mode requested with FFT-based transport; CUDA FFTs may be nondeterministic."
+                    )
+                    self._warned_fft_determinism = True
+
                 sigma = 0.25 * max(x_t.shape[-2:])
                 kernel_fft = self.kernel_module.compute_gaussian_kernel_fft(
                     x_t.shape[2:], sigma, x_t.device
@@ -1387,7 +1426,8 @@ class FastSBOTSolver(nn.Module):
                 x_t = self._sample_step(x_t, score, alpha_bar_t, dt_tensor, kernel_fft, freq_weights)
 
                 # Corrector steps
-                for _ in range(self.config.corrector_steps):
+                steps = self.config.corrector_steps or 0
+                for _ in range(steps):
                     gen = getattr(self.config, 'generator', None)
                     noise = _randn_like_compat(x_t, gen) * math.sqrt(2 * dt * self.config.corrector_snr)
                     x_t = x_t + noise
@@ -1500,12 +1540,16 @@ class FastSBOTSolver(nn.Module):
                 x_t = x_t.reshape(src_shape)
 
         # Continue regular sampling
-        return self.sample(
-            tuple(x_t.shape),
+        if x_t.dim() != 4:
+            raise ValueError(f"sample_batch_ot expects 4D tensors, got shape {tuple(x_t.shape)}")
+        shape = cast(Tuple[int, int, int, int], tuple(x_t.shape))
+        result = self.sample(
+            shape,
             deduped,
             verbose=verbose,
-            init_samples=x_t
+            init_samples=x_t,
         )
+        return cast(torch.Tensor, result)
 
     def create_optimal_timesteps(
         self,
@@ -1602,7 +1646,7 @@ class FastSBOTSolver(nn.Module):
 
         return unique_timesteps
 
-    def reset_caches(self):
+    def reset_caches(self) -> None:
         """Reset all caches"""
         self.score_cache.reset()
         self.kernel_module.kernel_cache.reset()
@@ -1709,22 +1753,24 @@ def make_schedule(schedule_type: str = "linear",
 
 
 
-def example_usage():
+def example_usage() -> torch.Tensor:
     """Example of how to use the FastSB-OT solver with CFG compatibility"""
 
     # Mock score model
     class MockScoreModel(nn.Module):
-        def forward(self, x, t):
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
             return torch.randn_like(x)
 
     # For CFG compatibility, wrap your model:
     class CFGWrapper(nn.Module):
-        def __init__(self, model, cfg_scale=7.5):
+        def __init__(self, model: nn.Module, cfg_scale: float = 7.5) -> None:
             super().__init__()
-            self.model = model
+            self.model = cast(Callable[..., torch.Tensor], model)
             self.cfg_scale = cfg_scale  # MINOR FIX: Initialize cfg_scale attribute
 
-        def forward(self, x, t, condition=None):
+        def forward(
+            self, x: torch.Tensor, t: torch.Tensor, condition: Optional[torch.Tensor] = None
+        ) -> torch.Tensor:
             if condition is not None:
                 # Get conditional and unconditional scores
                 score_cond = self.model(x, t, condition)

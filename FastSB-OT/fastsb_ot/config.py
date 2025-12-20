@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """Configuration primitives for the FastSB-OT solver."""
 
 from __future__ import annotations
@@ -8,14 +7,14 @@ import random
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, List, Optional, Literal
+from typing import Any, Callable, List, Optional, Literal, cast
 
 import torch
 
 from . import common
 
 logger = common.logger
-Version = common.Version
+Version = cast(Any, common).Version
 NUMPY_AVAILABLE = common.NUMPY_AVAILABLE
 _CACHED_DEVICE_PROPERTIES = common._CACHED_DEVICE_PROPERTIES
 _DEVICE_CACHE_LOCK = threading.Lock()
