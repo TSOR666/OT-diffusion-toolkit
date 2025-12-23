@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+import torch
 from torch.utils.data import DataLoader, Dataset
 
 from ..config.training_config import DatasetConfig
@@ -155,6 +158,14 @@ def create_dataloader(
         raise ValueError(f"batch_size must be positive, got {eff_batch}")
     if drop_last is None:
         drop_last = split in (None, "train")
+
+    def _seed_worker(worker_id: int) -> None:
+        """Seed dataloader workers for reproducibility across Python, NumPy, and PyTorch."""
+        worker_seed = torch.initial_seed() % 2**32
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
     return DataLoader(
         dataset,
         batch_size=eff_batch,
@@ -163,6 +174,7 @@ def create_dataloader(
         pin_memory=config.pin_memory,
         persistent_workers=config.persistent_workers and config.num_workers > 0,
         drop_last=drop_last,
+        worker_init_fn=_seed_worker if config.num_workers > 0 else None,
     )
 
 

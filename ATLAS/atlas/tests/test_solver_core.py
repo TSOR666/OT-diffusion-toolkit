@@ -121,3 +121,23 @@ def test_linear_solver_branch_produces_valid_potentials() -> None:
     Kg = kernel_op.apply(x, g)
     residual = torch.abs(f * Kg - 1.0).max()
     assert residual < 5e-2, f"Linear solver marginals violated: {float(residual):.3e}"
+
+
+def test_transport_map_gradcheck() -> None:
+    torch.manual_seed(0)
+    solver = _make_solver(use_linear_solver=False)
+
+    x_curr = torch.randn(4, 2, dtype=torch.double)
+    x_next = torch.randn(4, 2, dtype=torch.double)
+    f = torch.rand(4, dtype=torch.double)
+    g = torch.rand(4, dtype=torch.double)
+
+    kernel_op = solver._select_optimal_kernel_operator(x_curr, epsilon=solver.epsilon)
+    transport = solver._construct_transport_map(f, g, kernel_op, x_curr, x_next)
+
+    z = torch.randn(3, 2, dtype=torch.double, requires_grad=True)
+
+    def fn(z_in: torch.Tensor) -> torch.Tensor:
+        return transport(z_in)
+
+    assert torch.autograd.gradcheck(fn, (z,), eps=1e-6, atol=1e-4)

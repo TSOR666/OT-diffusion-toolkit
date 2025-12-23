@@ -252,6 +252,7 @@ class SchroedingerBridgeSolver:
             t_tensor = torch.tensor(float(t), device=device, dtype=dtype)
 
         t_tensor = torch.clamp(t_tensor, 0.0, 1.0)
+        edge_mask = (t_tensor <= 0.0) | (t_tensor >= 1.0)
 
         sigma_min_root = torch.tensor(sigma_min, device=device, dtype=dtype) ** (1.0 / rho)
         sigma_max_root = torch.tensor(sigma_max, device=device, dtype=dtype) ** (1.0 / rho)
@@ -263,6 +264,8 @@ class SchroedingerBridgeSolver:
 
         denom = 1.0 + sigma_t ** 2
         alpha_prime = -2.0 * sigma_t * sigma_prime / (denom ** 2)
+        if edge_mask.item():
+            return torch.zeros_like(alpha_prime)
         return alpha_prime
 
     def _analytic_alpha_prime(
@@ -353,8 +356,10 @@ class SchroedingerBridgeSolver:
         noise_pred = noise_pred.to(x.dtype)
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
-        sigma_t = torch.clamp(self._compute_sigma(alpha_t), min=1e-6)
-        score = -noise_pred / sigma_t
+        sigma_t = self._compute_sigma(alpha_t)
+        sigma_floor = max(1e-6, torch.finfo(sigma_t.dtype).tiny)
+        sigma_safe = torch.clamp(sigma_t, min=sigma_floor)
+        score = -noise_pred / sigma_safe
         return score
 
     def _compute_drift(
@@ -802,12 +807,26 @@ class SchroedingerBridgeSolver:
         Returns:
             Tuple of (solution, converged)
         """
-        if x0 is None:
-            x = torch.zeros_like(b)
-        else:
-            x = x0.clone()
+        orig_dtype = b.dtype
+        compute_dtype = (
+            torch.float32
+            if b.dtype in (torch.float16, torch.bfloat16)
+            else b.dtype
+        )
+        b_vec = b.to(dtype=compute_dtype)
 
-        r = b - A_func(x)
+        if x0 is None:
+            x = torch.zeros_like(b_vec)
+        else:
+            x = x0.to(device=b.device, dtype=compute_dtype).clone()
+
+        def _apply_A(v: torch.Tensor) -> torch.Tensor:
+            out = A_func(v)
+            if out.dtype != compute_dtype:
+                out = out.to(dtype=compute_dtype)
+            return out
+
+        r = b_vec - _apply_A(x)
         p = r.clone()
         rsold = torch.sum(r * r)
 
@@ -816,7 +835,7 @@ class SchroedingerBridgeSolver:
 
         rel_tol = tol if tol is not None else self.cg_relative_tolerance
         abs_tol = max(self.cg_absolute_tolerance, 0.0)
-        dtype_info = torch.finfo(r.dtype)
+        dtype_info = torch.finfo(compute_dtype)
 
         def _finalize(converged: bool, residual: torch.Tensor) -> Tuple[torch.Tensor, bool]:
             residual_value = float(residual.detach().cpu().item())
@@ -824,7 +843,7 @@ class SchroedingerBridgeSolver:
             self.perf_stats["cg_last_residual"] = residual_value
             if not converged:
                 self.perf_stats["cg_failure_count"] += 1
-            return x, converged
+            return x.to(dtype=orig_dtype), converged
 
         initial_residual = torch.sqrt(rsold)
         baseline = max(float(initial_residual.detach().cpu().item()), dtype_info.tiny)
@@ -836,13 +855,12 @@ class SchroedingerBridgeSolver:
 
         for i in range(max_iter):
             iterations += 1
-            Ap = A_func(p)
+            Ap = _apply_A(p)
 
             # Compute denominator safely with dtype-aware epsilon
             denom = torch.sum(p * Ap)
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
-            dtype_info = torch.finfo(denom.dtype)
             min_denom = denom_abs.new_tensor(
                 dtype_info.tiny * self._min_curvature_multiplier
             )
@@ -861,7 +879,7 @@ class SchroedingerBridgeSolver:
 
                 # Otherwise restart with steepest descent direction
                 p = r.clone()
-                Ap = A_func(p)
+                Ap = _apply_A(p)
                 denom = torch.sum(p * Ap)
                 denom_is_finite = torch.isfinite(denom)
                 denom_abs = torch.abs(denom)
@@ -889,7 +907,7 @@ class SchroedingerBridgeSolver:
 
             # Periodically compute full residual to avoid drift
             if i % 10 == 0:
-                r = b - A_func(x)
+                r = b_vec - _apply_A(x)
             else:
                 r = r - alpha * Ap
 
@@ -1049,31 +1067,53 @@ class SchroedingerBridgeSolver:
                     raise RuntimeError(
                         f"Kernel weights shape mismatch: expected {(z_flat.size(0), batch_size)}, got {tuple(weights.shape)}"
                     )
-                fg_broadcasted = fg.unsqueeze(0)
-                P_zx = weights * fg_broadcasted  # (batch_z, batch_x)
+                norm_dtype = (
+                    torch.float32
+                    if weights.dtype in (torch.float16, torch.bfloat16)
+                    else weights.dtype
+                )
+                fg_broadcasted = fg.unsqueeze(0).to(dtype=norm_dtype)
+                P_zx = weights.to(dtype=norm_dtype) * fg_broadcasted  # (batch_z, batch_x)
                 row_sums = P_zx.sum(dim=1, keepdim=True)
-                if not torch.all(row_sums > 0):
+                if not bool((row_sums > 0).all()):
                     raise RuntimeError("Transport map has zero-weight rows; cannot normalize.")
-                row_sums = torch.clamp(row_sums, min=1e-10)
+                min_row_sum = max(1e-12, torch.finfo(norm_dtype).tiny)
+                row_sums = torch.clamp(row_sums, min=min_row_sum)
                 P_zx_norm = P_zx / row_sums
 
                 # Second normalization pass to reduce fp16/accumulation drift.
                 row_sum_check = P_zx_norm.sum(dim=1, keepdim=True)
-                if not torch.all(row_sum_check > 0):
+                if not bool((row_sum_check > 0).all()):
                     raise RuntimeError(
                         "Transport map has zero-weight rows after normalization; cannot renormalize."
                     )
-                row_sum_check = torch.clamp(row_sum_check, min=1e-10)
+                row_sum_check = torch.clamp(row_sum_check, min=min_row_sum)
                 P_zx_norm = P_zx_norm / row_sum_check
 
+                row_sum_check = P_zx_norm.sum(dim=1, keepdim=True)
+                max_dev = torch.max(torch.abs(row_sum_check - 1.0))
+                if float(max_dev.detach().cpu().item()) > 0.0:
+                    correction = 1.0 - row_sum_check
+                    last_col = P_zx_norm[..., -1:] + correction
+                    if P_zx_norm.size(1) > 1:
+                        P_zx_norm = torch.cat([P_zx_norm[..., :-1], last_col], dim=1)
+                    else:
+                        P_zx_norm = last_col
+
+                if bool((P_zx_norm < 0).any()):
+                    raise RuntimeError("Transport map normalization produced negative weights.")
+
                 row_sum_check_flat = P_zx_norm.sum(dim=1)
-                atol = 1e-3 if P_zx_norm.dtype == torch.float16 else 1e-4
-                if not torch.allclose(row_sum_check_flat, torch.ones_like(row_sum_check_flat), atol=atol):
-                    self.logger.warning(
-                        "Row-stochasticity drift detected in transport map: max deviation %.3e",
-                        float(torch.max(torch.abs(row_sum_check_flat - 1.0))),
-                    )
-                z_next = P_zx_norm @ x_next_flat  # (batch_z, batch_x) @ (batch_x, d) -> (batch_z, d)
+                atol = 1e-3 if P_zx_norm.dtype in (torch.float16, torch.bfloat16) else 1e-4
+                if not torch.allclose(
+                    row_sum_check_flat, torch.ones_like(row_sum_check_flat), atol=atol
+                ):
+                    raise RuntimeError("Transport map normalization failed to enforce row-stochasticity.")
+
+                x_next_cast = x_next_flat.to(dtype=P_zx_norm.dtype)
+                z_next = P_zx_norm @ x_next_cast  # (batch_z, batch_x) @ (batch_x, d) -> (batch_z, d)
+                if z_next.dtype != x_next_flat.dtype:
+                    z_next = z_next.to(dtype=x_next_flat.dtype)
             elif isinstance(kernel_op, FFTKernelOperator):
                 raise RuntimeError(
                     "FFT kernel operator does not expose pairwise evaluations required for transport map. "

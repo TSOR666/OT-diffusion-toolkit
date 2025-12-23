@@ -327,6 +327,22 @@ class MyConditioningInterface:
         return conditioning
 ```
 
+### Conditioning Tensor Invariants
+
+ATLAS expects conditioning payloads to respect the following tensor shape rules:
+
+- `context`: `[batch, seq_len, dim]` or `[batch, dim]` (treated as `seq_len=1`).
+- `context_mask` / `mask`: boolean mask matching `context` tokens. Supported shapes are
+  `[batch, seq_len]`, `[batch, query_len, seq_len]`, or `[batch, heads, query_len, seq_len]`.
+- `embedding`: `[batch, dim]` global conditioning vector.
+- `negative_context`: optional negative-conditioning tokens matching `context` shape.
+- `conditioning`: `[batch, dim]` vector passed through the optional conditioning encoder.
+- `cond` / `uncond`: optional classifier-free guidance payloads, each following the same rules
+  as above, plus a scalar `guidance_scale` and optional `base_batch` for expansion logic.
+
+All tensor entries should share device and dtype, and the leading batch dimension must match
+the input batch (or be broadcastable via `expand_condition_dict` in `atlas.conditioning.utils`).
+
 ### Using Custom Conditioner
 
 ```python
