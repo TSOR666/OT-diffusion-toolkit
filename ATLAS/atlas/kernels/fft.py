@@ -118,10 +118,12 @@ class FFTKernelOperator(KernelOperator):
         # Compute kernel
         if self.kernel_type == 'gaussian':
             sigma_sq = epsilon ** 2
-            exponent = torch.clamp(-dist_sq / (2 * sigma_sq), min=-50.0)
+            # Two-sided clamp: max=0 ensures no positive exponents from numerical errors
+            exponent = torch.clamp(-dist_sq / (2 * sigma_sq), min=-50.0, max=0.0)
             kernel = torch.exp(exponent)
         elif self.kernel_type == 'laplacian':
-            exponent = torch.clamp(-torch.sqrt(dist_sq + 1e-10) / epsilon, min=-50.0)
+            # Two-sided clamp: max=0 ensures no positive exponents from numerical errors
+            exponent = torch.clamp(-torch.sqrt(dist_sq + 1e-10) / epsilon, min=-50.0, max=0.0)
             kernel = torch.exp(exponent)
         elif self.kernel_type == 'cauchy':
             denom = 1.0 + dist_sq / (epsilon ** 2)

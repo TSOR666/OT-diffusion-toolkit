@@ -357,9 +357,14 @@ class SchroedingerBridgeSolver:
 
         alpha_t = self._schedule_to_tensor(t, noise_pred)
         sigma_t = self._compute_sigma(alpha_t)
-        sigma_floor = max(1e-6, torch.finfo(sigma_t.dtype).tiny)
-        sigma_safe = torch.clamp(sigma_t, min=sigma_floor)
-        score = -noise_pred / sigma_safe
+        # Use two-sided clamping for numerical stability:
+        # - Lower bound prevents division by near-zero
+        # - Upper bound prevents extreme scores in edge cases
+        sigma_floor = max(1e-4, torch.finfo(sigma_t.dtype).tiny)
+        sigma_safe = torch.clamp(sigma_t, min=sigma_floor, max=1e4)
+        # Clamp noise_pred to prevent overflow in fp16 when dividing by small sigma
+        noise_pred_safe = torch.clamp(noise_pred, min=-1e4, max=1e4)
+        score = -noise_pred_safe / sigma_safe
         return score
 
     def _compute_drift(

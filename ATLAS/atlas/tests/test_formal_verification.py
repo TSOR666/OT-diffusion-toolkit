@@ -29,7 +29,7 @@ from atlas.kernels import (
     NystromKernelOperator,
     RFFKernelOperator,
 )
-from atlas.models.score_network import HighResLatentScoreModel, build_highres_score_model
+from atlas.models.score_network import build_highres_score_model
 from atlas.schedules.noise import karras_noise_schedule
 from atlas.solvers.schrodinger_bridge import SchroedingerBridgeSolver
 

@@ -5,8 +5,11 @@ from __future__ import annotations
 import sys
 import torch
 
+from typing import cast
+
 from atlas.config import ConditioningConfig, HighResModelConfig, KernelConfig, SamplerConfig
 from atlas.conditioning import CLIPConditioningInterface
+from atlas.types import ConditioningDict, ConditioningPayload
 from atlas.models import HighResLatentScoreModel
 from atlas.schedules import karras_noise_schedule
 from atlas.solvers import AdvancedHierarchicalDiffusionSampler
@@ -60,13 +63,13 @@ def main(prompt: str = "a serene mountain landscape") -> None:
         raise RuntimeError("Failed to attach CLIP conditioner to sampler.")
 
     # Encode prompt explicitly if available
-    conditioning = None
+    conditioning: ConditioningPayload | None = None
     try:
         encoded = clip_interface.encode_text([prompt])
         if isinstance(encoded, torch.Tensor):
             conditioning = {"context": encoded}
         elif isinstance(encoded, dict):
-            conditioning = encoded
+            conditioning = cast(ConditioningDict, encoded)
     except Exception:
         conditioning = None  # Fall back to sampler handling prompts directly
 
@@ -77,13 +80,13 @@ def main(prompt: str = "a serene mountain landscape") -> None:
             (1, model_config.in_channels, 64, 64),
             timesteps,
             conditioning=conditioning,
-            verbose=False,
+            show_progress=False,
         )
     else:
         samples = sampler.sample(
             (1, model_config.in_channels, 64, 64),
             timesteps,
-            verbose=False,
+            show_progress=False,
             prompts=[prompt],
         )
 

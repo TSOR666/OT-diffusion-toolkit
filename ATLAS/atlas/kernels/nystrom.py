@@ -75,12 +75,14 @@ class NystromKernelOperator(KernelOperator):
             y_norm = (y_flat.square()).sum(dim=1, keepdim=True).transpose(0, 1)
             dist_sq = torch.clamp(x_norm + y_norm - 2.0 * x_flat @ y_flat.T, min=0.0)
             sigma_sq = self.epsilon ** 2
-            exponent = torch.clamp(-dist_sq / (2.0 * sigma_sq), min=-50.0)
+            # Two-sided clamp: max=0 ensures no positive exponents from numerical errors
+            exponent = torch.clamp(-dist_sq / (2.0 * sigma_sq), min=-50.0, max=0.0)
             return torch.exp(exponent)
 
         if self.kernel_type == "laplacian":
             dist = torch.cdist(x_flat, y_flat, p=2)
-            exponent = torch.clamp(-dist / self.epsilon, min=-50.0)
+            # Two-sided clamp: max=0 ensures no positive exponents from numerical errors
+            exponent = torch.clamp(-dist / self.epsilon, min=-50.0, max=0.0)
             return torch.exp(exponent)
 
         # Cauchy kernel
