@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, overload
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, cast, overload
 
 import torch
 import torch.nn as nn
@@ -18,7 +18,7 @@ from ..config.kernel_config import KernelConfig
 from ..config.sampler_config import SamplerConfig
 from ..utils.memory import get_peak_memory_mb, reset_peak_memory, warn_on_high_memory
 from ..utils.random import set_seed
-from ..types import ConditioningPayload, NoiseSchedule
+from ..types import ConditioningDict, ConditioningPayload, NoiseSchedule
 from .schrodinger_bridge import SchroedingerBridgeSolver
 
 
@@ -85,7 +85,7 @@ class AdvancedHierarchicalDiffusionSampler:
         prompts: List[str],
         negative_prompts: Optional[List[str]] = None,
         guidance_scale: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> ConditioningDict:
         if self.conditioner is None:
             raise ValueError("No CLIP conditioner attached to sampler.")
         payload = self.conditioner.build_conditioning_payload(
@@ -137,21 +137,27 @@ class AdvancedHierarchicalDiffusionSampler:
             for section in ("cond", "uncond"):
                 section_payload = payload.get(section)
                 if section_payload is not None:
-                    expanded[section] = expand_condition_dict(
-                        section_payload,
-                        batch_size,
-                        base_batch,
-                        self.device,
-                    )
+                    # section_payload is ConditioningPayload; only expand if it's a dict
+                    if isinstance(section_payload, dict):
+                        expanded[section] = expand_condition_dict(
+                            section_payload,
+                            batch_size,
+                            base_batch,
+                            self.device,
+                        )
+                    else:
+                        expanded[section] = section_payload
 
             for key, value in payload.items():
                 if key in {"cond", "uncond", "guidance_scale", "base_batch"}:
                     continue
                 expanded[key] = value
-            return expanded
+            return cast(ConditioningDict, expanded)
 
         cond = payload.get("cond", payload)
-        return expand_condition_dict(cond, batch_size, base_batch, self.device)
+        # At this point, cond is guaranteed to be a dict (either from "cond" key or payload itself)
+        cond_dict = cast(Dict[str, Any], cond)
+        return cast(ConditioningDict, expand_condition_dict(cond_dict, batch_size, base_batch, self.device))
 
     def _prepare_conditioning(
         self,

@@ -93,7 +93,9 @@ class ContextualAttention2D(nn.Module):
         attn = torch.softmax(attn_scores, dim=-1)
         if invalid_mask is not None:
             attn = attn.masked_fill(invalid_mask, 0.0)
-            has_all_invalid = all_invalid is not None and bool(all_invalid.any())
+            # all_invalid is guaranteed to be set when invalid_mask is not None (see above)
+            assert all_invalid is not None, "all_invalid must be set when invalid_mask is set"
+            has_all_invalid = bool(all_invalid.any())
             if has_all_invalid:
                 attn = attn.masked_fill(all_invalid, 0.0)
             row_sums = attn.sum(dim=-1, keepdim=True)

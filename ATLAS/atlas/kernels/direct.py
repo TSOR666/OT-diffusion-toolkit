@@ -48,14 +48,16 @@ class DirectKernelOperator(KernelOperator):
 
             dist_sq = self._squared_distance(x_flat, y_flat)
             sigma_sq = self.epsilon ** 2
-            exponent = torch.clamp(-dist_sq / (2 * sigma_sq), min=-50.0)
+            # Two-sided clamp: max=0 ensures no positive exponents from numerical errors
+            exponent = torch.clamp(-dist_sq / (2 * sigma_sq), min=-50.0, max=0.0)
             return torch.exp(exponent)
 
         if self.kernel_type == "laplacian":
             x_flat = x.reshape(x.size(0), -1)
             y_flat = y.reshape(y.size(0), -1)
             dist = torch.cdist(x_flat, y_flat, p=2)
-            exponent = torch.clamp(-dist / self.epsilon, min=-50.0)
+            # Two-sided clamp: max=0 ensures no positive exponents from numerical errors
+            exponent = torch.clamp(-dist / self.epsilon, min=-50.0, max=0.0)
             return torch.exp(exponent)
 
         if self.kernel_type == "cauchy":

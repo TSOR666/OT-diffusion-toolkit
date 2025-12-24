@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Protocol, TypeAlias, TypedDict, overload
+from typing import Protocol, TypeAlias, TypedDict, overload
 
 import torch
 

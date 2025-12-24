@@ -45,7 +45,7 @@ def test_single_batch_overfit() -> None:
         optimizer.zero_grad(set_to_none=True)
         pred = model(x, t)
         loss = F.mse_loss(pred, target)
-        loss.backward()
+        loss.backward()  # type: ignore[no-untyped-call]
         optimizer.step()
 
     with torch.no_grad():
@@ -64,7 +64,7 @@ def test_checkpoint_roundtrip(tmp_path: Path) -> None:
     target = torch.randn_like(x)
 
     loss = F.mse_loss(model(x, t), target)
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call]
     optimizer.step()
 
     ema_model = copy.deepcopy(model)
