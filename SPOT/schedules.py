@@ -32,27 +32,29 @@ class NoiseScheduleProtocol(Protocol):
 class CosineSchedule:
     """Reference cosine schedule with unified semantics."""
 
-    def __init__(self, device: str | torch.device = "cpu", dtype: torch.dtype = torch.float32):
+    def __init__(self, device: str | torch.device = "cpu", dtype: torch.dtype = torch.float32) -> None:
         self.device = device
         self.dtype = dtype
         self.s = 0.008
 
     def _ensure_tensor(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
         if isinstance(t, (int, float)):
-            return torch.tensor([t], device=self.device, dtype=torch.float32)
-        return t.to(device=self.device, dtype=torch.float32)
+            return torch.tensor([t], device=self.device, dtype=torch.float32)  # (1,)
+        return t.to(device=self.device, dtype=torch.float32)  # (N,)
 
     def alpha_sigma(self, t: Union[float, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
-        ft = torch.cos((t32 + self.s) / (1 + self.s) * math.pi / 2).pow(2)
-        alpha = torch.sqrt(ft)
-        sigma = torch.sqrt((1 - ft).clamp_min(0))
+        """Return (alpha, sigma) with same shape as ``t`` (N,) -> (N,), (N,)."""
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)  # (N,)
+        ft = torch.cos((t32 + self.s) / (1 + self.s) * math.pi / 2).pow(2)  # (N,)
+        alpha = torch.sqrt(ft)  # (N,)
+        sigma = torch.sqrt((1 - ft).clamp_min(0))  # (N,)
         return alpha.to(self.dtype), sigma.to(self.dtype)
 
     def lambda_(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
+        """Return lambda(t) with same shape as ``t`` (N,) -> (N,)."""
         alpha, sigma = self.alpha_sigma(t)
-        a32, s32 = alpha.float(), sigma.float()
-        out = torch.log((a32 * a32) / (s32 * s32 + EPSILON_CLAMP))
+        a32, s32 = alpha.float(), sigma.float()  # (N,), (N,)
+        out = torch.log((a32 * a32) / (s32 * s32 + EPSILON_CLAMP))  # (N,)
         if __debug__:
             assert out.dtype == torch.float32, f"(t) must be fp32, got {out.dtype}"
         return out
@@ -70,26 +72,26 @@ class CosineSchedule:
         Returns:
             beta(t) as float32 tensor
         """
-        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)  # (N,)
 
         # Compute angle θ = π/2 * (t+s)/(1+s)
-        theta = (t32 + self.s) / (1 + self.s) * math.pi / 2
+        theta = (t32 + self.s) / (1 + self.s) * math.pi / 2  # (N,)
 
         # f(t) = cos²(θ)
-        cos_theta = torch.cos(theta)
-        f = cos_theta ** 2
+        cos_theta = torch.cos(theta)  # (N,)
+        f = cos_theta ** 2  # (N,)
 
         # df/dt = -sin(2θ) * π/(2(1+s))
-        sin_2theta = torch.sin(2 * theta)
-        df_dt = -sin_2theta * math.pi / (2 * (1 + self.s))
+        sin_2theta = torch.sin(2 * theta)  # (N,)
+        df_dt = -sin_2theta * math.pi / (2 * (1 + self.s))  # (N,)
 
         # β(t) = -dλ/dt = -(df/dt) / (f(1-f))
         # Add small epsilon to denominator for numerical stability
-        denominator = (f * (1 - f)).clamp_min(EPSILON_CLAMP)
-        beta_t = -df_dt / denominator
+        denominator = (f * (1 - f)).clamp_min(EPSILON_CLAMP)  # (N,)
+        beta_t = -df_dt / denominator  # (N,)
 
         # Ensure beta is non-negative (it should be by construction)
-        beta_t = beta_t.clamp_min(0.0)
+        beta_t = beta_t.clamp_min(0.0)  # (N,)
 
         if __debug__:
             assert beta_t.dtype == torch.float32, f"beta(t) must be fp32, got {beta_t.dtype}"
@@ -106,7 +108,7 @@ class LinearSchedule:
         beta_end: float = 2e-2,
         device: str | torch.device = "cpu",
         dtype: torch.dtype = torch.float32,
-    ):
+    ) -> None:
         self.beta_start = float(beta_start)
         self.beta_end = float(beta_end)
         self.device = device
@@ -114,25 +116,24 @@ class LinearSchedule:
 
     def _ensure_tensor(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
         if isinstance(t, (int, float)):
-            return torch.tensor([t], device=self.device, dtype=torch.float32)
-        return t.to(device=self.device, dtype=torch.float32)
+            return torch.tensor([t], device=self.device, dtype=torch.float32)  # (1,)
+        return t.to(device=self.device, dtype=torch.float32)  # (N,)
 
     def alpha_sigma(self, t: Union[float, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
+        """Return (alpha, sigma) with same shape as ``t`` (N,) -> (N,), (N,)."""
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)  # (N,)
         beta0, beta1 = self.beta_start, self.beta_end
-        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32
-        alpha_bar = torch.exp(-integral)
-        alpha = torch.sqrt(alpha_bar)
-        sigma = torch.sqrt((1.0 - alpha_bar).clamp_min(0))
+        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32  # (N,)
+        alpha_bar = torch.exp(-integral)  # (N,)
+        alpha = torch.sqrt(alpha_bar)  # (N,)
+        sigma = torch.sqrt((1.0 - alpha_bar).clamp_min(0))  # (N,)
         return alpha.to(self.dtype), sigma.to(self.dtype)
 
     def lambda_(self, t: Union[float, torch.Tensor]) -> torch.Tensor:
-        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
-        beta0, beta1 = self.beta_start, self.beta_end
-        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32
-        alpha_bar = torch.exp(-integral)
-        sigma_sq = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)
-        out = torch.log(alpha_bar / sigma_sq)
+        """Return lambda(t) with same shape as ``t`` (N,) -> (N,)."""
+        alpha, sigma = self.alpha_sigma(t)
+        a32, s32 = alpha.float(), sigma.float()  # (N,), (N,)
+        out = torch.log((a32 * a32) / (s32 * s32 + EPSILON_CLAMP))  # (N,)
         if __debug__:
             assert out.dtype == torch.float32, f"(t) must be fp32, got {out.dtype}"
         return out
@@ -143,16 +144,14 @@ class LinearSchedule:
         Returns:
             beta(t) = -(d/dt) lambda(t) where lambda(t) = log(alpha^2 / sigma^2)
         """
-        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)
-        beta_t = self.beta_start + (self.beta_end - self.beta_start) * t32
+        t32 = self._ensure_tensor(t).clamp(0.0, 1.0)  # (N,)
+        beta_t = self.beta_start + (self.beta_end - self.beta_start) * t32  # (N,)
 
         # Relation for VP-style schedules: -d lambda/dt = beta(t) / (1 - alpha_bar(t))
-        # Compute alpha_bar in float32 directly to avoid precision loss for small variances.
-        beta0, beta1 = self.beta_start, self.beta_end
-        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32
-        alpha_bar = torch.exp(-integral)
-        denom = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)
-        beta_lambda = beta_t / denom
+        alpha, _ = self.alpha_sigma(t32)  # (N,)
+        alpha_bar = (alpha.float() * alpha.float()).clamp(0.0, 1.0)  # (N,)
+        denom = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)  # (N,)
+        beta_lambda = beta_t / denom  # (N,)
 
         if __debug__:
             assert beta_lambda.dtype == torch.float32, f"beta(t) must be fp32, got {beta_lambda.dtype}"

@@ -59,7 +59,7 @@ class HeunIntegrator:
     Uses predictor-corrector structure: predict with Euler, correct with trapezoidal rule.
     """
 
-    def __init__(self, schedule: NoiseScheduleProtocol):
+    def __init__(self, schedule: NoiseScheduleProtocol) -> None:
         self.schedule = schedule
 
     def step(
@@ -78,27 +78,27 @@ class HeunIntegrator:
             score_fn: Function that computes score given (x, t)
 
         Returns:
-            Next state x_{t+1}
+            Next state with same shape as ``x`` (B, *S) -> (B, *S)
         """
         dt = t_next - t_curr
 
         # Compute score at current time
-        score_curr = score_fn(x, t_curr)
+        score_curr = score_fn(x, t_curr)  # (B, *S) -> (B, *S)
 
         # Get beta values from schedule
         beta_curr = _beta_from_schedule(self.schedule, t_curr)
         beta_next = _beta_from_schedule(self.schedule, t_next)
 
         # Probability-flow ODE drift: -0.5*beta*x - beta*score
-        drift_curr = -0.5 * beta_curr * x - beta_curr * score_curr
-        x_pred = x + drift_curr * dt
+        drift_curr = -0.5 * beta_curr * x - beta_curr * score_curr  # scalar * (B, *S) -> (B, *S)
+        x_pred = x + drift_curr * dt  # (B, *S) + (B, *S) * () -> (B, *S)
 
         # Corrector step (evaluate score at predicted point)
-        score_next = score_fn(x_pred, t_next)
-        drift_next = -0.5 * beta_next * x_pred - beta_next * score_next
+        score_next = score_fn(x_pred, t_next)  # (B, *S) -> (B, *S)
+        drift_next = -0.5 * beta_next * x_pred - beta_next * score_next  # scalar * (B, *S) -> (B, *S)
 
         # Trapezoidal rule (average of drifts)
-        x_next = x + 0.5 * (drift_curr + drift_next) * dt
+        x_next = x + 0.5 * (drift_curr + drift_next) * dt  # (B, *S) -> (B, *S)
 
         return x_next
 
@@ -118,7 +118,7 @@ class DDIMIntegrator:
         self,
         schedule: NoiseScheduleProtocol,
         eta: float = 0.0,
-    ):
+    ) -> None:
         """Initialize DDIM integrator.
 
         Args:
@@ -151,57 +151,55 @@ class DDIMIntegrator:
             generator: Optional random generator for stochastic component
 
         Returns:
-            Next state
+            Next state with same shape as ``x`` (B, *S) -> (B, *S)
         """
         # Get noise parameters
-        t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)
-        t_next_tensor = torch.full((1,), t_next, device=x.device, dtype=torch.float32)
+        t_curr_tensor = torch.full((1,), t_curr, device=x.device, dtype=torch.float32)  # (1,)
+        t_next_tensor = torch.full((1,), t_next, device=x.device, dtype=torch.float32)  # (1,)
 
-        alpha_curr, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)
-        alpha_next, sigma_next = self.schedule.alpha_sigma(t_next_tensor)
+        alpha_curr, sigma_curr = self.schedule.alpha_sigma(t_curr_tensor)  # (1,), (1,)
+        alpha_next, sigma_next = self.schedule.alpha_sigma(t_next_tensor)  # (1,), (1,)
 
         # Compute score
-        score = score_fn(x, t_curr)
+        score = score_fn(x, t_curr)  # (B, *S) -> (B, *S)
 
         # Predict x0 (denoised sample)
         # FIXED: Correct formula for score (not noise)
         # x_0 = (x_t + σ_t² * score) / α_t
         with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
+            x_32 = x.float()
+            score_32 = score.float()
             sigma_curr_32 = sigma_curr.float()
-            sigma_curr_sq = sigma_curr_32 ** 2
+            sigma_next_32 = sigma_next.float()
             alpha_curr_32 = alpha_curr.float()
+            alpha_next_32 = alpha_next.float()
+            sigma_curr_sq = sigma_curr_32 ** 2  # (1,)
 
             # Correct formula: x0 = (x + sigma^2 * score) / alpha
-            pred_x0 = (x.float() + sigma_curr_sq.to(x.device) * score.float()) / (alpha_curr_32.to(x.device) + EPSILON_CLAMP)
-            score_32 = score.float()
-            # Convert score -> epsilon (noise prediction).
-            epsilon = -sigma_curr_32 * score_32
+            pred_x0 = (x_32 + sigma_curr_sq.to(x.device) * score_32) / (
+                alpha_curr_32.to(x.device) + EPSILON_CLAMP
+            )  # (B, *S)
 
-            alpha_next_32 = alpha_next.float()
-            sigma_next_32 = sigma_next.float()
-            sigma_next_sq = sigma_next_32 ** 2
+            # Predicted noise at t_curr: z = -sigma_curr * score
+            pred_noise = -sigma_curr_32.to(x.device) * score_32  # (B, *S)
 
+            # Deterministic DDIM direction with optional stochastic blending
+            noise_coeff = math.sqrt(max(0.0, 1.0 - self.eta ** 2))
+            direction = sigma_next_32.to(x.device) * noise_coeff * pred_noise  # (B, *S)
+
+            # DDIM sampling formula: x_{t+1} = alpha_{t+1} * x0 + sigma_{t+1} * z
+            x_next = alpha_next_32.to(x.device) * pred_x0 + direction  # (B, *S)
+
+            # Add stochastic component if eta > 0
             if self.eta > 0 and t_next > 0:
-                alpha_curr_sq = alpha_curr_32 ** 2
-                alpha_next_sq = alpha_next_32 ** 2
-                ratio = sigma_next_sq / (sigma_curr_sq + EPSILON_CLAMP)
-                alpha_ratio_sq = alpha_curr_sq / (alpha_next_sq + EPSILON_CLAMP)
-                sigma_eta_sq = (self.eta ** 2) * ratio * (1.0 - alpha_ratio_sq).clamp_min(0.0)
-            else:
-                sigma_eta_sq = torch.zeros_like(sigma_next_sq)
-
-            sigma_hat = (sigma_next_sq - sigma_eta_sq).clamp_min(0.0).sqrt()
-
-            # DDIM sampling formula: x_{t+1} = alpha_{t+1} * x_0 + sigma_hat * epsilon + sigma_eta * z
-            x_next = alpha_next_32 * pred_x0 + sigma_hat * epsilon
-
-            if self.eta > 0 and t_next > 0:
-                sigma_eta = sigma_eta_sq.sqrt()
+                sigma_eta = sigma_next_32.to(x.device) * self.eta  # (1,) -> scalar broadcast
                 if generator is not None:
-                    noise = torch.randn(x.shape, device=x.device, dtype=torch.float32, generator=generator)
+                    noise = torch.randn_like(x_32, generator=generator)
                 else:
-                    noise = torch.randn(x.shape, device=x.device, dtype=torch.float32)
-                x_next = x_next + sigma_eta * noise
+                    noise = torch.randn_like(x_32)
+                x_next = x_next + sigma_eta * noise  # (B, *S)
+
+            x_next = x_next.to(x.dtype)
 
         return x_next.to(x.dtype)
 
@@ -219,7 +217,7 @@ class AdaptiveIntegrator:
         atol: float = 1e-5,
         rtol: float = 1e-3,
         max_steps: int = 1000,
-    ):
+    ) -> None:
         """Initialize adaptive integrator.
 
         Args:
@@ -253,10 +251,10 @@ class AdaptiveIntegrator:
             score_fn: Score function
 
         Returns:
-            Next state x_{t+1}
+            Next state with same shape as ``x`` (B, *S) -> (B, *S)
         """
         # Use integrate with the full step
-        x_next, _ = self.integrate(x, t_curr, t_next, score_fn)
+        x_next, _ = self.integrate(x, t_curr, t_next, score_fn)  # (B, *S)
         return x_next
 
     def integrate(
@@ -278,7 +276,7 @@ class AdaptiveIntegrator:
             score_fn: Score function
 
         Returns:
-            Tuple of (final state, number of steps taken)
+            Tuple of (final state, number of steps taken), state shape (B, *S)
         """
         x = x0
         t = t_start
@@ -300,7 +298,7 @@ class AdaptiveIntegrator:
             dt_signed = dt * direction
 
             # Take step with error estimation
-            x_next, error, dt_next = self._step_with_error(x, t, dt_signed, score_fn)
+            x_next, error, dt_next = self._step_with_error(x, t, dt_signed, score_fn)  # (B, *S)
 
             # Check if error is acceptable
             if error < self.atol or error < self.rtol * torch.norm(x).item():
@@ -341,24 +339,24 @@ class AdaptiveIntegrator:
             Tuple of (next state, error estimate, suggested next dt)
         """
         # Probability-flow drift helper
-        def drift(x_val, t_val):
+        def drift(x_val: torch.Tensor, t_val: float) -> torch.Tensor:
             beta = _beta_from_schedule(self.schedule, float(t_val))
             score = score_fn(x_val, t_val)
-            return -0.5 * beta * x_val - beta * score
+            return -0.5 * beta * x_val - beta * score  # scalar * (B, *S) -> (B, *S)
 
         # Simple embedded RK method (Heun with Euler comparison)
-        k1 = drift(x, t)
+        k1 = drift(x, t)  # (B, *S)
 
         # Heun prediction
-        x_heun = x + k1 * dt
-        k2 = drift(x_heun, t + dt)
-        x_next = x + 0.5 * (k1 + k2) * dt
+        x_heun = x + k1 * dt  # (B, *S)
+        k2 = drift(x_heun, t + dt)  # (B, *S)
+        x_next = x + 0.5 * (k1 + k2) * dt  # (B, *S)
 
         # Euler prediction
-        x_euler = x + k1 * dt
+        x_euler = x + k1 * dt  # (B, *S)
 
         # Error estimate (difference between 2nd and 1st order methods)
-        error = torch.norm(x_next - x_euler).item()
+        error = torch.norm(x_next - x_euler).item()  # scalar
 
         # Suggest next step size using standard controller
         if error > EPSILON_CLAMP:
@@ -380,7 +378,7 @@ class EulerIntegrator:
     consider HeunIntegrator (2nd order) or AdaptiveIntegrator.
     """
 
-    def __init__(self, schedule: NoiseScheduleProtocol):
+    def __init__(self, schedule: NoiseScheduleProtocol) -> None:
         self.schedule = schedule
 
     def step(
@@ -401,17 +399,17 @@ class EulerIntegrator:
             score_fn: Score function ∇ log p_t(x)
 
         Returns:
-            Next state x_{t+1}
+            Next state with same shape as ``x`` (B, *S) -> (B, *S)
         """
         beta_curr = _beta_from_schedule(self.schedule, t_curr)
 
         # Compute score once (explicit Euler for PF-ODE)
-        score = score_fn(x, t_curr)
+        score = score_fn(x, t_curr)  # (B, *S)
 
         # Explicit Euler update
         dt = t_next - t_curr
-        drift = -0.5 * beta_curr * x - beta_curr * score
-        x_next = x + drift * dt
+        drift = -0.5 * beta_curr * x - beta_curr * score  # scalar * (B, *S) -> (B, *S)
+        x_next = x + drift * dt  # (B, *S)
 
         return x_next
 
@@ -426,7 +424,7 @@ class ExponentialIntegrator(EulerIntegrator):
     part: exp(-0.5 * beta * dt) * x, which this implementation does NOT do.
     """
 
-    def __init__(self, schedule: NoiseScheduleProtocol):
+    def __init__(self, schedule: NoiseScheduleProtocol) -> None:
         logger.warning(
             "ExponentialIntegrator is deprecated and misnamed (it's actually Euler method). "
             "Use EulerIntegrator instead. This class will be removed in a future version."

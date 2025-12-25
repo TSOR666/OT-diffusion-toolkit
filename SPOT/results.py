@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, NamedTuple, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 import torch
 
@@ -27,7 +27,7 @@ class SamplingResult:
     def shape(self) -> Tuple[int, ...]:
         return tuple(self.samples.shape)
 
-    def to(self, device_or_dtype):
+    def to(self, device_or_dtype: Union[torch.device, torch.dtype, str]) -> "SamplingResult":
         """Move samples to device or dtype, returning a new instance."""
 
         return SamplingResult(

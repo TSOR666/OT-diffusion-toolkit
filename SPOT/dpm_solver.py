@@ -16,7 +16,7 @@ __all__ = ["DPMSolverPP"]
 class DPMSolverPP:
     """DPM-Solver++ with unified schedule semantics."""
 
-    def __init__(self, order: int = 3, schedule: NoiseScheduleProtocol | None = None):
+    def __init__(self, order: int = 3, schedule: NoiseScheduleProtocol | None = None) -> None:
         if order not in [1, 2, 3]:
             raise ValueError(f"DPM-Solver++ order must be 1-3, got {order}")
         self.order = order
@@ -31,17 +31,18 @@ class DPMSolverPP:
         return self.schedule
 
     def get_timesteps(self, num_steps: int, device: torch.device | None = None) -> List[float]:
+        """Return monotonically decreasing timesteps as Python floats (N,) list."""
         if num_steps < 1:
             raise ValueError(f"num_steps must be >= 1, got {num_steps}")
 
         if device is None:
             device = torch.device("cpu")
 
-        t = torch.linspace(1, 0, num_steps + 1, device=device)
+        t = torch.linspace(1, 0, num_steps + 1, device=device)  # (N,)
         if self.order >= 3:
-            t = t ** 1.5
+            t = t ** 1.5  # (N,)
         else:
-            t = t ** 2
+            t = t ** 2  # (N,)
 
         t[0] = 1.0
         t[-1] = 0.0
@@ -55,6 +56,7 @@ class DPMSolverPP:
         timesteps: List[float],
         current_idx: int,
     ) -> torch.Tensor:
+        """Compute the next sample with same shape as ``x`` (B, *S) -> (B, *S)."""
         if isinstance(model_outputs, deque):
             model_outputs = list(model_outputs)
 
@@ -83,11 +85,12 @@ class DPMSolverPP:
         idx: int,
         schedule: NoiseScheduleProtocol,
     ) -> torch.Tensor:
+        """First-order update with shape-preserving broadcast."""
         t_curr, t_next = timesteps[idx], timesteps[idx + 1]
 
         dev, dtp = x.device, x.dtype
-        t_curr_tensor = torch.full((1,), float(t_curr), device=dev, dtype=torch.float32)
-        t_next_tensor = torch.full((1,), float(t_next), device=dev, dtype=torch.float32)
+        t_curr_tensor = torch.full((1,), float(t_curr), device=dev, dtype=torch.float32)  # (1,)
+        t_next_tensor = torch.full((1,), float(t_next), device=dev, dtype=torch.float32)  # (1,)
 
         lambda_curr = schedule.lambda_(t_curr_tensor)
         lambda_next = schedule.lambda_(t_next_tensor)
@@ -96,10 +99,10 @@ class DPMSolverPP:
         alpha_curr, sigma_curr = schedule.alpha_sigma(t_curr_tensor)
         alpha_next, _ = schedule.alpha_sigma(t_next_tensor)
 
-        alpha_ratio = (alpha_next / alpha_curr).to(dtp)
-        sigma_term = (sigma_curr * torch.expm1(h)).to(dtp)
+        alpha_ratio = (alpha_next / alpha_curr).to(dtp)  # (1,) -> scalar
+        sigma_term = (sigma_curr * torch.expm1(h)).to(dtp)  # (1,) -> scalar
 
-        return alpha_ratio * x - sigma_term * model_output
+        return alpha_ratio * x - sigma_term * model_output  # (B, *S)
 
     def _second_order_update(
         self,
@@ -109,19 +112,20 @@ class DPMSolverPP:
         idx: int,
         schedule: NoiseScheduleProtocol,
     ) -> torch.Tensor:
+        """Second-order update with shape-preserving broadcast."""
         t_prev, t_curr, t_next = timesteps[idx - 1], timesteps[idx], timesteps[idx + 1]
 
         dev, dtp = x.device, x.dtype
-        t_prev_tensor = torch.full((1,), float(t_prev), device=dev, dtype=torch.float32)
-        t_curr_tensor = torch.full((1,), float(t_curr), device=dev, dtype=torch.float32)
-        t_next_tensor = torch.full((1,), float(t_next), device=dev, dtype=torch.float32)
+        t_prev_tensor = torch.full((1,), float(t_prev), device=dev, dtype=torch.float32)  # (1,)
+        t_curr_tensor = torch.full((1,), float(t_curr), device=dev, dtype=torch.float32)  # (1,)
+        t_next_tensor = torch.full((1,), float(t_next), device=dev, dtype=torch.float32)  # (1,)
 
         lambda_prev = schedule.lambda_(t_prev_tensor)
         lambda_curr = schedule.lambda_(t_curr_tensor)
         lambda_next = schedule.lambda_(t_next_tensor)
 
-        h = (lambda_next - lambda_curr).to(torch.float32)
-        h_prev = (lambda_curr - lambda_prev).to(torch.float32)
+        h = (lambda_next - lambda_curr).to(torch.float32)  # (1,)
+        h_prev = (lambda_curr - lambda_prev).to(torch.float32)  # (1,)
         h_scalar = float(h.item())
 
         # Guard against numerical instability in timestep ratios
@@ -145,12 +149,12 @@ class DPMSolverPP:
             logger.debug("DPM-Solver denominator too small, falling back to first-order")
             return self._first_order_update(x, model_outputs[-1], timesteps, idx, schedule)
 
-        D1 = (1 + 1 / denom) * model_outputs[-1] - 1 / denom * model_outputs[-2]
+        D1 = (1 + 1 / denom) * model_outputs[-1] - 1 / denom * model_outputs[-2]  # (B, *S)
 
-        alpha_ratio = (alpha_next / alpha_curr).to(dtp)
-        sigma_term = (sigma_curr * torch.expm1(h)).to(dtp)
+        alpha_ratio = (alpha_next / alpha_curr).to(dtp)  # (1,) -> scalar
+        sigma_term = (sigma_curr * torch.expm1(h)).to(dtp)  # (1,) -> scalar
 
-        return alpha_ratio * x - sigma_term * D1
+        return alpha_ratio * x - sigma_term * D1  # (B, *S)
 
     def _third_order_update(
         self,
@@ -160,6 +164,7 @@ class DPMSolverPP:
         idx: int,
         schedule: NoiseScheduleProtocol,
     ) -> torch.Tensor:
+        """Third-order update with shape-preserving broadcast."""
         t_prev2, t_prev, t_curr, t_next = (
             timesteps[idx - 2],
             timesteps[idx - 1],
@@ -169,7 +174,7 @@ class DPMSolverPP:
 
         dev, dtp = x.device, x.dtype
         tensors = [
-            torch.full((1,), float(t), device=dev, dtype=torch.float32)
+            torch.full((1,), float(t), device=dev, dtype=torch.float32)  # (1,)
             for t in (t_prev2, t_prev, t_curr, t_next)
         ]
         t_prev2_tensor, t_prev_tensor, t_curr_tensor, t_next_tensor = tensors
@@ -179,9 +184,9 @@ class DPMSolverPP:
         lambda_curr = schedule.lambda_(t_curr_tensor)
         lambda_next = schedule.lambda_(t_next_tensor)
 
-        h = (lambda_next - lambda_curr).to(torch.float32)
-        h_prev = (lambda_curr - lambda_prev).to(torch.float32)
-        h_prev2 = (lambda_prev - lambda_prev2).to(torch.float32)
+        h = (lambda_next - lambda_curr).to(torch.float32)  # (1,)
+        h_prev = (lambda_curr - lambda_prev).to(torch.float32)  # (1,)
+        h_prev2 = (lambda_prev - lambda_prev2).to(torch.float32)  # (1,)
         h_scalar = float(h.item())
 
         # Guard against numerical instability in timestep ratios
@@ -207,20 +212,20 @@ class DPMSolverPP:
             return self._second_order_update(x, model_outputs[-2:], timesteps, idx, schedule)
 
         # Third-order multistep coefficients (DPM-Solver++ 3M) using variable step ratios r1, r2
-        D1 = (model_outputs[-1] - model_outputs[-2]) / r1
+        D1 = (model_outputs[-1] - model_outputs[-2]) / r1  # (B, *S)
         D2 = ((model_outputs[-1] - model_outputs[-2]) / r1 - (model_outputs[-2] - model_outputs[-3]) / r2) / (
             r1 + r2
-        )
+        )  # (B, *S)
 
-        alpha_ratio = (alpha_next / alpha_curr).to(dtp)
-        phi_1 = torch.expm1(h)
-        phi_2 = (phi_1 - h) / h_scalar
-        phi_3 = (phi_1 - h - 0.5 * h * h) / (h_scalar * h_scalar)
+        alpha_ratio = (alpha_next / alpha_curr).to(dtp)  # (1,) -> scalar
+        phi_1 = torch.expm1(h)  # (1,)
+        phi_2 = (phi_1 - h) / h_scalar  # (1,)
+        phi_3 = (phi_1 - h - 0.5 * h * h) / (h_scalar * h_scalar)  # (1,)
         phi_1 = phi_1.to(dtp)
         phi_2 = phi_2.to(dtp)
         phi_3 = phi_3.to(dtp)
 
-        update_term = phi_1 * model_outputs[-1] + phi_2 * D1 + phi_3 * D2
+        update_term = phi_1 * model_outputs[-1] + phi_2 * D1 + phi_3 * D2  # (B, *S)
         sigma_curr = sigma_curr.to(dtp)
 
-        return alpha_ratio * x - sigma_curr * update_term
+        return alpha_ratio * x - sigma_curr * update_term  # (B, *S)
