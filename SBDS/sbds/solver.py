@@ -436,7 +436,9 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 # Adjust kernel bandwidth based on noise level for better numerical stability
                 if self.adaptive_eps:
                     alpha_t = self.noise_schedule(t_curr)
-                    sigma_t = math.sqrt(1 - alpha_t)
+                    # Clamp variance to [0, 1] to prevent negative sqrt from numerical noise
+                    variance_t = max(0.0, min(1.0, 1 - alpha_t))
+                    sigma_t = math.sqrt(variance_t)
                     # Update RFF sigma based on noise level and reinitialize weights
                     if self.rff is not None:
                         new_sigma = self.kernel_bandwidth * (1 + sigma_t * SIGMA_NOISE_SCALE)
@@ -588,15 +590,17 @@ class EnhancedScoreBasedSBDiffusionSolver:
     def _compute_score(self, x: torch.Tensor, t: float) -> torch.Tensor:
         """
         Compute score (gradient of log density) using the score model.
-        
+
         Args:
-            x: Input tensor
-            t: Current time
-        
+            x: Input tensor of shape (B, *data_dims)
+            t: Current time in [0, 1]
+
         Returns:
-            Score tensor
+            Score tensor of shape (B, *data_dims), same as input x
         """
+        # t_tensor: (B,) - broadcast time to batch dimension
         t_tensor = torch.ones(x.shape[0], device=x.device) * t
+        # model_out: (B, *data_dims) - model output matches input shape
         model_out = self.score_model(x, t_tensor)
 
         # If the model outputs epsilon, convert to score; otherwise assume it already outputs score
@@ -779,25 +783,28 @@ class EnhancedScoreBasedSBDiffusionSolver:
     def _apply_transport_map(self, x: torch.Tensor, y: torch.Tensor, transport_plan: torch.Tensor) -> torch.Tensor:
         """
         Apply transport map from x to y using the transport plan.
-        
+
         Args:
-            x: Source points [batch_size, *dims]
-            y: Target points [batch_size, *dims]
-            transport_plan: Transport plan matrix [batch_size, batch_size]
-            
+            x: Source points of shape (N, *dims)
+            y: Target points of shape (M, *dims)
+            transport_plan: Transport plan matrix of shape (N, M)
+
         Returns:
-            Transported points
+            Transported points of shape (N, *dims)
         """
         # Normalize transport plan with protection against zero sum
+        # row_sums: (N, 1) - sum over target dimension
         row_sums = transport_plan.sum(dim=1, keepdim=True)
         row_sums = torch.clamp(row_sums, min=LOG_STABILITY_EPS)  # Prevent division by zero
+        # P_normalized: (N, M) - each row sums to 1
         P_normalized = transport_plan / row_sums
 
         # Apply barycentric mapping
         x_shape = x.shape
+        # y_flat: (M, D) where D = prod(dims)
         y_flat = y.reshape(y.size(0), -1)
 
-        # Transport: x_new = P @ y (barycentric projection)
+        # Transport: (N, M) @ (M, D) -> (N, D) (barycentric projection)
         transported = P_normalized @ y_flat
 
         return transported.reshape(x_shape)
@@ -881,9 +888,9 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 eps = max(float(eps), 1e-3, 0.1 * median_cost, 0.5 * mean_cost)
                 K = torch.exp(-C / eps).clamp_min(LOG_STABILITY_EPS)
                 
-                # Initialize dual potentials
-                u = torch.zeros(batch_size, device=self.device)
-                v = torch.zeros(batch_size, device=self.device)
+                # Initialize dual potentials (use x_pred's device for consistency)
+                u = torch.zeros(batch_size, device=x_pred.device)
+                v = torch.zeros(batch_size, device=x_pred.device)
                 
                 # Sinkhorn iterations
                 for _ in range(SINKHORN_ITERATIONS_FULL):
@@ -964,9 +971,9 @@ class EnhancedScoreBasedSBDiffusionSolver:
             )
             K = torch.exp(-C_approx / (eps + 1e-30))
 
-            # Fast Sinkhorn iterations
-            a = torch.ones(batch_size, device=self.device) / batch_size
-            b = torch.ones(batch_size, device=self.device) / batch_size
+            # Fast Sinkhorn iterations (use x_t's device for consistency)
+            a = torch.ones(batch_size, device=x_t.device) / batch_size
+            b = torch.ones(batch_size, device=x_t.device) / batch_size
             
             for _ in range(SINKHORN_ITERATIONS_RFF):  # Fewer iterations needed with RFF
                 a = 1.0 / (K @ b + LOG_STABILITY_EPS)
@@ -1208,10 +1215,10 @@ class EnhancedScoreBasedSBDiffusionSolver:
             # Approximate transport kernel
             K_approx = K_nm_pred @ K_mm_inv @ K_nm_ref.T
             
-            # Sinkhorn iterations
-            a = torch.ones(batch_size, device=self.device) / batch_size
-            b = torch.ones(batch_size, device=self.device) / batch_size
-            
+            # Sinkhorn iterations (use x_t's device for consistency)
+            a = torch.ones(batch_size, device=x_t.device) / batch_size
+            b = torch.ones(batch_size, device=x_t.device) / batch_size
+
             for _ in range(SINKHORN_ITERATIONS_NYSTROM):
                 a = 1.0 / (K_approx @ b + LOG_STABILITY_EPS)
                 b = 1.0 / (K_approx.T @ a + LOG_STABILITY_EPS)
