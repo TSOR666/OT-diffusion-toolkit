@@ -1,0 +1,1485 @@
+diff --git a/FastSB-OT/fastsb_ot/common.py b/FastSB-OT/fastsb_ot/common.py
+index 79bee5d..561c440 100644
+--- a/FastSB-OT/fastsb_ot/common.py
++++ b/FastSB-OT/fastsb_ot/common.py
+@@ -94,7 +94,7 @@ def check_tensor_finite(name: str, tensor: torch.Tensor, *, enabled: bool) -> No
+     """Raise if tensor contains NaN/Inf when checks are enabled."""
+     if not enabled:
+         return
+-    if not torch.isfinite(tensor).all().item():
++    if not torch.isfinite(tensor).all().item():  # () -> scalar
+         raise ValueError(f"{name} contains NaN/Inf values.")
+ 
+ # Try to import autocast and nullcontext at top level
+@@ -137,37 +137,37 @@ except ImportError:
+ # PyTorch cross-version RNG compatibility helper
+ def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+     """Generate random tensor like x with optional generator (cross-version compatible)"""
+-    if generator is not None:
+-        try:
+-            return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
+-        except Exception as e:
++    if generator is not None:
++        try:
++            return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)  # x.shape -> x.shape
++        except Exception as e:
+             # CRITICAL FIX: Log warning when RNG fallback breaks determinism
+             logger.warning(
+                 f"Generator-device mismatch detected: {e}. "
+                 f"Falling back to non-deterministic random generation. "
+                 f"This will break reproducibility. Ensure generator device matches tensor device."
+             )
+-            return torch.randn_like(x)
++            return torch.randn_like(x)  # x.shape -> x.shape
+     else:
+-        return torch.randn_like(x)
++        return torch.randn_like(x)  # x.shape -> x.shape
+ 
+ def tensor_fingerprint(tensor: torch.Tensor, sample_count: int = 8) -> str:
+     """Generate a lightweight content fingerprint for cache keys."""
+-    fp = tensor.detach().reshape(-1)
++    fp = tensor.detach().reshape(-1)  # (B, ...) -> (N,)
+     numel = fp.numel()
+     if numel == 0:
+         return "empty"
+     if numel <= sample_count:
+-        sample = fp.float()
++        sample = fp.float()  # (N,) -> (N,)
+     else:
+         step = (numel - 1) / (sample_count - 1)
+         indices = [int(round(i * step)) for i in range(sample_count)]
+-        idx = torch.tensor(indices, device=fp.device, dtype=torch.long)
+-        sample = fp.index_select(0, idx).float()
++        idx = torch.tensor(indices, device=fp.device, dtype=torch.long)  # (sample_count,)
++        sample = fp.index_select(0, idx).float()  # (N,) -> (sample_count,)
+ 
+-    chk_sum = float(sample.sum().item())
+-    chk_sq = float((sample * sample).sum().item())
+-    chk_max = float(sample.abs().max().item())
++    chk_sum = float(sample.sum().item())  # (sample_count,) -> scalar
++    chk_sq = float((sample * sample).sum().item())  # (sample_count,) -> scalar
++    chk_max = float(sample.abs().max().item())  # (sample_count,) -> scalar
+     return f"sum{chk_sum:.6e}_sq{chk_sq:.6e}_max{chk_max:.6e}_n{numel}"
+ 
+ # Opt-in CUDA optimizations with env var
+diff --git a/FastSB-OT/fastsb_ot/kernels.py b/FastSB-OT/fastsb_ot/kernels.py
+index 94af6ed..1b6d56a 100644
+--- a/FastSB-OT/fastsb_ot/kernels.py
++++ b/FastSB-OT/fastsb_ot/kernels.py
+@@ -60,9 +60,9 @@ class KernelModule(nn.Module):
+ 
+     def _setup_buffers(self) -> None:
+         """Pre-allocate commonly used buffers"""
+-        gaussian_1d = torch.tensor([1, 2, 1], dtype=torch.float32) / 4
+-        gaussian_kernel = gaussian_1d[:, None] @ gaussian_1d[None, :]
+-        self.register_buffer('gaussian_kernel', gaussian_kernel.view(1, 1, 3, 3), persistent=False)
++        gaussian_1d = torch.tensor([1, 2, 1], dtype=torch.float32) / 4  # (3,)
++        gaussian_kernel = gaussian_1d[:, None] @ gaussian_1d[None, :]  # (3, 1) @ (1, 3) -> (3, 3)
++        self.register_buffer('gaussian_kernel', gaussian_kernel.view(1, 1, 3, 3), persistent=False)  # (3, 3) -> (1, 1, 3, 3)
+ 
+     def compute_gaussian_kernel_fft(self, shape: Tuple[int, ...], sigma: float, device: torch.device) -> torch.Tensor:
+         """Cache frequency grids with LRU, device-agnostic.
+@@ -93,30 +93,30 @@ class KernelModule(nn.Module):
+             for i, size in enumerate(shape):
+                 if i == n_dims - 1:
+                     try:
+-                        freq = torch.fft.rfftfreq(size, device=torch.device("cpu"))
++                        freq = torch.fft.rfftfreq(size, device=torch.device("cpu"))  # (size//2+1,)
+                     except TypeError:
+-                        freq = torch.fft.rfftfreq(size).to("cpu")
++                        freq = torch.fft.rfftfreq(size).to("cpu")  # (size//2+1,)
+                 else:
+                     try:
+-                        freq = torch.fft.fftfreq(size, device=torch.device("cpu"))
++                        freq = torch.fft.fftfreq(size, device=torch.device("cpu"))  # (size,)
+                     except TypeError:
+-                        freq = torch.fft.fftfreq(size).to("cpu")
++                        freq = torch.fft.fftfreq(size).to("cpu")  # (size,)
+ 
+                 freq_shape = [1] * len(shape)
+                 if i == n_dims - 1:
+                     freq_shape[i] = size // 2 + 1
+                 else:
+                     freq_shape[i] = size
+-                grids_list.append(freq.reshape(freq_shape))
++                grids_list.append(freq.reshape(freq_shape))  # (size,) -> broadcast shape
+ 
+             grids = tuple(grids_list)
+             self._freq_grid_cache[grid_key] = grids
+ 
+-        grids = tuple(g.to(device) for g in self._freq_grid_cache[grid_key])
++        grids = tuple(g.to(device) for g in self._freq_grid_cache[grid_key])  # each grid shaped for broadcast
+ 
+-        dist_sq = torch.stack([g**2 for g in grids], dim=0).sum(dim=0)
++        dist_sq = torch.stack([g**2 for g in grids], dim=0).sum(dim=0)  # (D, *shape_rfft) -> (*shape_rfft)
+ 
+-        kernel_fft = torch.exp(-2 * (math.pi * sigma)**2 * dist_sq)
++        kernel_fft = torch.exp(-2 * (math.pi * sigma)**2 * dist_sq)  # (*shape_rfft)
+         # NUMERICAL FIX: Use much smaller clamping threshold to avoid distorting high frequencies
+         # Previous 1e-6 was too aggressive and created ringing artifacts
+         # 1e-12 preserves frequency response while preventing division issues
+@@ -150,23 +150,23 @@ class KernelModule(nn.Module):
+         for i, size in enumerate(shape):
+             if i == len(shape) - 1:
+                 try:
+-                    freq = torch.fft.rfftfreq(size, device=device).abs()
++                    freq = torch.fft.rfftfreq(size, device=device).abs()  # (size//2+1,)
+                 except TypeError:
+-                    freq = torch.fft.rfftfreq(size).to(device).abs()
++                    freq = torch.fft.rfftfreq(size).to(device).abs()  # (size//2+1,)
+             else:
+                 try:
+-                    freq = torch.fft.fftfreq(size, device=device).abs()
++                    freq = torch.fft.fftfreq(size, device=device).abs()  # (size,)
+                 except TypeError:
+-                    freq = torch.fft.fftfreq(size).to(device).abs()
++                    freq = torch.fft.fftfreq(size).to(device).abs()  # (size,)
+ 
+             freq_shape = [1] * len(shape)
+             if i == len(shape) - 1:
+                 freq_shape[i] = size // 2 + 1
+             else:
+                 freq_shape[i] = size
+-            coords.append(freq.reshape(freq_shape))
++            coords.append(freq.reshape(freq_shape))  # (size,) -> broadcast shape
+ 
+-        f_mag = torch.sqrt(sum(c**2 for c in coords)) / math.sqrt(len(coords))
++        f_mag = torch.sqrt(sum(c**2 for c in coords)) / math.sqrt(len(coords))  # (*shape_rfft)
+ 
+         weights = 4 * f_mag * (1 - f_mag)
+         weights = torch.clamp(weights, min=1e-2)
+@@ -224,8 +224,8 @@ class KernelModule(nn.Module):
+         ):
+             fisher = torch.empty_like(score_fp32)
+ 
+-            score_flat = score_fp32.reshape(-1)
+-            fisher_flat = fisher.reshape(-1)
++            score_flat = score_fp32.reshape(-1)  # (B, ...) -> (N,)
++            fisher_flat = fisher.reshape(-1)  # (B, ...) -> (N,)
+ 
+             n_elements = score_flat.numel()
+             alpha_val = float(alpha)
+@@ -242,7 +242,7 @@ class KernelModule(nn.Module):
+                 alpha=alpha_val,
+             )
+ 
+-            fisher = fisher_flat.reshape(score.shape)
++            fisher = fisher_flat.reshape(score.shape)  # (N,) -> score.shape
+         else:
+             alpha_val = float(alpha)
+             adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_val)
+@@ -253,7 +253,7 @@ class KernelModule(nn.Module):
+ 
+             if x.dim() == 4:
+                 B, C = fisher.shape[:2]
+-                fisher = fisher.reshape(B * C, 1, *fisher.shape[2:])
++                fisher = fisher.reshape(B * C, 1, *fisher.shape[2:])  # (B, C, H, W) -> (B*C, 1, H, W)
+ 
+                 # PERFORMANCE FIX: Convert fisher to channels_last for optimal conv2d performance
+                 # Check fisher's layout, not x's layout
+@@ -266,8 +266,8 @@ class KernelModule(nn.Module):
+                 kernel_size = self.gaussian_kernel.shape[-1]
+                 padding = kernel_size // 2
+ 
+-                fisher = F.conv2d(fisher, self.gaussian_kernel, padding=padding)
+-                fisher = fisher.reshape(B, C, *fisher.shape[2:])
++                fisher = F.conv2d(fisher, self.gaussian_kernel, padding=padding)  # (B*C, 1, H, W) -> (B*C, 1, H, W)
++                fisher = fisher.reshape(B, C, *fisher.shape[2:])  # (B*C, 1, H, W) -> (B, C, H, W)
+ 
+         if original_dtype == torch.float16:
+             fisher = fisher.clamp(max=65504)
+diff --git a/FastSB-OT/fastsb_ot/solver.py b/FastSB-OT/fastsb_ot/solver.py
+index f78ecc4..f030b72 100644
+--- a/FastSB-OT/fastsb_ot/solver.py
++++ b/FastSB-OT/fastsb_ot/solver.py
+@@ -255,17 +255,17 @@ class FastSBOTSolver(nn.Module):
+             n_patches_w = (W_pad - patch_size) // stride + 1
+             n_patches = n_patches_h * n_patches_w
+ 
+-            ones = torch.ones(
+-                (1, patch_size * patch_size, n_patches),
+-                device=device_cpu,  # Build on CPU
+-                dtype=torch.float32
+-            )
+-            mask = F.fold(
+-                ones,
+-                output_size=(H_pad, W_pad),
+-                kernel_size=patch_size,
+-                stride=stride
+-            )  # Shape: (1, 1, H_pad, W_pad)
++            ones = torch.ones(
++                (1, patch_size * patch_size, n_patches),
++                device=device_cpu,  # Build on CPU
++                dtype=torch.float32
++            )  # (1, P^2, Np)
++            mask = F.fold(  # (1, P^2, Np) -> (1, 1, H_pad, W_pad)
++                ones,
++                output_size=(H_pad, W_pad),
++                kernel_size=patch_size,
++                stride=stride
++            )
+ 
+             # LRU eviction
+             if len(self._overlap_cache) >= self._overlap_cache_cap:
+@@ -274,7 +274,7 @@ class FastSBOTSolver(nn.Module):
+             # Store on CPU to save GPU memory
+             self._overlap_cache[key] = mask  # Already on CPU
+ 
+-        return mask.to(device)
++        return mask.to(device)  # (1, 1, H_pad, W_pad) -> (1, 1, H_pad, W_pad)
+ 
+     def _amp_ctx(self) -> ContextManager[Any]:
+         """Get appropriate autocast context for device type with safety"""
+@@ -313,8 +313,8 @@ class FastSBOTSolver(nn.Module):
+ 
+             POLISH: Renamed alpha_t  alpha_bar_t for clarity
+             """
+-            drift = -0.5 * (1 - alpha_bar_t) * score * dt
+-            drift = drift.to(x.dtype)
++            drift = -0.5 * (1 - alpha_bar_t) * score * dt  # scalar/(B,) broadcast -> score.shape
++            drift = drift.to(x.dtype)  # score.shape -> score.shape
+ 
+             if x.ndim == 4 and x.shape[2] >= 64 and kernel_fft is not None:
+                 x_next = self.fft_grid_transport_inline(x, drift, alpha_bar_t, kernel_fft, freq_weights)
+@@ -331,13 +331,13 @@ class FastSBOTSolver(nn.Module):
+             return
+ 
+         size = (2, 3, 64, 64)
+-        x = torch.randn(size, device=self.device, dtype=self.amp_dtype)
++        x = torch.randn(size, device=self.device, dtype=self.amp_dtype)  # (2, 3, 64, 64)
+ 
+         # Only use channels_last on Ampere+
+         if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+             if any(isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)) for m in self.score_model.modules()):
+                 try:
+-                    x = x.to(memory_format=torch.channels_last)
++                    x = x.to(memory_format=torch.channels_last)  # (2, 3, 64, 64)
+                 except TypeError:
+                     pass
+ 
+@@ -345,10 +345,10 @@ class FastSBOTSolver(nn.Module):
+         if self.config.discrete_timesteps:
+             # Use mid-step integer index for warmup
+             idx = self.config.num_timesteps // 2
+-            t = torch.tensor([idx, idx], device=self.device, dtype=torch.long)
++            t = torch.tensor([idx, idx], device=self.device, dtype=torch.long)  # (2,)
+         else:
+             dtype_t = torch.float32 if self.config.use_fp32_time else self.amp_dtype
+-            t = torch.tensor([0.5, 0.5], device=self.device, dtype=dtype_t)
++            t = torch.tensor([0.5, 0.5], device=self.device, dtype=dtype_t)  # (2,)
+ 
+         with torch.no_grad():
+             with self._amp_ctx():
+@@ -445,26 +445,26 @@ class FastSBOTSolver(nn.Module):
+         dtype_t = torch.float32 if self.config.use_fp32_time else x.dtype
+ 
+         # Handle discrete vs continuous timesteps
+-        if self.config.discrete_timesteps:
+-            # Model expects discrete timesteps [0, num_timesteps-1]
+-            idx = int(round(float(t) * (self.config.num_timesteps - 1)))
+-            idx = max(0, min(self.config.num_timesteps - 1, idx))
+-            t_tensor = torch.full((x.shape[0],), idx, device=x.device, dtype=torch.long)
+-        else:
+-            # Model expects normalized timesteps [0, 1]
+-            t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=dtype_t)
++        if self.config.discrete_timesteps:
++            # Model expects discrete timesteps [0, num_timesteps-1]
++            idx = int(round(float(t) * (self.config.num_timesteps - 1)))
++            idx = max(0, min(self.config.num_timesteps - 1, idx))
++            t_tensor = torch.full((x.shape[0],), idx, device=x.device, dtype=torch.long)  # (B,)
++        else:
++            # Model expects normalized timesteps [0, 1]
++            t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=dtype_t)  # (B,)
+ 
+-        with self._amp_ctx():
+-            model_output = self.score_model(x, t_tensor)
++        with self._amp_ctx():
++            model_output = self.score_model(x, t_tensor)  # (B, C, H, W) -> (B, C, H, W)
+ 
+         alpha_bar_t = self._get_cached_noise_schedule(t)
+ 
+-        score = self._convert_model_output_to_score(model_output, alpha_bar_t)
++        score = self._convert_model_output_to_score(model_output, alpha_bar_t)  # (B, C, H, W)
+ 
+         # Optional: Apply score correction for better quality
+         if self.config.use_score_correction and alpha_bar_t < 0.9:
+-            correction = self.compute_score_correction(x, score, t, alpha_bar_t)
+-            score = score + correction
++            correction = self.compute_score_correction(x, score, t, alpha_bar_t)  # (B, C, H, W)
++            score = score + correction  # (B, C, H, W)
+ 
+         if cache_key is not None:
+             if x.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+@@ -485,8 +485,8 @@ class FastSBOTSolver(nn.Module):
+             # Estimate local curvature for adaptive correction
+             eps = 1e-4
+             gen = getattr(self.config, 'generator', None)
+-            noise = _randn_like_compat(x, gen) * eps
+-            x_perturbed = x + noise
++            noise = _randn_like_compat(x, gen) * eps  # (B, C, H, W)
++            x_perturbed = x + noise  # (B, C, H, W)
+ 
+             # Get perturbed score (without correction to avoid recursion)
+             original_correction = self.config.use_score_correction
+@@ -495,13 +495,13 @@ class FastSBOTSolver(nn.Module):
+             self.config.use_score_correction = original_correction
+ 
+             # Estimate curvature
+-            curvature = (score_perturbed - score) / (eps + 1e-8)
++            curvature = (score_perturbed - score) / (eps + 1e-8)  # (B, C, H, W)
+ 
+             # Apply adaptive correction (stronger at later timesteps)
+             if alpha_bar_t is None:
+                 alpha_bar_t = self._get_cached_noise_schedule(t)
+             correction_strength = 0.1 * (1.0 - alpha_bar_t)
+-            correction = -correction_strength * curvature
++            correction = -correction_strength * curvature  # (B, C, H, W)
+ 
+         return correction
+ 
+@@ -591,15 +591,15 @@ class FastSBOTSolver(nn.Module):
+         else:
+             pad_mode = 'replicate'
+ 
+-        x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode=pad_mode)
++        x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode=pad_mode)  # (B, C, H, W) -> (B, C, H_pad, W_pad)
+         H_pad, W_pad = x_padded.shape[2:]
+ 
+-        patches = F.unfold(x_padded, kernel_size=patch_size, stride=stride, padding=0)
++        patches = F.unfold(x_padded, kernel_size=patch_size, stride=stride, padding=0)  # (B, C*P^2, Np)
+         n_patches_h = (H_pad - patch_size) // stride + 1
+         n_patches_w = (W_pad - patch_size) // stride + 1
+         n_patches = n_patches_h * n_patches_w
+ 
+-        patches = patches.transpose(1, 2).reshape(B * n_patches, C, patch_size, patch_size)
++        patches = patches.transpose(1, 2).reshape(B * n_patches, C, patch_size, patch_size)  # (B, Np, C*P^2) -> (B*Np, C, P, P)
+ 
+         if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+             try:
+@@ -613,26 +613,26 @@ class FastSBOTSolver(nn.Module):
+         if self.config.discrete_timesteps:
+             idx = int(round(float(t) * (self.config.num_timesteps - 1)))
+             idx = max(0, min(self.config.num_timesteps - 1, idx))
+-            t_tensor = torch.full((patches.shape[0],), idx, device=x.device, dtype=torch.long)
+-        else:
+-            t_tensor = torch.full((patches.shape[0],), float(t), device=x.device, dtype=dtype_t)
++            t_tensor = torch.full((patches.shape[0],), idx, device=x.device, dtype=torch.long)  # (B*Np,)
++        else:
++            t_tensor = torch.full((patches.shape[0],), float(t), device=x.device, dtype=dtype_t)  # (B*Np,)
+ 
+         with torch.no_grad():
+             with self._amp_ctx():
+-                patch_output = self.score_model(patches, t_tensor)
++                patch_output = self.score_model(patches, t_tensor)  # (B*Np, C, P, P) -> (B*Np, C, P, P)
+ 
+         # POLISH: Using clearer variable names
+         alpha_bar_t = self._get_cached_noise_schedule(t)
+-        patch_scores = self._convert_model_output_to_score(patch_output, alpha_bar_t)
+-
+-        patch_scores = patch_scores.reshape(B, n_patches, C * patch_size * patch_size).transpose(1, 2)
++        patch_scores = self._convert_model_output_to_score(patch_output, alpha_bar_t)  # (B*Np, C, P, P)
++
++        patch_scores = patch_scores.reshape(B, n_patches, C * patch_size * patch_size).transpose(1, 2)  # (B, Np, C*P^2) -> (B, C*P^2, Np)
+ 
+-        scores_padded = F.fold(
+-            patch_scores,
+-            output_size=(H_pad, W_pad),
+-            kernel_size=patch_size,
+-            stride=stride
+-        )
++        scores_padded = F.fold(  # (B, C*P^2, Np) -> (B, C, H_pad, W_pad)
++            patch_scores,
++            output_size=(H_pad, W_pad),
++            kernel_size=patch_size,
++            stride=stride
++        )
+ 
+         # Use cached overlap mask instead of recomputing
+         overlap_count = self._get_overlap_mask(H_pad, W_pad, patch_size, stride, x.device)
+@@ -651,10 +651,10 @@ class FastSBOTSolver(nn.Module):
+         # Convert to FP32 for safe division
+         orig_dtype = scores_padded.dtype
+         eps = torch.finfo(torch.float32).eps * 16
+-        scores_padded = scores_padded.float() / (overlap_count.float() + eps)
+-        scores_padded = scores_padded.to(orig_dtype)
++        scores_padded = scores_padded.float() / (overlap_count.float() + eps)  # (B, C, H_pad, W_pad) / (1, 1, H_pad, W_pad) broadcast
++        scores_padded = scores_padded.to(orig_dtype)  # (B, C, H_pad, W_pad)
+ 
+-        scores = scores_padded[:, :, :H, :W]
++        scores = scores_padded[:, :, :H, :W]  # (B, C, H, W)
+ 
+         self.score_cache.put(input_cache_key, scores)
+ 
+@@ -675,7 +675,7 @@ class FastSBOTSolver(nn.Module):
+         if values.numel() == 0:
+             raise ValueError("quantile requires a non-empty tensor")
+ 
+-        sorted_vals, _ = torch.sort(values, dim=dim)
++        sorted_vals, _ = torch.sort(values, dim=dim)  # values.shape -> values.shape
+         n = values.shape[dim]
+         if n == 1:
+             out = sorted_vals
+@@ -684,13 +684,13 @@ class FastSBOTSolver(nn.Module):
+             lower = int(math.floor(rank))
+             upper = min(n - 1, lower + 1)
+             if lower == upper:
+-                out = sorted_vals.select(dim, lower)
++                out = sorted_vals.select(dim, lower)  # drop dim -> values.shape with dim removed
+             else:
+                 lower_val = sorted_vals.select(dim, lower)
+                 upper_val = sorted_vals.select(dim, upper)
+-                out = lower_val + (upper_val - lower_val) * (rank - lower)
++                out = lower_val + (upper_val - lower_val) * (rank - lower)  # shape: values with dim removed
+         if keepdim and out.dim() < values.dim():
+-            out = out.unsqueeze(dim)
++            out = out.unsqueeze(dim)  # re-insert dim
+         return out
+ 
+     def dynamic_threshold(self, x0_pred: torch.Tensor, percentile: Optional[float] = None) -> torch.Tensor:
+@@ -706,7 +706,7 @@ class FastSBOTSolver(nn.Module):
+         # Cast to FP32 for stable quantile computation
+         batch_size = x0_pred.shape[0]
+         original_dtype = x0_pred.dtype
+-        x0_pred_flat = x0_pred.float().reshape(batch_size, -1)
++        x0_pred_flat = x0_pred.float().reshape(batch_size, -1)  # (B, ...) -> (B, N)
+ 
+         # Compute percentile for each sample
+         try:
+@@ -715,24 +715,24 @@ class FastSBOTSolver(nn.Module):
+                 percentile,
+                 dim=1,
+                 keepdim=True
+-            )
++            )  # (B, N) -> (B, 1)
+         except (AttributeError, TypeError, RuntimeError):
+-            s = self._quantile_deterministic(x0_pred_flat.abs(), percentile, dim=1, keepdim=True)
++            s = self._quantile_deterministic(x0_pred_flat.abs(), percentile, dim=1, keepdim=True)  # (B, N) -> (B, 1)
+ 
+         # POLISH: Adaptive floor based on content
+         if self.config.dynamic_thresholding_adaptive_floor:
+             # Use adaptive floor based on mean absolute value
+-            content_scale = x0_pred_flat.abs().mean(dim=1, keepdim=True)
+-            floor = torch.maximum(torch.ones_like(s), content_scale * 0.5)
+-            s = torch.maximum(s, floor)
+-        else:
+-            # Original fixed floor = 1.0
+-            s = torch.maximum(s, torch.ones_like(s))
+-
+-        s = s.view(-1, *([1] * (x0_pred.dim() - 1)))
+-
+-        # Threshold and rescale (cast back to original dtype)
+-        x0_pred = torch.clamp(x0_pred, -s.to(original_dtype), s.to(original_dtype)) / s.to(original_dtype)
++            content_scale = x0_pred_flat.abs().mean(dim=1, keepdim=True)  # (B, N) -> (B, 1)
++            floor = torch.maximum(torch.ones_like(s), content_scale * 0.5)  # (B, 1)
++            s = torch.maximum(s, floor)  # (B, 1)
++        else:
++            # Original fixed floor = 1.0
++            s = torch.maximum(s, torch.ones_like(s))  # (B, 1)
++
++        s = s.view(-1, *([1] * (x0_pred.dim() - 1)))  # (B, 1) -> (B, 1, 1, 1)
++
++        # Threshold and rescale (cast back to original dtype)
++        x0_pred = torch.clamp(x0_pred, -s.to(original_dtype), s.to(original_dtype)) / s.to(original_dtype)  # (B, ...) / (B,1,1,1)
+ 
+         return x0_pred
+ 
+@@ -753,7 +753,7 @@ class FastSBOTSolver(nn.Module):
+         # Predict x0 from current sample
+         sqrt_alpha_bar_curr = math.sqrt(max(0.0, alpha_bar_curr))
+         sqrt_one_minus_alpha_bar_curr = math.sqrt(max(0.0, 1.0 - alpha_bar_curr))
+-        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / sqrt_alpha_bar_curr
++        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / sqrt_alpha_bar_curr  # (B, C, H, W)
+ 
+         # Clip predictions for stability
+         if self.config.use_dynamic_thresholding:
+@@ -779,16 +779,16 @@ class FastSBOTSolver(nn.Module):
+         # Compute mean (with protection against negative values under sqrt)
+         sqrt_alpha_bar_prev = math.sqrt(max(0.0, alpha_bar_prev))
+         under = max(0.0, 1.0 - alpha_bar_prev - sigma_t**2)
+-        pred_sample_direction = math.sqrt(under) * noise_pred
++        pred_sample_direction = math.sqrt(under) * noise_pred  # (B, C, H, W)
+ 
+         # Combine prediction and noise direction
+-        x_next = sqrt_alpha_bar_prev * x0_pred + pred_sample_direction
++        x_next = sqrt_alpha_bar_prev * x0_pred + pred_sample_direction  # (B, C, H, W)
+ 
+         # Add stochastic noise if eta > 0
+         if eta > 0 and t_next > 0:
+             gen = getattr(self.config, 'generator', None)
+-            noise = _randn_like_compat(x_t, gen)
+-            x_next = x_next + sigma_t * noise
++            noise = _randn_like_compat(x_t, gen)  # (B, C, H, W)
++            x_next = x_next + sigma_t * noise  # (B, C, H, W)
+ 
+         return x_next
+ 
+@@ -828,7 +828,7 @@ class FastSBOTSolver(nn.Module):
+             if c != 2 * xc:
+                 raise ValueError(f"Expected [||logvar] with {2*xc} channels, got {c}")
+             # Split noise_pred if model predicts both mean and variance
+-            noise_pred, log_variance = torch.chunk(noise_pred, 2, dim=1)
++            noise_pred, log_variance = torch.chunk(noise_pred, 2, dim=1)  # (B, 2C, H, W) -> (B, C, H, W) x2
+             # Interpolate between minimum and maximum variance
+             min_log = math.log(max(1e-20, beta_t))
+             # Guard division in variance computation
+@@ -836,7 +836,7 @@ class FastSBOTSolver(nn.Module):
+             max_log = math.log(max(1e-20, beta_t * (1 - alpha_bar_prev) / denominator))
+             frac = (log_variance + 1) / 2  # Assume model outputs in [-1, 1]
+             model_log_variance = frac * max_log + (1 - frac) * min_log
+-            variance = torch.exp(model_log_variance).clamp_min(0.0)  # Explicit clamp
++            variance = torch.exp(model_log_variance).clamp_min(0.0)  # (B, C, H, W)
+         else:
+             # Use fixed variance schedule: sigma^2_t = beta_t * (1 - alpha_bar_prev) / (1 - alpha_bar_curr)
+             # Guard against tiny denominator
+@@ -855,7 +855,7 @@ class FastSBOTSolver(nn.Module):
+         sqrt_one_minus_alpha_bar_curr = math.sqrt(max(1.0 - alpha_bar_curr, 1e-12))
+ 
+         # Predict x0 and clip
+-        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / max(sqrt_alpha_bar_curr, 1e-12)
++        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / max(sqrt_alpha_bar_curr, 1e-12)  # (B, C, H, W)
+         if self.config.use_dynamic_thresholding:
+             x0_pred = self.dynamic_threshold(x0_pred)
+         else:
+@@ -868,7 +868,7 @@ class FastSBOTSolver(nn.Module):
+         alpha_t = max(alpha_bar_curr / max(alpha_bar_prev, 1e-12), 0.0)  # per-step alpha (Gëñ 1)
+         mean_coef1 = math.sqrt(max(0.0, alpha_bar_prev)) * beta_t / denominator  # coefficient for x_0
+         mean_coef2 = math.sqrt(max(0.0, alpha_t)) * (1 - alpha_bar_prev) / denominator  # coefficient for x_t
+-        mean = mean_coef1 * x0_pred + mean_coef2 * x_t
++        mean = mean_coef1 * x0_pred + mean_coef2 * x_t  # (B, C, H, W)
+ 
+         # Add noise
+         if t_next > 0:
+@@ -877,16 +877,16 @@ class FastSBOTSolver(nn.Module):
+             std_dev: Union[float, torch.Tensor]
+             if torch.is_tensor(variance):
+                 # Handle tensor variance (from learned variance models)
+-                std_dev = torch.clamp(variance, min=0.0).sqrt()
++                std_dev = torch.clamp(variance, min=0.0).sqrt()  # (B, C, H, W)
+                 # If model predicted per-channel/voxel variance, ensure proper shape
+                 while std_dev.dim() < x_t.dim():
+-                    std_dev = std_dev.unsqueeze(-1)
+-                if std_dev.shape != x_t.shape:
+-                    std_dev = std_dev.expand_as(x_t)
++                    std_dev = std_dev.unsqueeze(-1)  # (B, C) -> (B, C, 1, 1)
++                if std_dev.shape != x_t.shape:
++                    std_dev = std_dev.expand_as(x_t)  # (B, C, H, W)
+             else:
+                 # Handle scalar variance
+                 std_dev = math.sqrt(max(0.0, variance))
+-            x_next = mean + std_dev * noise
++            x_next = mean + std_dev * noise  # (B, C, H, W)
+         else:
+             x_next = mean
+ 
+@@ -976,14 +976,14 @@ class FastSBOTSolver(nn.Module):
+                     )
+                 if nan_checks:
+                     check_tensor_finite("init_samples", init_samples, enabled=True)
+-                x_t = init_samples.to(self.device, non_blocking=True)
++                x_t = init_samples.to(self.device, non_blocking=True)  # (B, C, H, W)
+             else:
+                 gen = getattr(self.config, 'generator', None)
+-                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)
++                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)  # (B, C, H, W)
+ 
+             if x_t.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+                 try:
+-                    x_t = x_t.contiguous(memory_format=torch.channels_last)
++                    x_t = x_t.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
+                 except TypeError:
+                     x_t = x_t.contiguous()
+             if nan_checks:
+@@ -1011,19 +1011,19 @@ class FastSBOTSolver(nn.Module):
+ 
+                 # Convert score to noise for DDPM/DDIM sampling
+                 sigma_t = math.sqrt(1.0 - alpha_bar_t)
+-                noise_pred = -score * sigma_t
++                noise_pred = -score * sigma_t  # (B, C, H, W)
+ 
+                 # POLISH: Improved guidance that scales score direction
+                 if guidance_scale != 1.0 and guidance_scale > 0:
+                     if self.config.guidance_mode == "score":
+                         # Scale the score direction (better approach)
+-                        score_guided = guidance_scale * score
+-                        guided_noise = -score_guided * sigma_t
+-                    else:
+-                        # Original noise scaling (less principled but sometimes works)
+-                        guided_noise = guidance_scale * noise_pred
+-                else:
+-                    guided_noise = noise_pred
++                        score_guided = guidance_scale * score  # (B, C, H, W)
++                        guided_noise = -score_guided * sigma_t  # (B, C, H, W)
++                    else:
++                        # Original noise scaling (less principled but sometimes works)
++                        guided_noise = guidance_scale * noise_pred  # (B, C, H, W)
++                else:
++                    guided_noise = noise_pred  # (B, C, H, W)
+ 
+                 if use_ddim:
+                     # DDIM sampling (deterministic or with controlled noise)
+@@ -1046,14 +1046,14 @@ class FastSBOTSolver(nn.Module):
+ 
+                 # Update progress bar if verbose
+                 if verbose and hasattr(iterator, 'set_postfix'):
+-                    iterator.set_postfix(
+-                        t=f"{t_next:.4f}",
+-                        mean=f"{x_t.mean().item():.3f}",
+-                        std=f"{x_t.std().item():.3f}"
+-                    )
++                    iterator.set_postfix(
++                        t=f"{t_next:.4f}",
++                        mean=f"{x_t.mean().item():.3f}",  # (B, C, H, W) -> scalar
++                        std=f"{x_t.std().item():.3f}"  # (B, C, H, W) -> scalar
++                    )
+ 
+             # Final clamping
+-            x_t = torch.clamp(x_t, -1, 1)
++            x_t = torch.clamp(x_t, -1, 1)  # (B, C, H, W)
+             if nan_checks:
+                 check_tensor_finite("samples", x_t, enabled=True)
+ 
+@@ -1075,14 +1075,14 @@ class FastSBOTSolver(nn.Module):
+             self._guidance_deprecated_warned = True
+ 
+         # Simple guidance by scaling the score
+-        if guidance_scale != 1.0:
+-            # Apply guidance (simplified: guidance just scales the score)
+-            guided_score = guidance_scale * score
++        if guidance_scale != 1.0:
++            # Apply guidance (simplified: guidance just scales the score)
++            guided_score = guidance_scale * score  # (B, C, H, W)
+ 
+             # Compute guided update with actual timestep difference
+             sigma_t = math.sqrt(max(1e-8, 1.0 - alpha_bar_t))
+             dt = max(1e-6, float(t_curr) - float(t_next))
+-            x_t = x_t - dt * sigma_t * guided_score
++            x_t = x_t - dt * sigma_t * guided_score  # (B, C, H, W)
+ 
+         return x_t
+ 
+@@ -1095,19 +1095,20 @@ class FastSBOTSolver(nn.Module):
+             alpha_bar_t: (t) at current time (NOT the time index t)
+             dt: step size (float tensor, ideally FP32)
+         """
+-        drift = -0.5 * (1 - alpha_bar_t) * score * dt
+-        drift = drift.to(x.dtype)
++        drift = -0.5 * (1 - alpha_bar_t) * score * dt  # (B, C, H, W)
++        drift = drift.to(x.dtype)  # (B, C, H, W)
+ 
+         if self.config.control_variate_strength > 0:
+-            score_norm = torch.norm(score.reshape(x.shape[0], -1), dim=1, keepdim=True)
+-            std = score_norm.std(unbiased=False)
+-            mean = score_norm.mean()
++            score_flat = score.reshape(x.shape[0], -1)  # (B, N)
++            score_norm = torch.norm(score_flat.float(), dim=1, keepdim=True)  # (B, N) -> (B, 1)
++            std = score_norm.std(unbiased=False)  # () -> scalar
++            mean = score_norm.mean()  # () -> scalar
+             # Renamed misleading variable - it's a coefficient, not variance
+             coeff = std / (mean + 1e-8)
+ 
+             # Use the "noise level" proxy (1 - ) rather than misusing t
+-            control_strength = self.config.control_variate_strength * coeff * (1.0 - alpha_bar_t)
+-            drift = drift * (1 + control_strength)
++            control_strength = self.config.control_variate_strength * coeff * (1.0 - alpha_bar_t)
++            drift = drift * (1 + control_strength.to(drift.dtype))  # (B, C, H, W) broadcast
+ 
+         return drift
+ 
+@@ -1139,19 +1140,19 @@ class FastSBOTSolver(nn.Module):
+         )
+ 
+         if self.config.use_fp32_fisher and score.dtype in [torch.float16, torch.bfloat16]:
+-            score_fp32 = score.float()
+-            fisher_fp32 = fisher_diag.float()
+-            natural_grad = score_fp32 / (fisher_fp32 + 1e-6)
+-            natural_grad = natural_grad.to(score.dtype)
+-        else:
+-            natural_grad = score / (fisher_diag + 1e-6)
+-
+-        curvature = fisher_diag.mean(dim=tuple(range(1, fisher_diag.dim())), keepdim=True)
+-        step_size = dt / (1 + curvature)
++            score_fp32 = score.float()
++            fisher_fp32 = fisher_diag.float()
++            natural_grad = score_fp32 / (fisher_fp32 + 1e-6)  # (B, C, H, W)
++            natural_grad = natural_grad.to(score.dtype)  # (B, C, H, W)
++        else:
++            natural_grad = score / (fisher_diag + 1e-6)  # (B, C, H, W)
++
++        curvature = fisher_diag.mean(dim=tuple(range(1, fisher_diag.dim())), keepdim=True)  # (B, ...) -> (B, 1, 1, 1)
++        step_size = dt / (1 + curvature)  # (B, 1, 1, 1)
+ 
+         one_minus_alpha_bar = x.new_tensor(1 - alpha_bar_t)
+         half = x.new_tensor(0.5)
+-        transport = x - step_size * natural_grad * half * one_minus_alpha_bar
++        transport = x - step_size * natural_grad * half * one_minus_alpha_bar  # (B, C, H, W)
+ 
+         return transport.to(x.dtype)
+ 
+@@ -1186,9 +1187,9 @@ class FastSBOTSolver(nn.Module):
+             and not (x_work.requires_grad or drift_work.requires_grad)
+         )
+         if triton_ready and x_work.is_cuda and x_work.numel() > 65536:
+-            x_flat = x_work.reshape(-1).contiguous()
+-            drift_flat = drift_work.reshape(-1).contiguous()
+-            out = torch.empty_like(x_flat)
++            x_flat = x_work.reshape(-1).contiguous()  # (B, ...) -> (N,)
++            drift_flat = drift_work.reshape(-1).contiguous()  # (B, ...) -> (N,)
++            out = torch.empty_like(x_flat)  # (N,)
+ 
+             # MAJOR FIX: Properly extract scalar alpha_bar value before computation
+             # Previous code: (5.0 * (1 - alpha_bar)).float().mean() was nonsensical for scalars
+@@ -1199,7 +1200,7 @@ class FastSBOTSolver(nn.Module):
+ 
+             # Compute scale as float directly with proper clamping
+             scale_float = max(0.1, min(10.0, 5.0 * (1.0 - alpha_bar_val)))
+-            scale_buf = torch.tensor([scale_float], device=x_work.device, dtype=x_work.dtype)
++            scale_buf = torch.tensor([scale_float], device=x_work.device, dtype=x_work.dtype)  # (1,)
+ 
+             n_elements = x_flat.numel()
+             assert launch_triton_kernel_safe is not None
+@@ -1211,27 +1212,33 @@ class FastSBOTSolver(nn.Module):
+                 kernel_type="default"
+             )
+ 
+-            result = out.reshape(x_work.shape)
++            result = out.reshape(x_work.shape)  # (N,) -> x_work.shape
+             return result.to(x.dtype) if legacy_fp32 else result
+ 
+         if x_work.dim() == 4:
+-            drift_norms = torch.norm(drift_work.reshape(x_work.shape[0], x_work.shape[1], -1), dim=2, p=2)
+-            drift_norms = drift_norms.mean(dim=1, keepdim=True)
+-        else:
+-            drift_norms = torch.norm(drift_work.reshape(x_work.shape[0], -1), dim=1, keepdim=True)
+-
+-        mean_norm = drift_norms.float().mean().clamp_(min=1e-12, max=1e6).to(drift_norms.dtype)
+-
+-        norm_ratio = drift_norms / mean_norm
+-        norm_ratio_clamped = torch.clamp(norm_ratio, min=0.25, max=4.0)
+-        weights = norm_ratio_clamped / (norm_ratio_clamped + 1.0)
+-
+-        weights = weights.clamp_min_(self.config.transport_weight_min).clamp_max_(self.config.transport_weight_max)
+-
+-        for _ in range(x.dim() - len(weights.shape)):
+-            weights = weights.unsqueeze(-1)
+-
+-        transported = x_work + weights * drift_work
++            drift_norms = torch.norm(
++                drift_work.reshape(x_work.shape[0], x_work.shape[1], -1).float(), dim=2, p=2
++            )  # (B, C, N) -> (B, C)
++            drift_norms = drift_norms.mean(dim=1, keepdim=True)  # (B, C) -> (B, 1)
++        else:
++            drift_norms = torch.norm(drift_work.reshape(x_work.shape[0], -1).float(), dim=1, keepdim=True)  # (B, N) -> (B, 1)
++
++        mean_norm = drift_norms.mean().clamp(min=1e-12, max=1e6)  # (B, 1) -> scalar
++
++        norm_ratio = drift_norms / mean_norm  # (B, 1) / scalar -> (B, 1)
++        norm_ratio_clamped = torch.clamp(norm_ratio, min=0.25, max=4.0)
++        weights = norm_ratio_clamped / (norm_ratio_clamped + 1.0)  # (B, 1)
++
++        weights = torch.clamp(
++            weights,
++            min=self.config.transport_weight_min,
++            max=self.config.transport_weight_max,
++        )  # (B, 1)
++
++        for _ in range(x.dim() - len(weights.shape)):
++            weights = weights.unsqueeze(-1)  # (B, 1) -> (B, 1, 1, 1)
++
++        transported = x_work + weights.to(drift_work.dtype) * drift_work  # (B, C, H, W)
+         return transported.to(x.dtype) if legacy_fp32 else transported
+ 
+     def fft_grid_transport_inline(self, x: torch.Tensor, drift: torch.Tensor,
+@@ -1245,7 +1252,7 @@ class FastSBOTSolver(nn.Module):
+         B, C = x.shape[:2]
+         spatial_dims = x.shape[2:]
+ 
+-        y_pred = x + drift
++        y_pred = x + drift  # (B, C, H, W)
+ 
+         # POLISH: FP32 guards for FFT stability with half precision
+         original_dtype = x.dtype
+@@ -1253,43 +1260,43 @@ class FastSBOTSolver(nn.Module):
+             x = x.float()
+             y_pred = y_pred.float()
+ 
+-        x_fft = torch.fft.rfftn(x, dim=tuple(range(2, x.dim())))
+-        y_fft = torch.fft.rfftn(y_pred, dim=tuple(range(2, y_pred.dim())))
+-
+-        kernel = kernel_fft.unsqueeze(0).unsqueeze(0).to(y_fft.real.dtype)
+-        kernel = torch.maximum(kernel, kernel.new_tensor(1e-6))
+-        y_r, y_i = y_fft.real, y_fft.imag
+-        smoothed_fft = torch.complex(y_r * kernel, y_i * kernel)
++        x_fft = torch.fft.rfftn(x, dim=tuple(range(2, x.dim())))  # (B, C, H, W) -> (B, C, H, Wf)
++        y_fft = torch.fft.rfftn(y_pred, dim=tuple(range(2, y_pred.dim())))  # (B, C, H, W) -> (B, C, H, Wf)
++
++        kernel = kernel_fft.unsqueeze(0).unsqueeze(0).to(y_fft.real.dtype)  # (*spatial_rfft) -> (1, 1, *spatial_rfft)
++        kernel = torch.maximum(kernel, kernel.new_tensor(1e-6))
++        y_r, y_i = y_fft.real, y_fft.imag
++        smoothed_fft = torch.complex(y_r * kernel, y_i * kernel)  # (B, C, H, Wf)
+ 
+         if self.config.freq_weighting and freq_weights is not None:
+-            freq_weights_expanded = freq_weights.unsqueeze(0).unsqueeze(0)
+-
+-            diff_real = (y_fft.real - x_fft.real).abs()
+-            diff_imag = (y_fft.imag - x_fft.imag).abs()
+-            diff_mag = torch.sqrt(diff_real**2 + diff_imag**2)
+-
+-            weighted_diff = diff_mag * freq_weights_expanded
+-
+-            diff_norm = weighted_diff.reshape(B, C, -1).mean(dim=(1, 2))
+-            weights = torch.sigmoid(diff_norm * 3.0).view(B, 1, 1, 1)
+-            weights = weights.to(x_fft.real.dtype)
+-        else:
+-            weights = x_fft.real.new_tensor(0.5)
+-
+-        result_fft = (1 - weights) * x_fft + weights * smoothed_fft
++            freq_weights_expanded = freq_weights.unsqueeze(0).unsqueeze(0)  # (*spatial_rfft) -> (1, 1, *spatial_rfft)
++
++            diff_real = (y_fft.real - x_fft.real).abs()  # (B, C, H, Wf)
++            diff_imag = (y_fft.imag - x_fft.imag).abs()  # (B, C, H, Wf)
++            diff_mag = torch.sqrt(diff_real**2 + diff_imag**2)  # (B, C, H, Wf)
++
++            weighted_diff = diff_mag * freq_weights_expanded  # (B, C, H, Wf)
++
++            diff_norm = weighted_diff.reshape(B, C, -1).mean(dim=(1, 2))  # (B, C, Nf) -> (B,)
++            weights = torch.sigmoid(diff_norm * 3.0).view(B, 1, 1, 1)  # (B,) -> (B, 1, 1, 1)
++            weights = weights.to(x_fft.real.dtype)  # (B, 1, 1, 1)
++        else:
++            weights = x_fft.real.new_tensor(0.5)  # scalar
++
++        result_fft = (1 - weights) * x_fft + weights * smoothed_fft  # (B, 1, 1, 1) broadcast -> (B, C, H, Wf)
+ 
+         if result_fft.dtype != torch.complex64 and result_fft.dtype != torch.complex128:
+             result_fft = result_fft.to(smoothed_fft.dtype)
+ 
+-        result = cast(torch.Tensor, torch.fft.irfftn(result_fft, s=spatial_dims, dim=tuple(range(2, x.dim()))))
++        result = cast(torch.Tensor, torch.fft.irfftn(result_fft, s=spatial_dims, dim=tuple(range(2, x.dim()))))  # (B, C, H, Wf) -> (B, C, H, W)
+ 
+         # Cast back to original dtype
+-        result = result.to(original_dtype)
++        result = result.to(original_dtype)  # (B, C, H, W)
+ 
+         if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+             try:
+                 if x.is_contiguous(memory_format=torch.channels_last):
+-                    result = result.contiguous(memory_format=torch.channels_last)
++                    result = result.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
+             except (TypeError, AttributeError):
+                 pass
+ 
+@@ -1320,8 +1327,8 @@ class FastSBOTSolver(nn.Module):
+         POLISH: Using clearer parameter names
+         """
+         # Ensure dt is FP32 tensor
+-        if not torch.is_tensor(dt):
+-            dt = torch.tensor(dt, dtype=torch.float32, device=x.device)
++        if not torch.is_tensor(dt):
++            dt = torch.tensor(dt, dtype=torch.float32, device=x.device)  # ()
+ 
+         # Get alpha_bar as scalar for computation
+         if torch.is_tensor(alpha_bar_t):
+@@ -1336,9 +1343,9 @@ class FastSBOTSolver(nn.Module):
+             drift = self.compute_controlled_drift(x, score, alpha_bar_val, dt)
+             x_new = self.compute_drift_and_transport_inline(x, drift, alpha_bar_val)
+ 
+-        def _aux_drift(base: torch.Tensor) -> torch.Tensor:
+-            drift_aux = -0.5 * (1 - alpha_bar_val) * score * dt
+-            return drift_aux.to(base.dtype)
++        def _aux_drift(base: torch.Tensor) -> torch.Tensor:
++            drift_aux = -0.5 * (1 - alpha_bar_val) * score * dt  # (B, C, H, W)
++            return drift_aux.to(base.dtype)  # (B, C, H, W)
+ 
+         # Hierarchical bridge transport
+         if self.hierarchical_bridge is not None and x_new.dim() == 4:
+@@ -1417,18 +1424,18 @@ class FastSBOTSolver(nn.Module):
+                     )
+                 if nan_checks:
+                     check_tensor_finite("init_samples", init_samples, enabled=True)
+-                x_t = init_samples.to(self.device, dtype=self.amp_dtype, non_blocking=True)
++                x_t = init_samples.to(self.device, dtype=self.amp_dtype, non_blocking=True)  # (B, C, H, W)
+             else:
+                 gen = getattr(self.config, 'generator', None)
+-                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)
++                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)  # (B, C, H, W)
+ 
+             if x_t.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
+                 try:
+-                    x_t = x_t.contiguous(memory_format=torch.channels_last)
++                    x_t = x_t.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
+                 except TypeError:
+                     x_t = x_t.contiguous()
+ 
+-            trajectory = [x_t.clone()] if return_trajectory else []
++            trajectory = [x_t.clone()] if return_trajectory else []  # list[(B, C, H, W)]
+ 
+             # Precompute FFT kernels if needed
+             kernel_fft = None
+@@ -1458,10 +1465,10 @@ class FastSBOTSolver(nn.Module):
+                     sigma = 0.25 * max(x_t.shape[-2:])
+                     kernel_fft = self.kernel_module.compute_gaussian_kernel_fft(
+                         x_t.shape[2:], sigma, x_t.device
+-                    )
++                    )  # (*spatial_rfft)
+                     freq_weights = self.kernel_module.get_frequency_weights(
+                         x_t.shape[2:], str(x_t.device)
+-                    ) if self.config.freq_weighting else None
++                    ) if self.config.freq_weighting else None  # (*spatial_rfft)
+ 
+             # Reset momentum
+             if self.momentum_transport is not None:
+@@ -1477,9 +1484,9 @@ class FastSBOTSolver(nn.Module):
+ 
+                 # Ensure dt is FP32
+                 if self.config.use_fp32_time:
+-                    dt_tensor = torch.tensor(dt, dtype=torch.float32, device=x_t.device)
+-                else:
+-                    dt_tensor = torch.tensor(dt, dtype=x_t.dtype, device=x_t.device)
++                    dt_tensor = torch.tensor(dt, dtype=torch.float32, device=x_t.device)  # ()
++                else:
++                    dt_tensor = torch.tensor(dt, dtype=x_t.dtype, device=x_t.device)  # ()
+ 
+                 # Get score
+                 if x_t.shape[-1] > self.config.max_patch_size:
+@@ -1492,31 +1499,31 @@ class FastSBOTSolver(nn.Module):
+                 alpha_bar_t = self._get_cached_noise_schedule(t_curr)
+ 
+                 # Transport
+-                x_t = self._sample_step(x_t, score, alpha_bar_t, dt_tensor, kernel_fft, freq_weights)
++                x_t = self._sample_step(x_t, score, alpha_bar_t, dt_tensor, kernel_fft, freq_weights)  # (B, C, H, W)
+ 
+                 # Corrector steps
+                 steps = self.config.corrector_steps or 0
+                 for _ in range(steps):
+                     gen = getattr(self.config, 'generator', None)
+-                    noise = _randn_like_compat(x_t, gen) * math.sqrt(2 * dt * self.config.corrector_snr)
+-                    x_t = x_t + noise
++                    noise = _randn_like_compat(x_t, gen) * math.sqrt(2 * dt * self.config.corrector_snr)  # (B, C, H, W)
++                    x_t = x_t + noise  # (B, C, H, W)
+ 
+                     score_corr = self.compute_score_cached(x_t, t_next)
+-                    x_t = x_t + dt_tensor * self.config.corrector_snr * score_corr
++                    x_t = x_t + dt_tensor * self.config.corrector_snr * score_corr  # (B, C, H, W)
+ 
+                 if return_trajectory:
+                     trajectory.append(x_t.clone())
+ 
+                 # Update progress
+                 if verbose and hasattr(iterator, 'set_postfix'):
+-                    iterator.set_postfix(
+-                        t=f"{t_next:.4f}",
+-                        mean=f"{x_t.mean().item():.3f}",
+-                        std=f"{x_t.std().item():.3f}"
+-                    )
++                    iterator.set_postfix(
++                        t=f"{t_next:.4f}",
++                        mean=f"{x_t.mean().item():.3f}",  # (B, C, H, W) -> scalar
++                        std=f"{x_t.std().item():.3f}"  # (B, C, H, W) -> scalar
++                    )
+ 
+             # Final clamp
+-            x_t = torch.clamp(x_t, -1, 1)
++            x_t = torch.clamp(x_t, -1, 1)  # (B, C, H, W)
+             if nan_checks:
+                 check_tensor_finite("samples", x_t, enabled=True)
+ 
+@@ -1599,12 +1606,12 @@ class FastSBOTSolver(nn.Module):
+                 source_batch, target_batch, eps, n_proj
+             )
+         else:
+-            def _prepare_full_ot_tensor(tensor: torch.Tensor) -> Tuple[torch.Tensor, Optional[Tuple[int, ...]]]:
+-                if tensor.dim() == 3:
+-                    return tensor, None
+-                view_shape = tensor.shape
+-                tensor_flat = tensor.reshape(tensor.shape[0], -1, 1)
+-                return tensor_flat, view_shape
++            def _prepare_full_ot_tensor(tensor: torch.Tensor) -> Tuple[torch.Tensor, Optional[Tuple[int, ...]]]:
++                if tensor.dim() == 3:
++                    return tensor, None
++                view_shape = tensor.shape
++                tensor_flat = tensor.reshape(tensor.shape[0], -1, 1)  # (B, C, H, W) -> (B, N, 1)
++                return tensor_flat, view_shape
+ 
+             src_prepped, src_shape = _prepare_full_ot_tensor(source_batch)
+             tgt_prepped, _ = _prepare_full_ot_tensor(target_batch)
+@@ -1615,8 +1622,8 @@ class FastSBOTSolver(nn.Module):
+                 eps
+             )
+ 
+-            if src_shape is not None:
+-                x_t = x_t.reshape(src_shape)
++            if src_shape is not None:
++                x_t = x_t.reshape(src_shape)  # (B, N, 1) -> (B, C, H, W)
+ 
+         # Continue regular sampling
+         if x_t.dim() != 4:
+@@ -1651,21 +1658,21 @@ class FastSBOTSolver(nn.Module):
+ 
+         if schedule_type == "linear":
+             # Linear spacing in t
+-            timesteps = torch.linspace(1.0, 0.0, num_steps).tolist()
++            timesteps = torch.linspace(1.0, 0.0, num_steps).tolist()  # (num_steps,)
+ 
+         elif schedule_type == "quadratic":
+             # Quadratic spacing (more steps near t=0)
+-            t = torch.linspace(0, 1, num_steps) ** 2
+-            timesteps = (1.0 - t).tolist()
++            t = torch.linspace(0, 1, num_steps) ** 2  # (num_steps,)
++            timesteps = (1.0 - t).tolist()  # (num_steps,)
+ 
+         elif schedule_type == "cosine":
+             # Cosine schedule
+-            t = torch.linspace(0, 1, num_steps)
+-            timesteps = (0.5 * (1 + torch.cos(math.pi * t))).tolist()
++            t = torch.linspace(0, 1, num_steps)  # (num_steps,)
++            timesteps = (0.5 * (1 + torch.cos(math.pi * t))).tolist()  # (num_steps,)
+ 
+         elif schedule_type == "uniform_alpha_bar":
+             # Uniform spacing in alpha_bar space
+-            alpha_bars = torch.linspace(1.0, 0.0, num_steps)
++            alpha_bars = torch.linspace(1.0, 0.0, num_steps)  # (num_steps,)
+             timesteps = []
+             for alpha_bar_target in alpha_bars:
+                 # Find t that gives this alpha_bar
+@@ -1686,7 +1693,7 @@ class FastSBOTSolver(nn.Module):
+             # Sample uniformly in log-SNR space
+             log_snr_max = 4.0  # log(~0.98/0.02)
+             log_snr_min = -4.0  # log(~0.02/0.98)
+-            log_snrs = torch.linspace(log_snr_max, log_snr_min, num_steps)
++            log_snrs = torch.linspace(log_snr_max, log_snr_min, num_steps)  # (num_steps,)
+ 
+             timesteps = []
+             for log_snr_target in log_snrs:
+@@ -1806,12 +1813,12 @@ def make_schedule(schedule_type: str = "linear",
+         """Sigmoid-based schedule"""
+         beta_max = beta_end
+         beta_min = beta_start
+-        betas = torch.linspace(-6, 6, num_timesteps)
+-        betas = torch.sigmoid(betas) * (beta_max - beta_min) + beta_min
++        betas = torch.linspace(-6, 6, num_timesteps)  # (num_timesteps,)
++        betas = torch.sigmoid(betas) * (beta_max - beta_min) + beta_min  # (num_timesteps,)
+ 
+         # Compute alpha_bar products
+-        alphas = 1.0 - betas
+-        alpha_bars = torch.cumprod(alphas, dim=0)
++        alphas = 1.0 - betas  # (num_timesteps,)
++        alpha_bars = torch.cumprod(alphas, dim=0)  # (num_timesteps,)
+ 
+         # Interpolate
+         idx = min(int(t * (num_timesteps - 1)), num_timesteps - 2)
+@@ -1838,7 +1845,7 @@ def example_usage() -> torch.Tensor:
+     # Mock score model
+     class MockScoreModel(nn.Module):
+         def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+-            return torch.randn_like(x)
++            return torch.randn_like(x)  # (B, C, H, W)
+ 
+     # For CFG compatibility, wrap your model:
+     class CFGWrapper(nn.Module):
+diff --git a/FastSB-OT/fastsb_ot/transport.py b/FastSB-OT/fastsb_ot/transport.py
+index 10b11c6..7e61966 100644
+--- a/FastSB-OT/fastsb_ot/transport.py
++++ b/FastSB-OT/fastsb_ot/transport.py
+@@ -69,7 +69,7 @@ class SlicedOptimalTransport:
+         """Flatten arbitrary inputs to (B, N, d) and return a restore hook."""
+         if tensor.dim() == 2:
+             # Treat feature dimension as points with scalar features
+-            points = tensor.unsqueeze(-1)
++            points = tensor.unsqueeze(-1)  # (B, N) -> (B, N, 1)
+             restore_fn: Callable[[torch.Tensor], torch.Tensor] = lambda out: out.squeeze(-1)
+             return points, restore_fn
+ 
+@@ -86,9 +86,9 @@ class SlicedOptimalTransport:
+             raise ValueError(f"Input with shape {tuple(tensor.shape)} is not compatible with OT flattening.")
+ 
+         # Move channel to the last axis then flatten spatial dims into point dimension
+-        points = tensor.movedim(1, -1).reshape(batch, -1, channel)
++        points = tensor.movedim(1, -1).reshape(batch, -1, channel)  # (B, C, *S) -> (B, N, C)
+ 
+-        restore_fn = lambda out: out.reshape(batch, *spatial, channel).movedim(-1, 1)
++        restore_fn = lambda out: out.reshape(batch, *spatial, channel).movedim(-1, 1)  # (B, N, C) -> (B, C, *S)
+ 
+         return points, restore_fn
+ 
+@@ -168,20 +168,20 @@ class SlicedOptimalTransport:
+             theta = common._randn_like_compat(
+                 torch.empty((current, d), device=device, dtype=torch.float32),
+                 gen
+-            )
+-            theta = F.normalize(theta, dim=1, eps=1e-8).to(dtype)
++            )  # (P, d)
++            theta = F.normalize(theta, dim=1, eps=1e-8).to(dtype)  # (P, d) -> (P, d)
+ 
+-            x_proj = torch.matmul(x, theta.transpose(0, 1))
+-            y_proj = torch.matmul(y, theta.transpose(0, 1))
++            x_proj = torch.matmul(x, theta.transpose(0, 1))  # (B, N, d) @ (d, P) -> (B, N, P)
++            y_proj = torch.matmul(y, theta.transpose(0, 1))  # (B, N, d) @ (d, P) -> (B, N, P)
+ 
+-            _, x_indices = torch.sort(x_proj, dim=1)
+-            y_sorted, _ = torch.sort(y_proj, dim=1)
++            _, x_indices = torch.sort(x_proj, dim=1)  # (B, N, P) -> (B, N, P)
++            y_sorted, _ = torch.sort(y_proj, dim=1)  # (B, N, P) -> (B, N, P)
+ 
+-            transported_proj = torch.empty_like(x_proj)
+-            transported_proj.scatter_(1, x_indices, y_sorted)
++            transported_proj = torch.empty_like(x_proj)  # (B, N, P)
++            transported_proj.scatter_(1, x_indices, y_sorted)  # (B, N, P) scatter -> (B, N, P)
+ 
+-            diff = transported_proj - x_proj
+-            transported += torch.einsum("bnp,pd->bnd", diff, theta)
++            diff = transported_proj - x_proj  # (B, N, P)
++            transported += torch.einsum("bnp,pd->bnd", diff, theta)  # (B, N, P) x (P, d) -> (B, N, d)
+             done += current
+ 
+         return x + transported / n_projections
+@@ -204,18 +204,18 @@ class SlicedOptimalTransport:
+             check_tensor_finite("x", x, enabled=True)
+             check_tensor_finite("y", y, enabled=True)
+ 
+-        x_expanded = x.unsqueeze(2)
+-        y_expanded = y.unsqueeze(1)
++        x_expanded = x.unsqueeze(2)  # (B, N, d) -> (B, N, 1, d)
++        y_expanded = y.unsqueeze(1)  # (B, N, d) -> (B, 1, N, d)
+ 
+-        diff = x_expanded - y_expanded
+-        C = torch.sum(diff ** 2, dim=-1)
++        diff = x_expanded - y_expanded  # (B, N, 1, d) - (B, 1, N, d) broadcast -> (B, N, N, d)
++        C = torch.sum(diff ** 2, dim=-1)  # (B, N, N, d) -> (B, N, N)
+ 
+         P_fp32 = self._sinkhorn_batch_fixed(C.float(), eps)
+         y_fp32 = y.float() if y.dtype != torch.float32 else y
+         # Barycentric projection requires dividing by row mass (uniform = 1/N). Without
+         # this scaling the map is biased toward zero by roughly a factor of 1/N.
+-        row_sums = P_fp32.sum(dim=2, keepdim=True).clamp_min(1e-12)
+-        out_fp32 = torch.bmm(P_fp32, y_fp32) / row_sums
++        row_sums = P_fp32.sum(dim=2, keepdim=True).clamp_min(1e-12)  # (B, N, N) -> (B, N, 1)
++        out_fp32 = torch.bmm(P_fp32, y_fp32) / row_sums  # (B, N, N) @ (B, N, d) -> (B, N, d); / (B, N, 1)
+         return out_fp32.to(y.dtype)
+ 
+     def _sinkhorn_batch_fixed(
+@@ -241,8 +241,8 @@ class SlicedOptimalTransport:
+         if tol is None:
+             tol = self.sinkhorn_tol
+ 
+-        C_min = C_batch.reshape(B, -1).min(dim=1, keepdim=True)[0].unsqueeze(-1)
+-        C_normalized = C_batch - C_min
++        C_min = C_batch.reshape(B, -1).min(dim=1, keepdim=True)[0].unsqueeze(-1)  # (B, n*m) -> (B, 1, 1)
++        C_normalized = C_batch - C_min  # (B, n, m) - (B, 1, 1) broadcast -> (B, n, m)
+ 
+         if row_marginals is None:
+             log_a = C_batch.new_full((B, n), -math.log(n))
+@@ -256,15 +256,15 @@ class SlicedOptimalTransport:
+ 
+         K_log = -C_normalized / eps
+ 
+-        log_u = torch.zeros_like(log_a)
+-        log_v = torch.zeros_like(log_b)
++        log_u = torch.zeros_like(log_a)  # (B, n)
++        log_v = torch.zeros_like(log_b)  # (B, m)
+ 
+         for iteration in range(max_iter):
+             log_u_prev = log_u.clone()
+             log_v_prev = log_v.clone()
+ 
+-            log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)
+-            log_u = log_a - log_sum_exp_stabilized(K_log + log_v.unsqueeze(1), dim=2)
++            log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)  # (B, n, m) -> (B, m)
++            log_u = log_a - log_sum_exp_stabilized(K_log + log_v.unsqueeze(1), dim=2)  # (B, n, m) -> (B, n)
+ 
+             check_every = 5 if not C_batch.is_cuda else 10
+             if iteration % check_every == 0:
+@@ -273,10 +273,13 @@ class SlicedOptimalTransport:
+                 if max(err_u.item(), err_v.item()) < tol:
+                     break
+ 
+-        log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)
++        log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)  # (B, n, m) -> (B, m)
+ 
+-        log_P = log_u.unsqueeze(-1) + K_log + log_v.unsqueeze(1)
+-        P = torch.exp(log_P)
++        def _compute_plan() -> torch.Tensor:
++            log_P = log_u.unsqueeze(-1) + K_log + log_v.unsqueeze(1)  # (B, n, 1)+(B, n, m)+(B, 1, m) -> (B, n, m)
++            return torch.exp(log_P)  # (B, n, m)
++
++        P = _compute_plan()
+ 
+         if self.nan_checks:
+             check_tensor_finite("sinkhorn_plan", P, enabled=True)
+@@ -289,14 +292,26 @@ class SlicedOptimalTransport:
+                 expected_cols = C_batch.new_full((B, m), 1.0 / m)
+             else:
+                 expected_cols = col_marginals
+-            row_err = (P.sum(dim=2) - expected_rows).abs().max()
+-            col_err = (P.sum(dim=1) - expected_cols).abs().max()
++            row_err = (P.sum(dim=2) - expected_rows).abs().max()  # (B, n) - (B, n) -> scalar
++            col_err = (P.sum(dim=1) - expected_cols).abs().max()  # (B, m) - (B, m) -> scalar
+             tol_mass = max(self.sinkhorn_mass_tolerance, self.sinkhorn_tol * 10)
+             if max(row_err.item(), col_err.item()) > tol_mass:
+-                raise ValueError(
+-                    f"Sinkhorn mass conservation failed (row_err={row_err.item():.3e}, "
+-                    f"col_err={col_err.item():.3e}, tol={tol_mass:.3e})."
+-                )
++                # Extra refinement for marginal satisfaction; bounded to avoid runaway compute.
++                refine_iters = max(20, max_iter * 5)
++                for _ in range(refine_iters):
++                    log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)  # (B, n, m) -> (B, m)
++                    log_u = log_a - log_sum_exp_stabilized(K_log + log_v.unsqueeze(1), dim=2)  # (B, n, m) -> (B, n)
++                log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)  # (B, n, m) -> (B, m)
++                P = _compute_plan()
++                if self.nan_checks:
++                    check_tensor_finite("sinkhorn_plan", P, enabled=True)
++                row_err = (P.sum(dim=2) - expected_rows).abs().max()  # (B, n) - (B, n) -> scalar
++                col_err = (P.sum(dim=1) - expected_cols).abs().max()  # (B, m) - (B, m) -> scalar
++                if max(row_err.item(), col_err.item()) > tol_mass:
++                    raise ValueError(
++                        f"Sinkhorn mass conservation failed (row_err={row_err.item():.3e}, "
++                        f"col_err={col_err.item():.3e}, tol={tol_mass:.3e})."
++                    )
+ 
+         return P
+ 
+@@ -331,39 +346,39 @@ class MomentumTransport(nn.Module):
+             self.velocity = torch.zeros_like(x)
+             self.velocity_shape = x.shape
+ 
+-        self.velocity = (self.beta * self.velocity.detach() + (1 - self.beta) * drift).detach()
++        self.velocity = (self.beta * self.velocity.detach() + (1 - self.beta) * drift).detach()  # (B, ...) -> (B, ...)
+ 
+-        lookahead = x + self.beta * self.velocity
++        lookahead = x + self.beta * self.velocity  # (B, ...) -> (B, ...)
+ 
+         transport_weight = self._compute_adaptive_weight(lookahead, alpha_bar_t)
+ 
+-        return x + transport_weight * self.velocity
++        return x + transport_weight * self.velocity  # (B, ...) + (B, 1, ..., 1) broadcast -> (B, ...)
+ 
+     def _compute_adaptive_weight(
+         self, x: torch.Tensor, alpha_bar_t: Union[float, torch.Tensor]
+     ) -> torch.Tensor:
+         """Compute adaptive weight for transport"""
+         if x.dim() == 4 and x.shape[-1] > 1 and x.shape[-2] > 1:
+-            dx = x[:, :, :, 1:] - x[:, :, :, :-1]
+-            dy = x[:, :, 1:, :] - x[:, :, :-1, :]
+-            dx_center = dx[:, :, :-1, :]
+-            dy_center = dy[:, :, :, :-1]
+-            grad_mag = torch.sqrt(dx_center**2 + dy_center**2 + 1e-8)
+-            smoothness = 1.0 / (1.0 + grad_mag.mean(dim=(1, 2, 3), keepdim=True))
++            dx = x[:, :, :, 1:] - x[:, :, :, :-1]  # (B, C, H, W-1)
++            dy = x[:, :, 1:, :] - x[:, :, :-1, :]  # (B, C, H-1, W)
++            dx_center = dx[:, :, :-1, :]  # (B, C, H-1, W-1)
++            dy_center = dy[:, :, :, :-1]  # (B, C, H-1, W-1)
++            grad_mag = torch.sqrt(dx_center**2 + dy_center**2 + 1e-8)  # (B, C, H-1, W-1)
++            smoothness = 1.0 / (1.0 + grad_mag.mean(dim=(1, 2, 3), keepdim=True))  # (B, 1, 1, 1)
+         else:
+-            smoothness = x.new_ones(x.shape[0], 1)
++            smoothness = x.new_ones(x.shape[0], 1)  # (B, 1)
+ 
+         alpha_tensor = torch.as_tensor(
+             alpha_bar_t,
+             device=x.device,
+             dtype=x.dtype if x.dtype.is_floating_point else torch.float32
+-        )
+-        alpha_clamped = torch.clamp(alpha_tensor, 0.0, 1.0)
+-        time_weight = 1.0 - alpha_clamped
+-        weight = smoothness * (0.5 + 0.5 * time_weight)
++        )  # scalar or (B,) -> tensor
++        alpha_clamped = torch.clamp(alpha_tensor, 0.0, 1.0)  # same shape as alpha_tensor
++        time_weight = 1.0 - alpha_clamped  # scalar or (B,)
++        weight = smoothness * (0.5 + 0.5 * time_weight)  # (B,1,1,1) * (B,) broadcast
+ 
+         for _ in range(x.dim() - len(weight.shape)):
+-            weight = weight.unsqueeze(-1)
++            weight = weight.unsqueeze(-1)  # (B, 1) -> (B, 1, 1, 1)
+ 
+         return weight
+ 
+@@ -388,8 +403,8 @@ class HierarchicalBridge(nn.Module):
+     ) -> torch.Tensor:
+         """Compute transport at multiple scales"""
+         s = 12.0
+-        alpha_tensor = torch.as_tensor(alpha_bar_t, device=x.device, dtype=x.dtype)
+-        gate = torch.sigmoid(((1 - alpha_tensor).mean() - 0.5) * s).to(x.dtype)
++        alpha_tensor = torch.as_tensor(alpha_bar_t, device=x.device, dtype=x.dtype)  # scalar or (B,) -> tensor
++        gate = torch.sigmoid(((1 - alpha_tensor).mean() - 0.5) * s).to(x.dtype)  # () -> ()
+ 
+         transports = []
+         weights = []
+@@ -399,15 +414,15 @@ class HierarchicalBridge(nn.Module):
+                 continue
+ 
+             if scale < 1.0:
+-                x_scaled = F.interpolate(x, scale_factor=scale, mode='bilinear', align_corners=False)
+-                drift_scaled = F.interpolate(drift, scale_factor=scale, mode='bilinear', align_corners=False)
++                x_scaled = F.interpolate(x, scale_factor=scale, mode='bilinear', align_corners=False)  # (B, C, H, W) -> (B, C, Hs, Ws)
++                drift_scaled = F.interpolate(drift, scale_factor=scale, mode='bilinear', align_corners=False)  # (B, C, H, W) -> (B, C, Hs, Ws)
+             else:
+                 x_scaled, drift_scaled = x, drift
+ 
+             transport = self._compute_scale_transport(x_scaled, drift_scaled, scale)
+ 
+             if scale < 1.0:
+-                transport = F.interpolate(transport, size=x.shape[-2:], mode='bilinear', align_corners=False)
++                transport = F.interpolate(transport, size=x.shape[-2:], mode='bilinear', align_corners=False)  # (B, C, Hs, Ws) -> (B, C, H, W)
+ 
+             transports.append(transport)
+ 
+@@ -418,14 +433,14 @@ class HierarchicalBridge(nn.Module):
+             multiscale = x + drift
+         else:
+             # CRITICAL FIX: Explicit type handling to prevent confusion between list and tensor
+-            weights_tensor = torch.stack(weights, dim=0)
+-            weights_tensor = F.softmax(weights_tensor / 0.1, dim=0).to(x.dtype)
++            weights_tensor = torch.stack(weights, dim=0)  # (S,) -> (S,)
++            weights_tensor = F.softmax(weights_tensor / 0.1, dim=0).to(x.dtype)  # (S,) -> (S,)
+             # Unstack back to list for weighted sum (more explicit than zip iteration)
+             weights_list = [weights_tensor[i] for i in range(len(transports))]
+-            weighted = torch.stack([w * tr for w, tr in zip(weights_list, transports)], dim=0)
+-            multiscale = weighted.sum(dim=0)
++            weighted = torch.stack([w * tr for w, tr in zip(weights_list, transports)], dim=0)  # (S, B, C, H, W)
++            multiscale = weighted.sum(dim=0)  # (S, B, C, H, W) -> (B, C, H, W)
+ 
+-        return (1 - gate) * (x + drift) + gate * multiscale
++        return (1 - gate) * (x + drift) + gate * multiscale  # scalar gate broadcast -> (B, C, H, W)
+ 
+     def _compute_scale_transport(self, x: torch.Tensor, drift: torch.Tensor, scale: float) -> torch.Tensor:
+         """Transport computation at specific scale"""
+@@ -433,7 +448,7 @@ class HierarchicalBridge(nn.Module):
+             kernel_size = int(3 / scale)
+             if kernel_size % 2 == 0:
+                 kernel_size += 1
+-            drift = F.avg_pool2d(drift, kernel_size, stride=1, padding=kernel_size//2)
++            drift = F.avg_pool2d(drift, kernel_size, stride=1, padding=kernel_size//2)  # (B, C, H, W) -> (B, C, H, W)
+ 
+         return x + drift
+ 
+@@ -441,31 +456,31 @@ class HierarchicalBridge(nn.Module):
+         self, x: torch.Tensor, transport: torch.Tensor, scale: float, alpha_bar_t: Union[float, torch.Tensor]
+     ) -> torch.Tensor:
+         """Compute importance weight for each scale"""
+-        x_fft = torch.fft.rfft2(x)
+-        t_fft = torch.fft.rfft2(transport)
++        x_fft = torch.fft.rfft2(x)  # (B, C, H, W) -> (B, C, H, W//2+1)
++        t_fft = torch.fft.rfft2(transport)  # (B, C, H, W) -> (B, C, H, W//2+1)
+ 
+         try:
+-            freq_y = torch.fft.fftfreq(x.shape[-2], device=x.device)
++            freq_y = torch.fft.fftfreq(x.shape[-2], device=x.device)  # (H,)
+         except TypeError:
+-            freq_y = torch.fft.fftfreq(x.shape[-2]).to(x.device)
++            freq_y = torch.fft.fftfreq(x.shape[-2]).to(x.device)  # (H,)
+         try:
+-            freq_x = torch.fft.rfftfreq(x.shape[-1], device=x.device)
++            freq_x = torch.fft.rfftfreq(x.shape[-1], device=x.device)  # (W//2+1,)
+         except TypeError:
+-            freq_x = torch.fft.rfftfreq(x.shape[-1]).to(x.device)
++            freq_x = torch.fft.rfftfreq(x.shape[-1]).to(x.device)  # (W//2+1,)
+ 
+-        freq_mag = torch.sqrt(freq_y[:, None]**2 + freq_x[None, :]**2)
++        freq_mag = torch.sqrt(freq_y[:, None]**2 + freq_x[None, :]**2)  # (H, 1) + (1, Wf) -> (H, Wf)
+ 
+         if scale >= 1.0:
+             freq_weight = freq_mag
+         else:
+             freq_weight = 1.0 - freq_mag
+ 
+-        energy = (torch.abs(t_fft - x_fft) * freq_weight[None, None, :, :]).mean()
++        energy = (torch.abs(t_fft - x_fft) * freq_weight[None, None, :, :]).mean()  # (B, C, H, Wf) * (1, 1, H, Wf) -> scalar
+ 
+-        alpha_tensor = torch.as_tensor(alpha_bar_t, device=x.device, dtype=x.dtype)
+-        time_factor = 1.0 - alpha_tensor
++        alpha_tensor = torch.as_tensor(alpha_bar_t, device=x.device, dtype=x.dtype)  # scalar or (B,) -> tensor
++        time_factor = 1.0 - alpha_tensor  # scalar or (B,)
+ 
+-        return energy * (1.0 + time_factor * scale)
++        return energy * (1.0 + time_factor * scale)  # scalar * scalar -> scalar
+ 
+ 
+ 
+diff --git a/FastSB-OT/fastsb_ot/utils.py b/FastSB-OT/fastsb_ot/utils.py
+index fedf2f9..09767fc 100644
+--- a/FastSB-OT/fastsb_ot/utils.py
++++ b/FastSB-OT/fastsb_ot/utils.py
+@@ -48,18 +48,25 @@ class NoisePredictorToScoreWrapper(nn.Module):
+             self.to(device)
+ 
+     def forward(self, x: torch.Tensor, t: Union[torch.Tensor, float]) -> torch.Tensor:
++        """Return score estimate from a noise-predicting model.
++
++        Shapes:
++            - x: (B, ...) arbitrary spatial/feature shape
++            - t: scalar or (B,)
++            - return: same shape as x
++        """
+         if nan_checks_enabled(None):
+             check_tensor_finite("x", x, enabled=True)
+-        eps = self.noise_model(x, t)
+-        sigma = self._sigma_from_t(t, x)
++        eps = self.noise_model(x, t)  # (B, ...) -> (B, ...)
++        sigma = self._sigma_from_t(t, x)  # (B,) or scalar -> (B,)
+ 
+         # Broadcast sigma to match epsilon shape.
+         while sigma.ndim < eps.ndim:
+-            sigma = sigma.unsqueeze(-1)
++            sigma = sigma.unsqueeze(-1)  # (B,) -> (B, 1, ..., 1)
+ 
+         # Guard against extreme scores near clean data (sigma -> 0).
+-        sigma_clamped = torch.clamp(sigma, min=1e-4)
+-        return -eps / sigma_clamped
++        sigma_clamped = torch.clamp(sigma, min=1e-4)  # (B, 1, ..., 1) -> (B, 1, ..., 1)
++        return -eps / sigma_clamped  # (B, ...) / (B, 1, ..., 1) broadcast -> (B, ...)
+ 
+     # ------------------------------------------------------------------
+     def _sigma_from_t(self, t: Union[torch.Tensor, float], ref: torch.Tensor) -> torch.Tensor:
+@@ -71,16 +78,16 @@ class NoisePredictorToScoreWrapper(nn.Module):
+         device = ref.device
+ 
+         if isinstance(t, torch.Tensor):
+-            t_tensor = t.detach().to(device=device, dtype=torch.float32)
++            t_tensor = t.detach().to(device=device, dtype=torch.float32)  # (B,) -> (B,)
+         else:
+-            t_tensor = torch.tensor([float(t)], device=device, dtype=torch.float32)
++            t_tensor = torch.tensor([float(t)], device=device, dtype=torch.float32)  # () -> (1,)
+ 
+         try:
+             alpha_tensor = self.schedule(t_tensor)
+             if not isinstance(alpha_tensor, torch.Tensor):
+-                alpha_tensor = torch.tensor(alpha_tensor, device=device, dtype=torch.float32)
++                alpha_tensor = torch.tensor(alpha_tensor, device=device, dtype=torch.float32)  # -> (B,)
+             else:
+-                alpha_tensor = alpha_tensor.to(device=device, dtype=torch.float32)
++                alpha_tensor = alpha_tensor.to(device=device, dtype=torch.float32)  # (B,) -> (B,)
+         except (TypeError, RuntimeError, AttributeError) as e:
+             if not self._warned_non_vectorized:
+                 import warnings
+@@ -95,10 +102,10 @@ class NoisePredictorToScoreWrapper(nn.Module):
+                 )
+                 self._warned_non_vectorized = True
+ 
+-            flat = t_tensor.reshape(-1)
++            flat = t_tensor.reshape(-1)  # (B, ...) -> (T,)
+             t_cpu = flat.cpu()
+             alpha_values = [float(self.schedule(float(t_cpu[i]))) for i in range(t_cpu.shape[0])]
+-            alpha_tensor = torch.tensor(alpha_values, device=device, dtype=torch.float32).reshape(t_tensor.shape)
++            alpha_tensor = torch.tensor(alpha_values, device=device, dtype=torch.float32).reshape(t_tensor.shape)  # (T,) -> t_tensor.shape
+ 
+         if torch.any(alpha_tensor < 0) or torch.any(alpha_tensor > 1):
+             raise ValueError(
+@@ -106,14 +113,14 @@ class NoisePredictorToScoreWrapper(nn.Module):
+                 f"Got min={alpha_tensor.min().item():.6f}, max={alpha_tensor.max().item():.6f}."
+             )
+ 
+-        alpha_tensor = alpha_tensor.to(torch.float64)
+-        one_minus_alpha = torch.clamp(1.0 - alpha_tensor, min=self.clamp)
+-        sigma = torch.sqrt(one_minus_alpha).to(torch.float32)
++        alpha_tensor = alpha_tensor.to(torch.float64)  # (B,) -> (B,)
++        one_minus_alpha = torch.clamp(1.0 - alpha_tensor, min=self.clamp)  # scalar - (B,) broadcast -> (B,)
++        sigma = torch.sqrt(one_minus_alpha).to(torch.float32)  # (B,) -> (B,)
+ 
+         # Ensure sigma can broadcast to eps shape
+         if sigma.ndim > 0 and sigma.shape != t_tensor.shape:
+-            sigma = sigma.reshape(t_tensor.shape)
+-        return sigma.to(ref.dtype if ref.dtype.is_floating_point else torch.float32)
++            sigma = sigma.reshape(t_tensor.shape)  # (...) -> t_tensor.shape
++        return sigma.to(ref.dtype if ref.dtype.is_floating_point else torch.float32)  # (B,) -> (B,)
+ 
+ 
+ def wrap_noise_predictor(

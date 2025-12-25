@@ -94,7 +94,7 @@ def check_tensor_finite(name: str, tensor: torch.Tensor, *, enabled: bool) -> No
     """Raise if tensor contains NaN/Inf when checks are enabled."""
     if not enabled:
         return
-    if not torch.isfinite(tensor).all().item():
+    if not torch.isfinite(tensor).all().item():  # () -> scalar
         raise ValueError(f"{name} contains NaN/Inf values.")
 
 # Try to import autocast and nullcontext at top level
@@ -139,7 +139,7 @@ def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = N
     """Generate random tensor like x with optional generator (cross-version compatible)"""
     if generator is not None:
         try:
-            return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
+            return torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)  # x.shape -> x.shape
         except Exception as e:
             # CRITICAL FIX: Log warning when RNG fallback breaks determinism
             logger.warning(
@@ -147,27 +147,27 @@ def _randn_like_compat(x: torch.Tensor, generator: Optional[torch.Generator] = N
                 f"Falling back to non-deterministic random generation. "
                 f"This will break reproducibility. Ensure generator device matches tensor device."
             )
-            return torch.randn_like(x)
+            return torch.randn_like(x)  # x.shape -> x.shape
     else:
-        return torch.randn_like(x)
+        return torch.randn_like(x)  # x.shape -> x.shape
 
 def tensor_fingerprint(tensor: torch.Tensor, sample_count: int = 8) -> str:
     """Generate a lightweight content fingerprint for cache keys."""
-    fp = tensor.detach().reshape(-1)
+    fp = tensor.detach().reshape(-1)  # (B, ...) -> (N,)
     numel = fp.numel()
     if numel == 0:
         return "empty"
     if numel <= sample_count:
-        sample = fp.float()
+        sample = fp.float()  # (N,) -> (N,)
     else:
         step = (numel - 1) / (sample_count - 1)
         indices = [int(round(i * step)) for i in range(sample_count)]
-        idx = torch.tensor(indices, device=fp.device, dtype=torch.long)
-        sample = fp.index_select(0, idx).float()
+        idx = torch.tensor(indices, device=fp.device, dtype=torch.long)  # (sample_count,)
+        sample = fp.index_select(0, idx).float()  # (N,) -> (sample_count,)
 
-    chk_sum = float(sample.sum().item())
-    chk_sq = float((sample * sample).sum().item())
-    chk_max = float(sample.abs().max().item())
+    chk_sum = float(sample.sum().item())  # (sample_count,) -> scalar
+    chk_sq = float((sample * sample).sum().item())  # (sample_count,) -> scalar
+    chk_max = float(sample.abs().max().item())  # (sample_count,) -> scalar
     return f"sum{chk_sum:.6e}_sq{chk_sq:.6e}_max{chk_max:.6e}_n{numel}"
 
 # Opt-in CUDA optimizations with env var

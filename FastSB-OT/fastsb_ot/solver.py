@@ -259,13 +259,13 @@ class FastSBOTSolver(nn.Module):
                 (1, patch_size * patch_size, n_patches),
                 device=device_cpu,  # Build on CPU
                 dtype=torch.float32
-            )
-            mask = F.fold(
+            )  # (1, P^2, Np)
+            mask = F.fold(  # (1, P^2, Np) -> (1, 1, H_pad, W_pad)
                 ones,
                 output_size=(H_pad, W_pad),
                 kernel_size=patch_size,
                 stride=stride
-            )  # Shape: (1, 1, H_pad, W_pad)
+            )
 
             # LRU eviction
             if len(self._overlap_cache) >= self._overlap_cache_cap:
@@ -274,7 +274,7 @@ class FastSBOTSolver(nn.Module):
             # Store on CPU to save GPU memory
             self._overlap_cache[key] = mask  # Already on CPU
 
-        return mask.to(device)
+        return mask.to(device)  # (1, 1, H_pad, W_pad) -> (1, 1, H_pad, W_pad)
 
     def _amp_ctx(self) -> ContextManager[Any]:
         """Get appropriate autocast context for device type with safety"""
@@ -313,8 +313,8 @@ class FastSBOTSolver(nn.Module):
 
             POLISH: Renamed alpha_t  alpha_bar_t for clarity
             """
-            drift = -0.5 * (1 - alpha_bar_t) * score * dt
-            drift = drift.to(x.dtype)
+            drift = -0.5 * (1 - alpha_bar_t) * score * dt  # scalar/(B,) broadcast -> score.shape
+            drift = drift.to(x.dtype)  # score.shape -> score.shape
 
             if x.ndim == 4 and x.shape[2] >= 64 and kernel_fft is not None:
                 x_next = self.fft_grid_transport_inline(x, drift, alpha_bar_t, kernel_fft, freq_weights)
@@ -331,13 +331,13 @@ class FastSBOTSolver(nn.Module):
             return
 
         size = (2, 3, 64, 64)
-        x = torch.randn(size, device=self.device, dtype=self.amp_dtype)
+        x = torch.randn(size, device=self.device, dtype=self.amp_dtype)  # (2, 3, 64, 64)
 
         # Only use channels_last on Ampere+
         if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
             if any(isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)) for m in self.score_model.modules()):
                 try:
-                    x = x.to(memory_format=torch.channels_last)
+                    x = x.to(memory_format=torch.channels_last)  # (2, 3, 64, 64)
                 except TypeError:
                     pass
 
@@ -345,10 +345,10 @@ class FastSBOTSolver(nn.Module):
         if self.config.discrete_timesteps:
             # Use mid-step integer index for warmup
             idx = self.config.num_timesteps // 2
-            t = torch.tensor([idx, idx], device=self.device, dtype=torch.long)
+            t = torch.tensor([idx, idx], device=self.device, dtype=torch.long)  # (2,)
         else:
             dtype_t = torch.float32 if self.config.use_fp32_time else self.amp_dtype
-            t = torch.tensor([0.5, 0.5], device=self.device, dtype=dtype_t)
+            t = torch.tensor([0.5, 0.5], device=self.device, dtype=dtype_t)  # (2,)
 
         with torch.no_grad():
             with self._amp_ctx():
@@ -449,22 +449,22 @@ class FastSBOTSolver(nn.Module):
             # Model expects discrete timesteps [0, num_timesteps-1]
             idx = int(round(float(t) * (self.config.num_timesteps - 1)))
             idx = max(0, min(self.config.num_timesteps - 1, idx))
-            t_tensor = torch.full((x.shape[0],), idx, device=x.device, dtype=torch.long)
+            t_tensor = torch.full((x.shape[0],), idx, device=x.device, dtype=torch.long)  # (B,)
         else:
             # Model expects normalized timesteps [0, 1]
-            t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=dtype_t)
+            t_tensor = torch.full((x.shape[0],), t, device=x.device, dtype=dtype_t)  # (B,)
 
         with self._amp_ctx():
-            model_output = self.score_model(x, t_tensor)
+            model_output = self.score_model(x, t_tensor)  # (B, C, H, W) -> (B, C, H, W)
 
         alpha_bar_t = self._get_cached_noise_schedule(t)
 
-        score = self._convert_model_output_to_score(model_output, alpha_bar_t)
+        score = self._convert_model_output_to_score(model_output, alpha_bar_t)  # (B, C, H, W)
 
         # Optional: Apply score correction for better quality
         if self.config.use_score_correction and alpha_bar_t < 0.9:
-            correction = self.compute_score_correction(x, score, t, alpha_bar_t)
-            score = score + correction
+            correction = self.compute_score_correction(x, score, t, alpha_bar_t)  # (B, C, H, W)
+            score = score + correction  # (B, C, H, W)
 
         if cache_key is not None:
             if x.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
@@ -485,8 +485,8 @@ class FastSBOTSolver(nn.Module):
             # Estimate local curvature for adaptive correction
             eps = 1e-4
             gen = getattr(self.config, 'generator', None)
-            noise = _randn_like_compat(x, gen) * eps
-            x_perturbed = x + noise
+            noise = _randn_like_compat(x, gen) * eps  # (B, C, H, W)
+            x_perturbed = x + noise  # (B, C, H, W)
 
             # Get perturbed score (without correction to avoid recursion)
             original_correction = self.config.use_score_correction
@@ -495,13 +495,13 @@ class FastSBOTSolver(nn.Module):
             self.config.use_score_correction = original_correction
 
             # Estimate curvature
-            curvature = (score_perturbed - score) / (eps + 1e-8)
+            curvature = (score_perturbed - score) / (eps + 1e-8)  # (B, C, H, W)
 
             # Apply adaptive correction (stronger at later timesteps)
             if alpha_bar_t is None:
                 alpha_bar_t = self._get_cached_noise_schedule(t)
             correction_strength = 0.1 * (1.0 - alpha_bar_t)
-            correction = -correction_strength * curvature
+            correction = -correction_strength * curvature  # (B, C, H, W)
 
         return correction
 
@@ -591,15 +591,15 @@ class FastSBOTSolver(nn.Module):
         else:
             pad_mode = 'replicate'
 
-        x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode=pad_mode)
+        x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode=pad_mode)  # (B, C, H, W) -> (B, C, H_pad, W_pad)
         H_pad, W_pad = x_padded.shape[2:]
 
-        patches = F.unfold(x_padded, kernel_size=patch_size, stride=stride, padding=0)
+        patches = F.unfold(x_padded, kernel_size=patch_size, stride=stride, padding=0)  # (B, C*P^2, Np)
         n_patches_h = (H_pad - patch_size) // stride + 1
         n_patches_w = (W_pad - patch_size) // stride + 1
         n_patches = n_patches_h * n_patches_w
 
-        patches = patches.transpose(1, 2).reshape(B * n_patches, C, patch_size, patch_size)
+        patches = patches.transpose(1, 2).reshape(B * n_patches, C, patch_size, patch_size)  # (B, Np, C*P^2) -> (B*Np, C, P, P)
 
         if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
             try:
@@ -613,21 +613,21 @@ class FastSBOTSolver(nn.Module):
         if self.config.discrete_timesteps:
             idx = int(round(float(t) * (self.config.num_timesteps - 1)))
             idx = max(0, min(self.config.num_timesteps - 1, idx))
-            t_tensor = torch.full((patches.shape[0],), idx, device=x.device, dtype=torch.long)
+            t_tensor = torch.full((patches.shape[0],), idx, device=x.device, dtype=torch.long)  # (B*Np,)
         else:
-            t_tensor = torch.full((patches.shape[0],), float(t), device=x.device, dtype=dtype_t)
+            t_tensor = torch.full((patches.shape[0],), float(t), device=x.device, dtype=dtype_t)  # (B*Np,)
 
         with torch.no_grad():
             with self._amp_ctx():
-                patch_output = self.score_model(patches, t_tensor)
+                patch_output = self.score_model(patches, t_tensor)  # (B*Np, C, P, P) -> (B*Np, C, P, P)
 
         # POLISH: Using clearer variable names
         alpha_bar_t = self._get_cached_noise_schedule(t)
-        patch_scores = self._convert_model_output_to_score(patch_output, alpha_bar_t)
+        patch_scores = self._convert_model_output_to_score(patch_output, alpha_bar_t)  # (B*Np, C, P, P)
 
-        patch_scores = patch_scores.reshape(B, n_patches, C * patch_size * patch_size).transpose(1, 2)
+        patch_scores = patch_scores.reshape(B, n_patches, C * patch_size * patch_size).transpose(1, 2)  # (B, Np, C*P^2) -> (B, C*P^2, Np)
 
-        scores_padded = F.fold(
+        scores_padded = F.fold(  # (B, C*P^2, Np) -> (B, C, H_pad, W_pad)
             patch_scores,
             output_size=(H_pad, W_pad),
             kernel_size=patch_size,
@@ -651,10 +651,10 @@ class FastSBOTSolver(nn.Module):
         # Convert to FP32 for safe division
         orig_dtype = scores_padded.dtype
         eps = torch.finfo(torch.float32).eps * 16
-        scores_padded = scores_padded.float() / (overlap_count.float() + eps)
-        scores_padded = scores_padded.to(orig_dtype)
+        scores_padded = scores_padded.float() / (overlap_count.float() + eps)  # (B, C, H_pad, W_pad) / (1, 1, H_pad, W_pad) broadcast
+        scores_padded = scores_padded.to(orig_dtype)  # (B, C, H_pad, W_pad)
 
-        scores = scores_padded[:, :, :H, :W]
+        scores = scores_padded[:, :, :H, :W]  # (B, C, H, W)
 
         self.score_cache.put(input_cache_key, scores)
 
@@ -675,7 +675,7 @@ class FastSBOTSolver(nn.Module):
         if values.numel() == 0:
             raise ValueError("quantile requires a non-empty tensor")
 
-        sorted_vals, _ = torch.sort(values, dim=dim)
+        sorted_vals, _ = torch.sort(values, dim=dim)  # values.shape -> values.shape
         n = values.shape[dim]
         if n == 1:
             out = sorted_vals
@@ -684,13 +684,13 @@ class FastSBOTSolver(nn.Module):
             lower = int(math.floor(rank))
             upper = min(n - 1, lower + 1)
             if lower == upper:
-                out = sorted_vals.select(dim, lower)
+                out = sorted_vals.select(dim, lower)  # drop dim -> values.shape with dim removed
             else:
                 lower_val = sorted_vals.select(dim, lower)
                 upper_val = sorted_vals.select(dim, upper)
-                out = lower_val + (upper_val - lower_val) * (rank - lower)
+                out = lower_val + (upper_val - lower_val) * (rank - lower)  # shape: values with dim removed
         if keepdim and out.dim() < values.dim():
-            out = out.unsqueeze(dim)
+            out = out.unsqueeze(dim)  # re-insert dim
         return out
 
     def dynamic_threshold(self, x0_pred: torch.Tensor, percentile: Optional[float] = None) -> torch.Tensor:
@@ -706,7 +706,7 @@ class FastSBOTSolver(nn.Module):
         # Cast to FP32 for stable quantile computation
         batch_size = x0_pred.shape[0]
         original_dtype = x0_pred.dtype
-        x0_pred_flat = x0_pred.float().reshape(batch_size, -1)
+        x0_pred_flat = x0_pred.float().reshape(batch_size, -1)  # (B, ...) -> (B, N)
 
         # Compute percentile for each sample
         try:
@@ -715,24 +715,24 @@ class FastSBOTSolver(nn.Module):
                 percentile,
                 dim=1,
                 keepdim=True
-            )
+            )  # (B, N) -> (B, 1)
         except (AttributeError, TypeError, RuntimeError):
-            s = self._quantile_deterministic(x0_pred_flat.abs(), percentile, dim=1, keepdim=True)
+            s = self._quantile_deterministic(x0_pred_flat.abs(), percentile, dim=1, keepdim=True)  # (B, N) -> (B, 1)
 
         # POLISH: Adaptive floor based on content
         if self.config.dynamic_thresholding_adaptive_floor:
             # Use adaptive floor based on mean absolute value
-            content_scale = x0_pred_flat.abs().mean(dim=1, keepdim=True)
-            floor = torch.maximum(torch.ones_like(s), content_scale * 0.5)
-            s = torch.maximum(s, floor)
+            content_scale = x0_pred_flat.abs().mean(dim=1, keepdim=True)  # (B, N) -> (B, 1)
+            floor = torch.maximum(torch.ones_like(s), content_scale * 0.5)  # (B, 1)
+            s = torch.maximum(s, floor)  # (B, 1)
         else:
             # Original fixed floor = 1.0
-            s = torch.maximum(s, torch.ones_like(s))
+            s = torch.maximum(s, torch.ones_like(s))  # (B, 1)
 
-        s = s.view(-1, *([1] * (x0_pred.dim() - 1)))
+        s = s.view(-1, *([1] * (x0_pred.dim() - 1)))  # (B, 1) -> (B, 1, 1, 1)
 
         # Threshold and rescale (cast back to original dtype)
-        x0_pred = torch.clamp(x0_pred, -s.to(original_dtype), s.to(original_dtype)) / s.to(original_dtype)
+        x0_pred = torch.clamp(x0_pred, -s.to(original_dtype), s.to(original_dtype)) / s.to(original_dtype)  # (B, ...) / (B,1,1,1)
 
         return x0_pred
 
@@ -753,7 +753,7 @@ class FastSBOTSolver(nn.Module):
         # Predict x0 from current sample
         sqrt_alpha_bar_curr = math.sqrt(max(0.0, alpha_bar_curr))
         sqrt_one_minus_alpha_bar_curr = math.sqrt(max(0.0, 1.0 - alpha_bar_curr))
-        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / sqrt_alpha_bar_curr
+        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / sqrt_alpha_bar_curr  # (B, C, H, W)
 
         # Clip predictions for stability
         if self.config.use_dynamic_thresholding:
@@ -779,16 +779,16 @@ class FastSBOTSolver(nn.Module):
         # Compute mean (with protection against negative values under sqrt)
         sqrt_alpha_bar_prev = math.sqrt(max(0.0, alpha_bar_prev))
         under = max(0.0, 1.0 - alpha_bar_prev - sigma_t**2)
-        pred_sample_direction = math.sqrt(under) * noise_pred
+        pred_sample_direction = math.sqrt(under) * noise_pred  # (B, C, H, W)
 
         # Combine prediction and noise direction
-        x_next = sqrt_alpha_bar_prev * x0_pred + pred_sample_direction
+        x_next = sqrt_alpha_bar_prev * x0_pred + pred_sample_direction  # (B, C, H, W)
 
         # Add stochastic noise if eta > 0
         if eta > 0 and t_next > 0:
             gen = getattr(self.config, 'generator', None)
-            noise = _randn_like_compat(x_t, gen)
-            x_next = x_next + sigma_t * noise
+            noise = _randn_like_compat(x_t, gen)  # (B, C, H, W)
+            x_next = x_next + sigma_t * noise  # (B, C, H, W)
 
         return x_next
 
@@ -828,7 +828,7 @@ class FastSBOTSolver(nn.Module):
             if c != 2 * xc:
                 raise ValueError(f"Expected [||logvar] with {2*xc} channels, got {c}")
             # Split noise_pred if model predicts both mean and variance
-            noise_pred, log_variance = torch.chunk(noise_pred, 2, dim=1)
+            noise_pred, log_variance = torch.chunk(noise_pred, 2, dim=1)  # (B, 2C, H, W) -> (B, C, H, W) x2
             # Interpolate between minimum and maximum variance
             min_log = math.log(max(1e-20, beta_t))
             # Guard division in variance computation
@@ -836,7 +836,7 @@ class FastSBOTSolver(nn.Module):
             max_log = math.log(max(1e-20, beta_t * (1 - alpha_bar_prev) / denominator))
             frac = (log_variance + 1) / 2  # Assume model outputs in [-1, 1]
             model_log_variance = frac * max_log + (1 - frac) * min_log
-            variance = torch.exp(model_log_variance).clamp_min(0.0)  # Explicit clamp
+            variance = torch.exp(model_log_variance).clamp_min(0.0)  # (B, C, H, W)
         else:
             # Use fixed variance schedule: sigma^2_t = beta_t * (1 - alpha_bar_prev) / (1 - alpha_bar_curr)
             # Guard against tiny denominator
@@ -855,7 +855,7 @@ class FastSBOTSolver(nn.Module):
         sqrt_one_minus_alpha_bar_curr = math.sqrt(max(1.0 - alpha_bar_curr, 1e-12))
 
         # Predict x0 and clip
-        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / max(sqrt_alpha_bar_curr, 1e-12)
+        x0_pred = (x_t - sqrt_one_minus_alpha_bar_curr * noise_pred) / max(sqrt_alpha_bar_curr, 1e-12)  # (B, C, H, W)
         if self.config.use_dynamic_thresholding:
             x0_pred = self.dynamic_threshold(x0_pred)
         else:
@@ -868,7 +868,7 @@ class FastSBOTSolver(nn.Module):
         alpha_t = max(alpha_bar_curr / max(alpha_bar_prev, 1e-12), 0.0)  # per-step alpha (≤ 1)
         mean_coef1 = math.sqrt(max(0.0, alpha_bar_prev)) * beta_t / denominator  # coefficient for x_0
         mean_coef2 = math.sqrt(max(0.0, alpha_t)) * (1 - alpha_bar_prev) / denominator  # coefficient for x_t
-        mean = mean_coef1 * x0_pred + mean_coef2 * x_t
+        mean = mean_coef1 * x0_pred + mean_coef2 * x_t  # (B, C, H, W)
 
         # Add noise
         if t_next > 0:
@@ -877,16 +877,16 @@ class FastSBOTSolver(nn.Module):
             std_dev: Union[float, torch.Tensor]
             if torch.is_tensor(variance):
                 # Handle tensor variance (from learned variance models)
-                std_dev = torch.clamp(variance, min=0.0).sqrt()
+                std_dev = torch.clamp(variance, min=0.0).sqrt()  # (B, C, H, W)
                 # If model predicted per-channel/voxel variance, ensure proper shape
                 while std_dev.dim() < x_t.dim():
-                    std_dev = std_dev.unsqueeze(-1)
+                    std_dev = std_dev.unsqueeze(-1)  # (B, C) -> (B, C, 1, 1)
                 if std_dev.shape != x_t.shape:
-                    std_dev = std_dev.expand_as(x_t)
+                    std_dev = std_dev.expand_as(x_t)  # (B, C, H, W)
             else:
                 # Handle scalar variance
                 std_dev = math.sqrt(max(0.0, variance))
-            x_next = mean + std_dev * noise
+            x_next = mean + std_dev * noise  # (B, C, H, W)
         else:
             x_next = mean
 
@@ -976,14 +976,14 @@ class FastSBOTSolver(nn.Module):
                     )
                 if nan_checks:
                     check_tensor_finite("init_samples", init_samples, enabled=True)
-                x_t = init_samples.to(self.device, non_blocking=True)
+                x_t = init_samples.to(self.device, non_blocking=True)  # (B, C, H, W)
             else:
                 gen = getattr(self.config, 'generator', None)
-                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)
+                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)  # (B, C, H, W)
 
             if x_t.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
                 try:
-                    x_t = x_t.contiguous(memory_format=torch.channels_last)
+                    x_t = x_t.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
                 except TypeError:
                     x_t = x_t.contiguous()
             if nan_checks:
@@ -1011,19 +1011,19 @@ class FastSBOTSolver(nn.Module):
 
                 # Convert score to noise for DDPM/DDIM sampling
                 sigma_t = math.sqrt(1.0 - alpha_bar_t)
-                noise_pred = -score * sigma_t
+                noise_pred = -score * sigma_t  # (B, C, H, W)
 
                 # POLISH: Improved guidance that scales score direction
                 if guidance_scale != 1.0 and guidance_scale > 0:
                     if self.config.guidance_mode == "score":
                         # Scale the score direction (better approach)
-                        score_guided = guidance_scale * score
-                        guided_noise = -score_guided * sigma_t
+                        score_guided = guidance_scale * score  # (B, C, H, W)
+                        guided_noise = -score_guided * sigma_t  # (B, C, H, W)
                     else:
                         # Original noise scaling (less principled but sometimes works)
-                        guided_noise = guidance_scale * noise_pred
+                        guided_noise = guidance_scale * noise_pred  # (B, C, H, W)
                 else:
-                    guided_noise = noise_pred
+                    guided_noise = noise_pred  # (B, C, H, W)
 
                 if use_ddim:
                     # DDIM sampling (deterministic or with controlled noise)
@@ -1048,12 +1048,12 @@ class FastSBOTSolver(nn.Module):
                 if verbose and hasattr(iterator, 'set_postfix'):
                     iterator.set_postfix(
                         t=f"{t_next:.4f}",
-                        mean=f"{x_t.mean().item():.3f}",
-                        std=f"{x_t.std().item():.3f}"
+                        mean=f"{x_t.mean().item():.3f}",  # (B, C, H, W) -> scalar
+                        std=f"{x_t.std().item():.3f}"  # (B, C, H, W) -> scalar
                     )
 
             # Final clamping
-            x_t = torch.clamp(x_t, -1, 1)
+            x_t = torch.clamp(x_t, -1, 1)  # (B, C, H, W)
             if nan_checks:
                 check_tensor_finite("samples", x_t, enabled=True)
 
@@ -1077,12 +1077,12 @@ class FastSBOTSolver(nn.Module):
         # Simple guidance by scaling the score
         if guidance_scale != 1.0:
             # Apply guidance (simplified: guidance just scales the score)
-            guided_score = guidance_scale * score
+            guided_score = guidance_scale * score  # (B, C, H, W)
 
             # Compute guided update with actual timestep difference
             sigma_t = math.sqrt(max(1e-8, 1.0 - alpha_bar_t))
             dt = max(1e-6, float(t_curr) - float(t_next))
-            x_t = x_t - dt * sigma_t * guided_score
+            x_t = x_t - dt * sigma_t * guided_score  # (B, C, H, W)
 
         return x_t
 
@@ -1095,19 +1095,20 @@ class FastSBOTSolver(nn.Module):
             alpha_bar_t: (t) at current time (NOT the time index t)
             dt: step size (float tensor, ideally FP32)
         """
-        drift = -0.5 * (1 - alpha_bar_t) * score * dt
-        drift = drift.to(x.dtype)
+        drift = -0.5 * (1 - alpha_bar_t) * score * dt  # (B, C, H, W)
+        drift = drift.to(x.dtype)  # (B, C, H, W)
 
         if self.config.control_variate_strength > 0:
-            score_norm = torch.norm(score.reshape(x.shape[0], -1), dim=1, keepdim=True)
-            std = score_norm.std(unbiased=False)
-            mean = score_norm.mean()
+            score_flat = score.reshape(x.shape[0], -1)  # (B, N)
+            score_norm = torch.norm(score_flat.float(), dim=1, keepdim=True)  # (B, N) -> (B, 1)
+            std = score_norm.std(unbiased=False)  # () -> scalar
+            mean = score_norm.mean()  # () -> scalar
             # Renamed misleading variable - it's a coefficient, not variance
             coeff = std / (mean + 1e-8)
 
             # Use the "noise level" proxy (1 - ) rather than misusing t
             control_strength = self.config.control_variate_strength * coeff * (1.0 - alpha_bar_t)
-            drift = drift * (1 + control_strength)
+            drift = drift * (1 + control_strength.to(drift.dtype))  # (B, C, H, W) broadcast
 
         return drift
 
@@ -1141,17 +1142,17 @@ class FastSBOTSolver(nn.Module):
         if self.config.use_fp32_fisher and score.dtype in [torch.float16, torch.bfloat16]:
             score_fp32 = score.float()
             fisher_fp32 = fisher_diag.float()
-            natural_grad = score_fp32 / (fisher_fp32 + 1e-6)
-            natural_grad = natural_grad.to(score.dtype)
+            natural_grad = score_fp32 / (fisher_fp32 + 1e-6)  # (B, C, H, W)
+            natural_grad = natural_grad.to(score.dtype)  # (B, C, H, W)
         else:
-            natural_grad = score / (fisher_diag + 1e-6)
+            natural_grad = score / (fisher_diag + 1e-6)  # (B, C, H, W)
 
-        curvature = fisher_diag.mean(dim=tuple(range(1, fisher_diag.dim())), keepdim=True)
-        step_size = dt / (1 + curvature)
+        curvature = fisher_diag.mean(dim=tuple(range(1, fisher_diag.dim())), keepdim=True)  # (B, ...) -> (B, 1, 1, 1)
+        step_size = dt / (1 + curvature)  # (B, 1, 1, 1)
 
         one_minus_alpha_bar = x.new_tensor(1 - alpha_bar_t)
         half = x.new_tensor(0.5)
-        transport = x - step_size * natural_grad * half * one_minus_alpha_bar
+        transport = x - step_size * natural_grad * half * one_minus_alpha_bar  # (B, C, H, W)
 
         return transport.to(x.dtype)
 
@@ -1186,9 +1187,9 @@ class FastSBOTSolver(nn.Module):
             and not (x_work.requires_grad or drift_work.requires_grad)
         )
         if triton_ready and x_work.is_cuda and x_work.numel() > 65536:
-            x_flat = x_work.reshape(-1).contiguous()
-            drift_flat = drift_work.reshape(-1).contiguous()
-            out = torch.empty_like(x_flat)
+            x_flat = x_work.reshape(-1).contiguous()  # (B, ...) -> (N,)
+            drift_flat = drift_work.reshape(-1).contiguous()  # (B, ...) -> (N,)
+            out = torch.empty_like(x_flat)  # (N,)
 
             # MAJOR FIX: Properly extract scalar alpha_bar value before computation
             # Previous code: (5.0 * (1 - alpha_bar)).float().mean() was nonsensical for scalars
@@ -1199,7 +1200,7 @@ class FastSBOTSolver(nn.Module):
 
             # Compute scale as float directly with proper clamping
             scale_float = max(0.1, min(10.0, 5.0 * (1.0 - alpha_bar_val)))
-            scale_buf = torch.tensor([scale_float], device=x_work.device, dtype=x_work.dtype)
+            scale_buf = torch.tensor([scale_float], device=x_work.device, dtype=x_work.dtype)  # (1,)
 
             n_elements = x_flat.numel()
             assert launch_triton_kernel_safe is not None
@@ -1211,27 +1212,33 @@ class FastSBOTSolver(nn.Module):
                 kernel_type="default"
             )
 
-            result = out.reshape(x_work.shape)
+            result = out.reshape(x_work.shape)  # (N,) -> x_work.shape
             return result.to(x.dtype) if legacy_fp32 else result
 
         if x_work.dim() == 4:
-            drift_norms = torch.norm(drift_work.reshape(x_work.shape[0], x_work.shape[1], -1), dim=2, p=2)
-            drift_norms = drift_norms.mean(dim=1, keepdim=True)
+            drift_norms = torch.norm(
+                drift_work.reshape(x_work.shape[0], x_work.shape[1], -1).float(), dim=2, p=2
+            )  # (B, C, N) -> (B, C)
+            drift_norms = drift_norms.mean(dim=1, keepdim=True)  # (B, C) -> (B, 1)
         else:
-            drift_norms = torch.norm(drift_work.reshape(x_work.shape[0], -1), dim=1, keepdim=True)
+            drift_norms = torch.norm(drift_work.reshape(x_work.shape[0], -1).float(), dim=1, keepdim=True)  # (B, N) -> (B, 1)
 
-        mean_norm = drift_norms.float().mean().clamp_(min=1e-12, max=1e6).to(drift_norms.dtype)
+        mean_norm = drift_norms.mean().clamp(min=1e-12, max=1e6)  # (B, 1) -> scalar
 
-        norm_ratio = drift_norms / mean_norm
+        norm_ratio = drift_norms / mean_norm  # (B, 1) / scalar -> (B, 1)
         norm_ratio_clamped = torch.clamp(norm_ratio, min=0.25, max=4.0)
-        weights = norm_ratio_clamped / (norm_ratio_clamped + 1.0)
+        weights = norm_ratio_clamped / (norm_ratio_clamped + 1.0)  # (B, 1)
 
-        weights = weights.clamp_min_(self.config.transport_weight_min).clamp_max_(self.config.transport_weight_max)
+        weights = torch.clamp(
+            weights,
+            min=self.config.transport_weight_min,
+            max=self.config.transport_weight_max,
+        )  # (B, 1)
 
         for _ in range(x.dim() - len(weights.shape)):
-            weights = weights.unsqueeze(-1)
+            weights = weights.unsqueeze(-1)  # (B, 1) -> (B, 1, 1, 1)
 
-        transported = x_work + weights * drift_work
+        transported = x_work + weights.to(drift_work.dtype) * drift_work  # (B, C, H, W)
         return transported.to(x.dtype) if legacy_fp32 else transported
 
     def fft_grid_transport_inline(self, x: torch.Tensor, drift: torch.Tensor,
@@ -1245,7 +1252,7 @@ class FastSBOTSolver(nn.Module):
         B, C = x.shape[:2]
         spatial_dims = x.shape[2:]
 
-        y_pred = x + drift
+        y_pred = x + drift  # (B, C, H, W)
 
         # POLISH: FP32 guards for FFT stability with half precision
         original_dtype = x.dtype
@@ -1253,43 +1260,43 @@ class FastSBOTSolver(nn.Module):
             x = x.float()
             y_pred = y_pred.float()
 
-        x_fft = torch.fft.rfftn(x, dim=tuple(range(2, x.dim())))
-        y_fft = torch.fft.rfftn(y_pred, dim=tuple(range(2, y_pred.dim())))
+        x_fft = torch.fft.rfftn(x, dim=tuple(range(2, x.dim())))  # (B, C, H, W) -> (B, C, H, Wf)
+        y_fft = torch.fft.rfftn(y_pred, dim=tuple(range(2, y_pred.dim())))  # (B, C, H, W) -> (B, C, H, Wf)
 
-        kernel = kernel_fft.unsqueeze(0).unsqueeze(0).to(y_fft.real.dtype)
+        kernel = kernel_fft.unsqueeze(0).unsqueeze(0).to(y_fft.real.dtype)  # (*spatial_rfft) -> (1, 1, *spatial_rfft)
         kernel = torch.maximum(kernel, kernel.new_tensor(1e-6))
         y_r, y_i = y_fft.real, y_fft.imag
-        smoothed_fft = torch.complex(y_r * kernel, y_i * kernel)
+        smoothed_fft = torch.complex(y_r * kernel, y_i * kernel)  # (B, C, H, Wf)
 
         if self.config.freq_weighting and freq_weights is not None:
-            freq_weights_expanded = freq_weights.unsqueeze(0).unsqueeze(0)
+            freq_weights_expanded = freq_weights.unsqueeze(0).unsqueeze(0)  # (*spatial_rfft) -> (1, 1, *spatial_rfft)
 
-            diff_real = (y_fft.real - x_fft.real).abs()
-            diff_imag = (y_fft.imag - x_fft.imag).abs()
-            diff_mag = torch.sqrt(diff_real**2 + diff_imag**2)
+            diff_real = (y_fft.real - x_fft.real).abs()  # (B, C, H, Wf)
+            diff_imag = (y_fft.imag - x_fft.imag).abs()  # (B, C, H, Wf)
+            diff_mag = torch.sqrt(diff_real**2 + diff_imag**2)  # (B, C, H, Wf)
 
-            weighted_diff = diff_mag * freq_weights_expanded
+            weighted_diff = diff_mag * freq_weights_expanded  # (B, C, H, Wf)
 
-            diff_norm = weighted_diff.reshape(B, C, -1).mean(dim=(1, 2))
-            weights = torch.sigmoid(diff_norm * 3.0).view(B, 1, 1, 1)
-            weights = weights.to(x_fft.real.dtype)
+            diff_norm = weighted_diff.reshape(B, C, -1).mean(dim=(1, 2))  # (B, C, Nf) -> (B,)
+            weights = torch.sigmoid(diff_norm * 3.0).view(B, 1, 1, 1)  # (B,) -> (B, 1, 1, 1)
+            weights = weights.to(x_fft.real.dtype)  # (B, 1, 1, 1)
         else:
-            weights = x_fft.real.new_tensor(0.5)
+            weights = x_fft.real.new_tensor(0.5)  # scalar
 
-        result_fft = (1 - weights) * x_fft + weights * smoothed_fft
+        result_fft = (1 - weights) * x_fft + weights * smoothed_fft  # (B, 1, 1, 1) broadcast -> (B, C, H, Wf)
 
         if result_fft.dtype != torch.complex64 and result_fft.dtype != torch.complex128:
             result_fft = result_fft.to(smoothed_fft.dtype)
 
-        result = cast(torch.Tensor, torch.fft.irfftn(result_fft, s=spatial_dims, dim=tuple(range(2, x.dim()))))
+        result = cast(torch.Tensor, torch.fft.irfftn(result_fft, s=spatial_dims, dim=tuple(range(2, x.dim()))))  # (B, C, H, Wf) -> (B, C, H, W)
 
         # Cast back to original dtype
-        result = result.to(original_dtype)
+        result = result.to(original_dtype)  # (B, C, H, W)
 
         if hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
             try:
                 if x.is_contiguous(memory_format=torch.channels_last):
-                    result = result.contiguous(memory_format=torch.channels_last)
+                    result = result.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
             except (TypeError, AttributeError):
                 pass
 
@@ -1321,7 +1328,7 @@ class FastSBOTSolver(nn.Module):
         """
         # Ensure dt is FP32 tensor
         if not torch.is_tensor(dt):
-            dt = torch.tensor(dt, dtype=torch.float32, device=x.device)
+            dt = torch.tensor(dt, dtype=torch.float32, device=x.device)  # ()
 
         # Get alpha_bar as scalar for computation
         if torch.is_tensor(alpha_bar_t):
@@ -1337,8 +1344,8 @@ class FastSBOTSolver(nn.Module):
             x_new = self.compute_drift_and_transport_inline(x, drift, alpha_bar_val)
 
         def _aux_drift(base: torch.Tensor) -> torch.Tensor:
-            drift_aux = -0.5 * (1 - alpha_bar_val) * score * dt
-            return drift_aux.to(base.dtype)
+            drift_aux = -0.5 * (1 - alpha_bar_val) * score * dt  # (B, C, H, W)
+            return drift_aux.to(base.dtype)  # (B, C, H, W)
 
         # Hierarchical bridge transport
         if self.hierarchical_bridge is not None and x_new.dim() == 4:
@@ -1417,18 +1424,18 @@ class FastSBOTSolver(nn.Module):
                     )
                 if nan_checks:
                     check_tensor_finite("init_samples", init_samples, enabled=True)
-                x_t = init_samples.to(self.device, dtype=self.amp_dtype, non_blocking=True)
+                x_t = init_samples.to(self.device, dtype=self.amp_dtype, non_blocking=True)  # (B, C, H, W)
             else:
                 gen = getattr(self.config, 'generator', None)
-                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)
+                x_t = _randn_like_compat(torch.zeros(shape, device=self.device, dtype=self.amp_dtype), gen)  # (B, C, H, W)
 
             if x_t.dim() == 4 and hasattr(self.config, 'use_channels_last') and self.config.use_channels_last:
                 try:
-                    x_t = x_t.contiguous(memory_format=torch.channels_last)
+                    x_t = x_t.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
                 except TypeError:
                     x_t = x_t.contiguous()
 
-            trajectory = [x_t.clone()] if return_trajectory else []
+            trajectory = [x_t.clone()] if return_trajectory else []  # list[(B, C, H, W)]
 
             # Precompute FFT kernels if needed
             kernel_fft = None
@@ -1458,10 +1465,10 @@ class FastSBOTSolver(nn.Module):
                     sigma = 0.25 * max(x_t.shape[-2:])
                     kernel_fft = self.kernel_module.compute_gaussian_kernel_fft(
                         x_t.shape[2:], sigma, x_t.device
-                    )
+                    )  # (*spatial_rfft)
                     freq_weights = self.kernel_module.get_frequency_weights(
                         x_t.shape[2:], str(x_t.device)
-                    ) if self.config.freq_weighting else None
+                    ) if self.config.freq_weighting else None  # (*spatial_rfft)
 
             # Reset momentum
             if self.momentum_transport is not None:
@@ -1477,9 +1484,9 @@ class FastSBOTSolver(nn.Module):
 
                 # Ensure dt is FP32
                 if self.config.use_fp32_time:
-                    dt_tensor = torch.tensor(dt, dtype=torch.float32, device=x_t.device)
+                    dt_tensor = torch.tensor(dt, dtype=torch.float32, device=x_t.device)  # ()
                 else:
-                    dt_tensor = torch.tensor(dt, dtype=x_t.dtype, device=x_t.device)
+                    dt_tensor = torch.tensor(dt, dtype=x_t.dtype, device=x_t.device)  # ()
 
                 # Get score
                 if x_t.shape[-1] > self.config.max_patch_size:
@@ -1492,17 +1499,17 @@ class FastSBOTSolver(nn.Module):
                 alpha_bar_t = self._get_cached_noise_schedule(t_curr)
 
                 # Transport
-                x_t = self._sample_step(x_t, score, alpha_bar_t, dt_tensor, kernel_fft, freq_weights)
+                x_t = self._sample_step(x_t, score, alpha_bar_t, dt_tensor, kernel_fft, freq_weights)  # (B, C, H, W)
 
                 # Corrector steps
                 steps = self.config.corrector_steps or 0
                 for _ in range(steps):
                     gen = getattr(self.config, 'generator', None)
-                    noise = _randn_like_compat(x_t, gen) * math.sqrt(2 * dt * self.config.corrector_snr)
-                    x_t = x_t + noise
+                    noise = _randn_like_compat(x_t, gen) * math.sqrt(2 * dt * self.config.corrector_snr)  # (B, C, H, W)
+                    x_t = x_t + noise  # (B, C, H, W)
 
                     score_corr = self.compute_score_cached(x_t, t_next)
-                    x_t = x_t + dt_tensor * self.config.corrector_snr * score_corr
+                    x_t = x_t + dt_tensor * self.config.corrector_snr * score_corr  # (B, C, H, W)
 
                 if return_trajectory:
                     trajectory.append(x_t.clone())
@@ -1511,12 +1518,12 @@ class FastSBOTSolver(nn.Module):
                 if verbose and hasattr(iterator, 'set_postfix'):
                     iterator.set_postfix(
                         t=f"{t_next:.4f}",
-                        mean=f"{x_t.mean().item():.3f}",
-                        std=f"{x_t.std().item():.3f}"
+                        mean=f"{x_t.mean().item():.3f}",  # (B, C, H, W) -> scalar
+                        std=f"{x_t.std().item():.3f}"  # (B, C, H, W) -> scalar
                     )
 
             # Final clamp
-            x_t = torch.clamp(x_t, -1, 1)
+            x_t = torch.clamp(x_t, -1, 1)  # (B, C, H, W)
             if nan_checks:
                 check_tensor_finite("samples", x_t, enabled=True)
 
@@ -1603,7 +1610,7 @@ class FastSBOTSolver(nn.Module):
                 if tensor.dim() == 3:
                     return tensor, None
                 view_shape = tensor.shape
-                tensor_flat = tensor.reshape(tensor.shape[0], -1, 1)
+                tensor_flat = tensor.reshape(tensor.shape[0], -1, 1)  # (B, C, H, W) -> (B, N, 1)
                 return tensor_flat, view_shape
 
             src_prepped, src_shape = _prepare_full_ot_tensor(source_batch)
@@ -1616,7 +1623,7 @@ class FastSBOTSolver(nn.Module):
             )
 
             if src_shape is not None:
-                x_t = x_t.reshape(src_shape)
+                x_t = x_t.reshape(src_shape)  # (B, N, 1) -> (B, C, H, W)
 
         # Continue regular sampling
         if x_t.dim() != 4:
@@ -1651,21 +1658,21 @@ class FastSBOTSolver(nn.Module):
 
         if schedule_type == "linear":
             # Linear spacing in t
-            timesteps = torch.linspace(1.0, 0.0, num_steps).tolist()
+            timesteps = torch.linspace(1.0, 0.0, num_steps).tolist()  # (num_steps,)
 
         elif schedule_type == "quadratic":
             # Quadratic spacing (more steps near t=0)
-            t = torch.linspace(0, 1, num_steps) ** 2
-            timesteps = (1.0 - t).tolist()
+            t = torch.linspace(0, 1, num_steps) ** 2  # (num_steps,)
+            timesteps = (1.0 - t).tolist()  # (num_steps,)
 
         elif schedule_type == "cosine":
             # Cosine schedule
-            t = torch.linspace(0, 1, num_steps)
-            timesteps = (0.5 * (1 + torch.cos(math.pi * t))).tolist()
+            t = torch.linspace(0, 1, num_steps)  # (num_steps,)
+            timesteps = (0.5 * (1 + torch.cos(math.pi * t))).tolist()  # (num_steps,)
 
         elif schedule_type == "uniform_alpha_bar":
             # Uniform spacing in alpha_bar space
-            alpha_bars = torch.linspace(1.0, 0.0, num_steps)
+            alpha_bars = torch.linspace(1.0, 0.0, num_steps)  # (num_steps,)
             timesteps = []
             for alpha_bar_target in alpha_bars:
                 # Find t that gives this alpha_bar
@@ -1686,7 +1693,7 @@ class FastSBOTSolver(nn.Module):
             # Sample uniformly in log-SNR space
             log_snr_max = 4.0  # log(~0.98/0.02)
             log_snr_min = -4.0  # log(~0.02/0.98)
-            log_snrs = torch.linspace(log_snr_max, log_snr_min, num_steps)
+            log_snrs = torch.linspace(log_snr_max, log_snr_min, num_steps)  # (num_steps,)
 
             timesteps = []
             for log_snr_target in log_snrs:
@@ -1806,12 +1813,12 @@ def make_schedule(schedule_type: str = "linear",
         """Sigmoid-based schedule"""
         beta_max = beta_end
         beta_min = beta_start
-        betas = torch.linspace(-6, 6, num_timesteps)
-        betas = torch.sigmoid(betas) * (beta_max - beta_min) + beta_min
+        betas = torch.linspace(-6, 6, num_timesteps)  # (num_timesteps,)
+        betas = torch.sigmoid(betas) * (beta_max - beta_min) + beta_min  # (num_timesteps,)
 
         # Compute alpha_bar products
-        alphas = 1.0 - betas
-        alpha_bars = torch.cumprod(alphas, dim=0)
+        alphas = 1.0 - betas  # (num_timesteps,)
+        alpha_bars = torch.cumprod(alphas, dim=0)  # (num_timesteps,)
 
         # Interpolate
         idx = min(int(t * (num_timesteps - 1)), num_timesteps - 2)
@@ -1838,7 +1845,7 @@ def example_usage() -> torch.Tensor:
     # Mock score model
     class MockScoreModel(nn.Module):
         def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-            return torch.randn_like(x)
+            return torch.randn_like(x)  # (B, C, H, W)
 
     # For CFG compatibility, wrap your model:
     class CFGWrapper(nn.Module):
