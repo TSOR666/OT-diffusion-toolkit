@@ -60,9 +60,9 @@ class KernelModule(nn.Module):
 
     def _setup_buffers(self) -> None:
         """Pre-allocate commonly used buffers"""
-        gaussian_1d = torch.tensor([1, 2, 1], dtype=torch.float32) / 4
-        gaussian_kernel = gaussian_1d[:, None] @ gaussian_1d[None, :]
-        self.register_buffer('gaussian_kernel', gaussian_kernel.view(1, 1, 3, 3), persistent=False)
+        gaussian_1d = torch.tensor([1, 2, 1], dtype=torch.float32) / 4  # (3,)
+        gaussian_kernel = gaussian_1d[:, None] @ gaussian_1d[None, :]  # (3, 1) @ (1, 3) -> (3, 3)
+        self.register_buffer('gaussian_kernel', gaussian_kernel.view(1, 1, 3, 3), persistent=False)  # (3, 3) -> (1, 1, 3, 3)
 
     def compute_gaussian_kernel_fft(self, shape: Tuple[int, ...], sigma: float, device: torch.device) -> torch.Tensor:
         """Cache frequency grids with LRU, device-agnostic.
@@ -93,30 +93,30 @@ class KernelModule(nn.Module):
             for i, size in enumerate(shape):
                 if i == n_dims - 1:
                     try:
-                        freq = torch.fft.rfftfreq(size, device=torch.device("cpu"))
+                        freq = torch.fft.rfftfreq(size, device=torch.device("cpu"))  # (size//2+1,)
                     except TypeError:
-                        freq = torch.fft.rfftfreq(size).to("cpu")
+                        freq = torch.fft.rfftfreq(size).to("cpu")  # (size//2+1,)
                 else:
                     try:
-                        freq = torch.fft.fftfreq(size, device=torch.device("cpu"))
+                        freq = torch.fft.fftfreq(size, device=torch.device("cpu"))  # (size,)
                     except TypeError:
-                        freq = torch.fft.fftfreq(size).to("cpu")
+                        freq = torch.fft.fftfreq(size).to("cpu")  # (size,)
 
                 freq_shape = [1] * len(shape)
                 if i == n_dims - 1:
                     freq_shape[i] = size // 2 + 1
                 else:
                     freq_shape[i] = size
-                grids_list.append(freq.reshape(freq_shape))
+                grids_list.append(freq.reshape(freq_shape))  # (size,) -> broadcast shape
 
             grids = tuple(grids_list)
             self._freq_grid_cache[grid_key] = grids
 
-        grids = tuple(g.to(device) for g in self._freq_grid_cache[grid_key])
+        grids = tuple(g.to(device) for g in self._freq_grid_cache[grid_key])  # each grid shaped for broadcast
 
-        dist_sq = torch.stack([g**2 for g in grids], dim=0).sum(dim=0)
+        dist_sq = torch.stack([g**2 for g in grids], dim=0).sum(dim=0)  # (D, *shape_rfft) -> (*shape_rfft)
 
-        kernel_fft = torch.exp(-2 * (math.pi * sigma)**2 * dist_sq)
+        kernel_fft = torch.exp(-2 * (math.pi * sigma)**2 * dist_sq)  # (*shape_rfft)
         # NUMERICAL FIX: Use much smaller clamping threshold to avoid distorting high frequencies
         # Previous 1e-6 was too aggressive and created ringing artifacts
         # 1e-12 preserves frequency response while preventing division issues
@@ -150,23 +150,23 @@ class KernelModule(nn.Module):
         for i, size in enumerate(shape):
             if i == len(shape) - 1:
                 try:
-                    freq = torch.fft.rfftfreq(size, device=device).abs()
+                    freq = torch.fft.rfftfreq(size, device=device).abs()  # (size//2+1,)
                 except TypeError:
-                    freq = torch.fft.rfftfreq(size).to(device).abs()
+                    freq = torch.fft.rfftfreq(size).to(device).abs()  # (size//2+1,)
             else:
                 try:
-                    freq = torch.fft.fftfreq(size, device=device).abs()
+                    freq = torch.fft.fftfreq(size, device=device).abs()  # (size,)
                 except TypeError:
-                    freq = torch.fft.fftfreq(size).to(device).abs()
+                    freq = torch.fft.fftfreq(size).to(device).abs()  # (size,)
 
             freq_shape = [1] * len(shape)
             if i == len(shape) - 1:
                 freq_shape[i] = size // 2 + 1
             else:
                 freq_shape[i] = size
-            coords.append(freq.reshape(freq_shape))
+            coords.append(freq.reshape(freq_shape))  # (size,) -> broadcast shape
 
-        f_mag = torch.sqrt(sum(c**2 for c in coords)) / math.sqrt(len(coords))
+        f_mag = torch.sqrt(sum(c**2 for c in coords)) / math.sqrt(len(coords))  # (*shape_rfft)
 
         weights = 4 * f_mag * (1 - f_mag)
         weights = torch.clamp(weights, min=1e-2)
@@ -224,8 +224,8 @@ class KernelModule(nn.Module):
         ):
             fisher = torch.empty_like(score_fp32)
 
-            score_flat = score_fp32.reshape(-1)
-            fisher_flat = fisher.reshape(-1)
+            score_flat = score_fp32.reshape(-1)  # (B, ...) -> (N,)
+            fisher_flat = fisher.reshape(-1)  # (B, ...) -> (N,)
 
             n_elements = score_flat.numel()
             alpha_val = float(alpha)
@@ -242,7 +242,7 @@ class KernelModule(nn.Module):
                 alpha=alpha_val,
             )
 
-            fisher = fisher_flat.reshape(score.shape)
+            fisher = fisher_flat.reshape(score.shape)  # (N,) -> score.shape
         else:
             alpha_val = float(alpha)
             adaptive_eps = 1e-4 + 1e-3 * (1.0 - alpha_val)
@@ -253,7 +253,7 @@ class KernelModule(nn.Module):
 
             if x.dim() == 4:
                 B, C = fisher.shape[:2]
-                fisher = fisher.reshape(B * C, 1, *fisher.shape[2:])
+                fisher = fisher.reshape(B * C, 1, *fisher.shape[2:])  # (B, C, H, W) -> (B*C, 1, H, W)
 
                 # PERFORMANCE FIX: Convert fisher to channels_last for optimal conv2d performance
                 # Check fisher's layout, not x's layout
@@ -266,8 +266,8 @@ class KernelModule(nn.Module):
                 kernel_size = self.gaussian_kernel.shape[-1]
                 padding = kernel_size // 2
 
-                fisher = F.conv2d(fisher, self.gaussian_kernel, padding=padding)
-                fisher = fisher.reshape(B, C, *fisher.shape[2:])
+                fisher = F.conv2d(fisher, self.gaussian_kernel, padding=padding)  # (B*C, 1, H, W) -> (B*C, 1, H, W)
+                fisher = fisher.reshape(B, C, *fisher.shape[2:])  # (B*C, 1, H, W) -> (B, C, H, W)
 
         if original_dtype == torch.float16:
             fisher = fisher.clamp(max=65504)
