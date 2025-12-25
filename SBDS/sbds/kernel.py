@@ -183,10 +183,16 @@ class KernelDerivativeRFF(nn.Module):
             _, y_proj = self._feature_projections(y)
             y_features = torch.cos(y_proj) * feature_scale
 
-        weights_t = self.weights.t()  # (D, d)
+        # weights_t: (D, d) where D=feature_dim, d=input_dim
+        weights_t = self.weights.t()
 
         if order == 1:
+            # x_sin: (B_x, D), weights_t: (D, d)
+            # grad_phi_x: (B_x, D, d) - Jacobian of φ(x) w.r.t. x
             grad_phi_x = -feature_scale * x_sin.unsqueeze(-1) * weights_t.unsqueeze(0)
+            # y_features: (B_y, D)
+            # einsum "bjd,kj->dbk": (B_x, D, d) @ (B_y, D) -> (d, B_x, B_y)
+            # Result: ∂K/∂x approximation of shape (input_dim, n_x, n_y)
             derivatives = torch.einsum("bjd,kj->dbk", grad_phi_x, y_features)
 
             if coordinate is not None:

@@ -84,17 +84,30 @@ class EnhancedAdaptiveNoiseSchedule:
         return float(self.alpha_bars[idx])
 
     def get_beta(self, t: float, dt: float = 1e-3) -> float:
+        """
+        Compute β(t) = -d log α̅(t)/dt for the noise schedule.
+
+        For cosine schedule with α̅(t) = [cos((t+s)/(1+s) · π/2) / cos(s/(1+s) · π/2)]²:
+            β(t) = π · tan((t+s)/(1+s) · π/2) / (1+s)
+
+        Args:
+            t: Current timestep in [0, 1]
+            dt: Finite difference step for numerical schedules
+
+        Returns:
+            The instantaneous noise rate β(t)
+        """
         # Clamp t to avoid tan(pi/2) and log(0) blow-ups near the endpoints
         t_clamped = min(max(t, 0.0), 1.0 - 1e-4)
         if self.schedule_type == "cosine":
             s_val = 0.008
             arg = (t_clamped + s_val) / (1 + s_val) * np.pi / 2
-            norm = np.cos(s_val / (1 + s_val) * np.pi / 2)
             # tan tends to infinity as arg -> pi/2; clamp to a safe maximum
             tan_val = np.tan(arg)
             tan_val = np.clip(tan_val, -1e6, 1e6)
-            # Account for normalization constant in alpha_bar
-            return float((2 * tan_val / (1 + s_val)) / (norm * norm))
+            # Correct formula: β(t) = π · tan(arg) / (1 + s)
+            # Derived from d log α̅(t)/dt where α̅(t) = [cos(arg)/cos(arg₀)]²
+            return float(np.pi * tan_val / (1 + s_val))
 
         alpha_t = max(self(t_clamped), 1e-6)
         alpha_t_dt = max(self(max(0.0, t_clamped - dt)), 1e-6)

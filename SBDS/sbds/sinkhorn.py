@@ -38,10 +38,10 @@ class HilbertSinkhornDivergence:
             raise ValueError(f"sigma must be positive, got {sigma}")
         if rff_features < 1:
             raise ValueError(f"rff_features must be at least 1, got {rff_features}")
-        if kernel_type not in ["gaussian", "laplacian", "cauchy"]:
+        if kernel_type not in ["gaussian", "laplacian"]:
             raise ValueError(
-                f"kernel_type must be one of ['gaussian', 'laplacian', 'cauchy'], "
-                f"got '{kernel_type}'"
+                f"kernel_type must be one of ['gaussian', 'laplacian'], "
+                f"got '{kernel_type}'. Note: 'cauchy' kernel is not supported by FFT-OT backend."
             )
 
         # When use_rff=True, only Gaussian kernels are supported by the RFF implementation
