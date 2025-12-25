@@ -238,6 +238,7 @@ def run_training(
 
         optimizer.zero_grad(set_to_none=True)
         steps_since_update = 0
+        last_loss = 0.0
 
         for batch in dataloader:
             images = _prepare_images(batch).to(actual_device, non_blocking=True)

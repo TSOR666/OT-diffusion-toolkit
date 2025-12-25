@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+import torch
 from torch.utils.data import DataLoader, Dataset
 
 from ..config.training_config import DatasetConfig
@@ -22,7 +25,7 @@ else:  # pragma: no cover - import path when torchvision available
     _TORCHVISION_ERROR = None
 
 
-def _build_transform(config: DatasetConfig) -> transforms.Compose:
+def _build_transform(config: DatasetConfig) -> Any:
     if transforms is None:
         raise ImportError(
             "torchvision is required for dataset transforms. Install torchvision or "
@@ -54,7 +57,10 @@ def _build_transform(config: DatasetConfig) -> transforms.Compose:
 def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Dataset[Any]:
     """Instantiate a dataset based on the provided configuration."""
 
-    split = split or config.extra.get("split", "train")
+    split_value = split
+    if split_value is None:
+        extra_split = config.extra.get("split")
+        split_value = extra_split if isinstance(extra_split, str) and extra_split else "train"
     transform = _build_transform(config)
     name = config.name.lower()
     root = Path(config.root)
@@ -80,7 +86,7 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
         target_type = config.extra.get("target_type", "attr")
         return datasets.CelebA(
             root=str(root),
-            split=split,
+            split=split_value,
             transform=transform,
             download=config.download,
             target_type=target_type,
@@ -128,16 +134,7 @@ def build_dataset(config: DatasetConfig, *, split: Optional[str] = None) -> Data
             ) from _TORCHVISION_ERROR
         size = config.fake_size or max((config.batch_size or 32) * 100, 1)
         image_size = (config.channels, config.resolution, config.resolution)
-        fake_transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.5] * config.channels,
-                    std=[0.5] * config.channels,
-                ),
-            ]
-        )
-        return datasets.FakeData(size=size, image_size=image_size, transform=fake_transform)
+        return datasets.FakeData(size=size, image_size=image_size, transform=transform)
 
     raise ValueError(
         f"Unsupported dataset '{config.name}'. "
@@ -161,6 +158,14 @@ def create_dataloader(
         raise ValueError(f"batch_size must be positive, got {eff_batch}")
     if drop_last is None:
         drop_last = split in (None, "train")
+
+    def _seed_worker(worker_id: int) -> None:
+        """Seed dataloader workers for reproducibility across Python, NumPy, and PyTorch."""
+        worker_seed = torch.initial_seed() % 2**32
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
     return DataLoader(
         dataset,
         batch_size=eff_batch,
@@ -169,6 +174,7 @@ def create_dataloader(
         pin_memory=config.pin_memory,
         persistent_workers=config.persistent_workers and config.num_workers > 0,
         drop_last=drop_last,
+        worker_init_fn=_seed_worker if config.num_workers > 0 else None,
     )
 
 

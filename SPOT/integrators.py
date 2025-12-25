@@ -201,7 +201,7 @@ class DDIMIntegrator:
 
             x_next = x_next.to(x.dtype)
 
-        return x_next
+        return x_next.to(x.dtype)
 
 
 class AdaptiveIntegrator:

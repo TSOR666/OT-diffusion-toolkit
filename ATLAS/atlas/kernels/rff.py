@@ -116,6 +116,9 @@ class RFFKernelOperator(KernelOperator):
                 # Clamp denominator away from zero to prevent inf
                 denom = torch.sign(denom) * torch.clamp(denom.abs(), min=1e-7)
                 weights = numer / denom
+                cauchy_clip = 1e4
+                weights = torch.nan_to_num(weights, nan=0.0, posinf=cauchy_clip, neginf=-cauchy_clip)
+                weights = torch.clamp(weights, min=-cauchy_clip, max=cauchy_clip)
             else:
                 raise ValueError(f"Unsupported kernel type for sampling: {self.kernel_type}")
         return weights * scale
@@ -184,7 +187,7 @@ class RFFKernelOperator(KernelOperator):
 
     def compute_features(self, x: torch.Tensor) -> torch.Tensor:
         self._ensure_device_consistency()
-        x = x.to(self.device)
+        self._validate_device(x)
         # Ensure the tensor has a well-defined storage layout for caching.
         x = x.contiguous()
         if x.dim() > 2:
@@ -219,6 +222,7 @@ class RFFKernelOperator(KernelOperator):
         if x.shape[0] != v.shape[0]:
             raise ValueError("Input data and vector must share the same batch dimension.")
 
+        self._validate_device(x, v)
         features = self.compute_features(x)
         target_shape = v.shape
         v_flat = v.reshape(v.shape[0], -1).to(features.dtype)
@@ -241,6 +245,7 @@ class RFFKernelOperator(KernelOperator):
 
     def pairwise(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """Compute approximate kernel matrix via shared feature space."""
+        self._validate_device(x, y)
         phi_x = self.compute_features(x)
         phi_y = self.compute_features(y)
         return phi_x @ phi_y.T  # (n, f) @ (f, m) -> (n, m)

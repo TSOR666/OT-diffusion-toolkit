@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 import torch
 
 from ..config.conditioning_config import ConditioningConfig
+from ..types import ConditioningDict
 
 
 class CLIPConditioningInterface:
@@ -188,7 +189,7 @@ class CLIPConditioningInterface:
         prompts: List[str],
         negative_prompts: Optional[List[str]] = None,
         guidance_scale: Optional[float] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> ConditioningDict:
         neg = negative_prompts or [""] * len(prompts)
         if len(neg) != len(prompts):
             raise ValueError("Negative prompts must match batch size.")
@@ -202,7 +203,7 @@ class CLIPConditioningInterface:
             else self.config.guidance_scale
         )
         base_batch = cond["context"].size(0)
-        payload: Dict[str, Any] = {
+        payload: ConditioningDict = {
             "cond": {
                 "context": cond["context"],
                 "context_mask": cond["mask"],

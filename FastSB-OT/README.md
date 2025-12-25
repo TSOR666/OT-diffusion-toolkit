@@ -135,6 +135,9 @@ same schedule for conversion.
 | `use_fp32_fisher` | Force Fisher updates to FP32 when using AMP to reduce bias. |
 | `momentum_alpha` | Strength of momentum correction in the transport update. |
 | `memory_limit_ot_mb` | VRAM budget for OT buffers (auto-tunes defaults per preset). |
+| `runtime_asserts` | Enable runtime shape/mass-conservation assertions. |
+| `nan_checks` | Enable NaN/Inf checks at module boundaries. |
+| `use_fft_transport` | Toggle FFT-based transport smoothing. |
 
 ---
 
@@ -145,7 +148,22 @@ The solver includes diagnostic routines (see `fastsb_ot/tests` for more examples
   and transport symmetry on synthetic data.
 - Setting `config.profile=True` records FLOPs, memory usage, and adaptive epsilon traces.
 
----
+## Tensor Shape Invariants
+
+- `FastSBOTSolver.sample` and `FastSBOTSolver.sample_improved` expect `shape` and `init_samples` as `(B, C, H, W)` and return `(B, C, H, W)`.
+- `FastSBOTSolver.sample_batch_ot` expects `(B, C, H, W)` source/target batches and returns `(B, C, H, W)`.
+- `SlicedOptimalTransport.transport` accepts `(B, N, d)` or `(B, C, H, W)` and returns the same shape.
+- `KernelModule.estimate_fisher_diagonal` expects `x` and `score` with identical shapes and returns the same shape.
+
+## Determinism and FFT Transport
+
+FFT-based transport can be nondeterministic on CUDA. For deterministic runs:
+- Set `use_fft_transport=False` in `FastSBOTConfig`, or
+- Leave `deterministic_fft_fallback=True` (default) so deterministic mode disables FFT transport automatically.
+
+Set `FASTSBOT_DETERMINISTIC=1` to request deterministic algorithms where supported.
+
+--- 
 
 ## Deployment Notes
 - Triton kernels provide the best throughput on Ampere+ GPUs. Disable them when targeting

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Optional, Tuple, Union
 
 import torch
@@ -6,31 +7,43 @@ import torch.nn.functional as F
 __all__ = ["gaussian_blur", "separable_gaussian_blur"]
 
 
+_GaussianBlurFn = Callable[[torch.Tensor, list[int], Optional[list[float]]], torch.Tensor]
+
+_torch_gaussian_blur: _GaussianBlurFn | None = None
 try:
-    from torch.nn.functional import gaussian_blur  # type: ignore[attr-defined]
+    from torch.nn.functional import gaussian_blur as _imported_torch_blur  # type: ignore[attr-defined]
+    _torch_gaussian_blur = _imported_torch_blur
 except ImportError:  # pragma: no cover - older torch versions
-    try:
-        from torchvision.transforms.functional import gaussian_blur
-    except ImportError:  # pragma: no cover - fallback implementation
-        def gaussian_blur(
-            img: torch.Tensor,
-            kernel_size: list[int],
-            sigma: Optional[list[float]] = None,
-        ) -> torch.Tensor:
-            """Fallback Gaussian blur using separable convolution."""
-            if sigma is None:
-                sigma = [
-                    0.3 * ((k - 1) * 0.5 - 1) + 0.8
-                    for k in kernel_size
-                ]
-            if len(kernel_size) != 2 or len(sigma) != 2:
-                raise ValueError(
-                    "Fallback gaussian_blur expects 2D kernel_size and sigma, got "
-                    f"kernel_size={kernel_size}, sigma={sigma}"
-                )
-            kernel_size_t = (int(kernel_size[0]), int(kernel_size[1]))
-            sigma_t = (float(sigma[0]), float(sigma[1]))
-            return separable_gaussian_blur(img, kernel_size_t, sigma_t)
+    pass
+
+_torchvision_gaussian_blur: _GaussianBlurFn | None = None
+try:
+    from torchvision.transforms.functional import gaussian_blur as _imported_tv_blur
+    _torchvision_gaussian_blur = _imported_tv_blur
+except ImportError:  # pragma: no cover - optional torchvision dependency
+    pass
+
+
+def gaussian_blur(
+    img: torch.Tensor,
+    kernel_size: list[int],
+    sigma: Optional[list[float]] = None,
+) -> torch.Tensor:
+    if _torch_gaussian_blur is not None:
+        return _torch_gaussian_blur(img, kernel_size, sigma)
+    if _torchvision_gaussian_blur is not None:
+        return _torchvision_gaussian_blur(img, kernel_size, sigma)
+
+    if sigma is None:
+        sigma = [0.3 * ((k - 1) * 0.5 - 1) + 0.8 for k in kernel_size]
+    if len(kernel_size) != 2 or len(sigma) != 2:
+        raise ValueError(
+            "Fallback gaussian_blur expects 2D kernel_size and sigma, got "
+            f"kernel_size={kernel_size}, sigma={sigma}"
+        )
+    kernel_size_t = (int(kernel_size[0]), int(kernel_size[1]))
+    sigma_t = (float(sigma[0]), float(sigma[1]))
+    return separable_gaussian_blur(img, kernel_size_t, sigma_t)
 
 
 def separable_gaussian_blur(

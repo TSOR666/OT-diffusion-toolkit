@@ -1,4 +1,3 @@
-# mypy: ignore-errors
 """Kernel utilities for FastSB-OT."""
 
 from __future__ import annotations
@@ -6,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 from collections import OrderedDict
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -24,6 +23,8 @@ fused_drift_transport_kernel_fixed = getattr(common, "fused_drift_transport_kern
 fisher_diagonal_kernel_fixed = getattr(common, "fisher_diagonal_kernel_fixed", None)
 check_triton_availability = common.check_triton_availability
 get_optimal_block_size = common.get_optimal_block_size
+check_tensor_finite = common.check_tensor_finite
+nan_checks_enabled = common.nan_checks_enabled
 
 __all__ = ["KernelModule"]
 
@@ -31,7 +32,7 @@ __all__ = ["KernelModule"]
 class KernelModule(nn.Module):
     """Optimized kernel operations module with Fisher geometry support"""
 
-    def __init__(self, config: FastSBOTConfig, device: torch.device):
+    def __init__(self, config: FastSBOTConfig, device: torch.device) -> None:
         super().__init__()
         self.config = config
         self.device = device
@@ -42,7 +43,7 @@ class KernelModule(nn.Module):
             config.cuda_cache_flush_watermark,
             config.cuda_cache_flush_threshold_mb
         )
-        self.freq_weights_cache = {}
+        self.freq_weights_cache: Dict[Tuple[Tuple[int, ...], str], torch.Tensor] = {}
         self.freq_weights_lock = threading.Lock()
         self.fisher_cache = MemoryEfficientCacheFixed(
             config.cache_size_mb // 8,
@@ -50,20 +51,26 @@ class KernelModule(nn.Module):
             config.cuda_cache_flush_watermark,
             config.cuda_cache_flush_threshold_mb
         )
-        self._freq_grid_cache = OrderedDict()
+        self._freq_grid_cache: "OrderedDict[Tuple[int, ...], Tuple[torch.Tensor, ...]]" = OrderedDict()
+        self.gaussian_kernel: torch.Tensor
 
         self._setup_buffers()
         # Ensure registered buffers live on the target device
         self.to(device)
 
-    def _setup_buffers(self):
+    def _setup_buffers(self) -> None:
         """Pre-allocate commonly used buffers"""
         gaussian_1d = torch.tensor([1, 2, 1], dtype=torch.float32) / 4
         gaussian_kernel = gaussian_1d[:, None] @ gaussian_1d[None, :]
         self.register_buffer('gaussian_kernel', gaussian_kernel.view(1, 1, 3, 3), persistent=False)
 
     def compute_gaussian_kernel_fft(self, shape: Tuple[int, ...], sigma: float, device: torch.device) -> torch.Tensor:
-        """Cache frequency grids with LRU, device-agnostic"""
+        """Cache frequency grids with LRU, device-agnostic.
+
+        Shapes:
+            - shape: spatial dims (H, W) or (D, H, W)
+            - return: rFFT grid shaped to match rfftn output
+        """
         sigma = max(1e-3, round(float(sigma), 4))
 
         cache_key = (*shape, sigma, str(device))
@@ -82,7 +89,7 @@ class KernelModule(nn.Module):
                 self._freq_grid_cache.popitem(last=False)
 
             n_dims = len(shape)
-            grids = []
+            grids_list: List[torch.Tensor] = []
             for i, size in enumerate(shape):
                 if i == n_dims - 1:
                     try:
@@ -100,13 +107,14 @@ class KernelModule(nn.Module):
                     freq_shape[i] = size // 2 + 1
                 else:
                     freq_shape[i] = size
-                grids.append(freq.reshape(freq_shape))
+                grids_list.append(freq.reshape(freq_shape))
 
-            self._freq_grid_cache[grid_key] = tuple(grids)
+            grids = tuple(grids_list)
+            self._freq_grid_cache[grid_key] = grids
 
         grids = tuple(g.to(device) for g in self._freq_grid_cache[grid_key])
 
-        dist_sq = sum(g**2 for g in grids)
+        dist_sq = torch.stack([g**2 for g in grids], dim=0).sum(dim=0)
 
         kernel_fft = torch.exp(-2 * (math.pi * sigma)**2 * dist_sq)
         # NUMERICAL FIX: Use much smaller clamping threshold to avoid distorting high frequencies
@@ -175,28 +183,26 @@ class KernelModule(nn.Module):
             score: current score estimate
             t: a scalar used only for cache bucketing (can be 0.0 if alpha is provided)
             alpha: (t) value; mandatory for non-linear schedules to avoid incorrect scaling
+
+        Shapes:
+            - x, score: same shape (B, C, H, W) or (B, N, d)
+            - return: same shape as score
         """
+        if nan_checks_enabled(self.config):
+            check_tensor_finite("x", x, enabled=True)
+            check_tensor_finite("score", score, enabled=True)
         if alpha is None:
             raise ValueError(
                 "alpha must be provided to estimate_fisher_diagonal; falling back to alpha=1-t "
                 "is only valid for linear schedules and is disallowed for correctness."
             )
-        # Add a tiny content fingerprint to reduce pointer-reuse collisions
-        fp = score.reshape(-1)
-        if fp.numel() >= 4:
-            sample = torch.stack([fp[0], fp[fp.numel()//3], fp[2*fp.numel()//3], fp[-1]]).float()
-            # cheap, device-local checksum
-            chk = float(sample.sum().item())
-        else:
-            chk = float(fp.float().sum().item())
-
-        # Include stride in cache key for extra safety
+        # Content-aware fingerprint to reduce cache collisions without pointer reuse risk.
+        fingerprint = common.tensor_fingerprint(score)
         stride_sig = tuple(score.stride()) if score.is_contiguous() else "non_contig"
         # Include  in the cache key to avoid reusing across very different noise levels
         t_part = f"{t:.6f}"
         a_part = f"{alpha:.6f}" if alpha is not None else "na"
-        cache_key = (x.shape, f"{t_part}|ab:{a_part}", str(x.device), str(x.dtype), int(score.data_ptr()),
-                     f"{chk:.6e}", stride_sig)
+        cache_key = (x.shape, f"{t_part}|ab:{a_part}", str(x.device), str(x.dtype), fingerprint, stride_sig)
 
         cached = self.fisher_cache.get(cache_key, clone=False)
         if cached is not None:
@@ -209,7 +215,13 @@ class KernelModule(nn.Module):
             score_fp32 = score
 
         # Use Triton kernel if available and beneficial
-        if TRITON_AVAILABLE and self.config.use_triton_kernels and x.is_cuda and x.numel() > 1e6:
+        if (
+            TRITON_AVAILABLE
+            and self.config.use_triton_kernels
+            and x.is_cuda
+            and x.numel() > 1e6
+            and not (score.requires_grad or x.requires_grad)
+        ):
             fisher = torch.empty_like(score_fp32)
 
             score_flat = score_fp32.reshape(-1)
@@ -217,12 +229,17 @@ class KernelModule(nn.Module):
 
             n_elements = score_flat.numel()
             alpha_val = float(alpha)
-            launch_triton_kernel_safe(
-                fisher_diagonal_kernel_fixed,
-                score_flat, fisher_flat,
+            if launch_triton_kernel_safe is None or fisher_diagonal_kernel_fixed is None:
+                raise RuntimeError("Triton kernel launch is unavailable.")
+            launch_kernel = cast(Callable[..., Any], launch_triton_kernel_safe)
+            kernel_fn = cast(Any, fisher_diagonal_kernel_fixed)
+            launch_kernel(
+                kernel_fn,
+                score_flat,
+                fisher_flat,
                 n_elements=n_elements,
                 kernel_type="fisher",
-                alpha=alpha_val
+                alpha=alpha_val,
             )
 
             fisher = fisher_flat.reshape(score.shape)

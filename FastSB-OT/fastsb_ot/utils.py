@@ -1,17 +1,28 @@
-# mypy: ignore-errors
 """Utility helpers for adapting models to FastSB-OT."""
 
 from __future__ import annotations
 
-from typing import Callable, Union
+from typing import Callable, Protocol, Union
 
 import torch
 import torch.nn as nn
 
+from . import common
+
+check_tensor_finite = common.check_tensor_finite
+nan_checks_enabled = common.nan_checks_enabled
 __all__ = [
     "NoisePredictorToScoreWrapper",
     "wrap_noise_predictor",
 ]
+
+
+class NoiseModel(Protocol):
+    def __call__(self, x: torch.Tensor, t: Union[torch.Tensor, float]) -> torch.Tensor:
+        ...
+
+
+ScheduleFn = Callable[[Union[torch.Tensor, float]], torch.Tensor]
 
 
 class NoisePredictorToScoreWrapper(nn.Module):
@@ -22,8 +33,8 @@ class NoisePredictorToScoreWrapper(nn.Module):
 
     def __init__(
         self,
-        noise_model: nn.Module,
-        schedule: Callable[[torch.Tensor], torch.Tensor],
+        noise_model: NoiseModel,
+        schedule: ScheduleFn,
         *,
         clamp: float = 1e-8,
         device: Union[torch.device, str, None] = None,
@@ -37,6 +48,8 @@ class NoisePredictorToScoreWrapper(nn.Module):
             self.to(device)
 
     def forward(self, x: torch.Tensor, t: Union[torch.Tensor, float]) -> torch.Tensor:
+        if nan_checks_enabled(None):
+            check_tensor_finite("x", x, enabled=True)
         eps = self.noise_model(x, t)
         sigma = self._sigma_from_t(t, x)
 
@@ -44,7 +57,9 @@ class NoisePredictorToScoreWrapper(nn.Module):
         while sigma.ndim < eps.ndim:
             sigma = sigma.unsqueeze(-1)
 
-        return -eps / sigma
+        # Guard against extreme scores near clean data (sigma -> 0).
+        sigma_clamped = torch.clamp(sigma, min=1e-4)
+        return -eps / sigma_clamped
 
     # ------------------------------------------------------------------
     def _sigma_from_t(self, t: Union[torch.Tensor, float], ref: torch.Tensor) -> torch.Tensor:
@@ -102,8 +117,8 @@ class NoisePredictorToScoreWrapper(nn.Module):
 
 
 def wrap_noise_predictor(
-    noise_model: nn.Module,
-    schedule: Callable[[torch.Tensor], torch.Tensor],
+    noise_model: NoiseModel,
+    schedule: ScheduleFn,
     *,
     clamp: float = 1e-8,
     device: Union[torch.device, str, None] = None,

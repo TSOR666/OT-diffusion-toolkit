@@ -1,11 +1,9 @@
-# mypy: ignore-errors
 """Transport modules for FastSB-OT."""
 
 from __future__ import annotations
 
 import math
-import os
-from typing import Callable, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -14,9 +12,11 @@ import torch.nn.functional as F
 from . import common
 from .config import FastSBOTConfig
 
-logger = common.logger
 compile_function_fixed = common.compile_function_fixed
 log_sum_exp_stabilized = common.log_sum_exp_stabilized
+check_tensor_finite = common.check_tensor_finite
+runtime_asserts_enabled = common.runtime_asserts_enabled
+nan_checks_enabled = common.nan_checks_enabled
 
 __all__ = [
     "SlicedOptimalTransport",
@@ -29,14 +29,25 @@ __all__ = [
 class SlicedOptimalTransport:
     """Memory-efficient sliced OT with proper N-point handling"""
 
-    def __init__(self, memory_limit_mb: int = 100, sinkhorn_iters: int = 50,
-                 sinkhorn_tol: float = 1e-5, projection_fn: Optional[Callable[[int, int], int]] = None,
-                 generator: Optional[torch.Generator] = None):
+    def __init__(
+        self,
+        memory_limit_mb: int = 100,
+        sinkhorn_iters: int = 50,
+        sinkhorn_tol: float = 1e-5,
+        projection_fn: Optional[Callable[[int, int], int]] = None,
+        generator: Optional[torch.Generator] = None,
+        runtime_asserts: bool = True,
+        nan_checks: bool = True,
+        sinkhorn_mass_tolerance: float = 2e-2,
+    ) -> None:
         self.memory_limit_bytes = memory_limit_mb * 1024 * 1024
         self.sinkhorn_iters = sinkhorn_iters
         self.sinkhorn_tol = sinkhorn_tol
         self.projection_fn = projection_fn
         self.generator = generator
+        self.runtime_asserts = runtime_asserts
+        self.nan_checks = nan_checks
+        self.sinkhorn_mass_tolerance = sinkhorn_mass_tolerance
 
     def should_use_sliced(self, x_batch: torch.Tensor) -> bool:
         """Determine if we should use sliced OT based on memory.
@@ -52,14 +63,15 @@ class SlicedOptimalTransport:
 
         return cost_matrix_memory > self.memory_limit_bytes
 
-    def _reshape_to_points(self, tensor: torch.Tensor):
+    def _reshape_to_points(
+        self, tensor: torch.Tensor
+    ) -> Tuple[torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]:
         """Flatten arbitrary inputs to (B, N, d) and return a restore hook."""
         if tensor.dim() == 2:
             # Treat feature dimension as points with scalar features
             points = tensor.unsqueeze(-1)
-            def restore(out: torch.Tensor) -> torch.Tensor:
-                return out.squeeze(-1)
-            return points, restore
+            restore_fn: Callable[[torch.Tensor], torch.Tensor] = lambda out: out.squeeze(-1)
+            return points, restore_fn
 
         if tensor.dim() == 3:
             return tensor, lambda out: out
@@ -76,14 +88,21 @@ class SlicedOptimalTransport:
         # Move channel to the last axis then flatten spatial dims into point dimension
         points = tensor.movedim(1, -1).reshape(batch, -1, channel)
 
-        def restore(out: torch.Tensor) -> torch.Tensor:
-            return out.reshape(batch, *spatial, channel).movedim(-1, 1)
+        restore_fn = lambda out: out.reshape(batch, *spatial, channel).movedim(-1, 1)
 
-        return points, restore
+        return points, restore_fn
 
     def transport(self, x_batch: torch.Tensor, y_batch: torch.Tensor,
                   eps: Union[float, torch.Tensor], n_projections: int = 100) -> torch.Tensor:
-        """Choose between full and sliced OT based on memory"""
+        """Choose between full and sliced OT based on memory.
+
+        Shapes:
+            - x_batch, y_batch: (B, N, d) or (B, C, H, W) or (B, N)
+            - return: same shape as inputs
+        """
+        if self.nan_checks:
+            check_tensor_finite("x_batch", x_batch, enabled=True)
+            check_tensor_finite("y_batch", y_batch, enabled=True)
         x_points, restore = self._reshape_to_points(x_batch)
         y_points, _ = self._reshape_to_points(y_batch)
 
@@ -110,54 +129,80 @@ class SlicedOptimalTransport:
 
         return restore(result)
 
+    def _projection_chunk_size(self, batch: int, points: int, element_size: int, max_projections: int) -> int:
+        bytes_per_proj = batch * points * (3 * element_size + 8)
+        if bytes_per_proj <= 0:
+            return max_projections
+        budget = max(self.memory_limit_bytes // 2, bytes_per_proj)
+        return max(1, min(max_projections, budget // bytes_per_proj))
+
     def _sliced_ot_fixed(self, x: torch.Tensor, y: torch.Tensor,
                         n_projections: int) -> torch.Tensor:
-        """Sliced OT with deterministic projections"""
+        """Sliced OT with deterministic projections.
+
+        Shapes:
+            - x, y: (B, N, d)
+            - return: (B, N, d)
+        """
         B, N, d = x.shape
         device = x.device
         dtype = x.dtype
 
-        if os.environ.get('FASTSBOT_ASSERTS', '0') == '1':
+        if self.runtime_asserts:
             if x.shape != y.shape:
                 raise ValueError(f"Shape mismatch: x={x.shape}, y={y.shape}")
             if x.dim() != 3:
                 raise ValueError(f"Expected 3D tensor (B,N,d), got {x.dim()}D")
 
-        transported = torch.zeros_like(x)
-        transported_proj = x.new_zeros(B, N)  # Zero-init for safety
-        x_proj = x.new_empty(B, N)
-        y_proj = y.new_empty(B, N)
+        if self.nan_checks:
+            check_tensor_finite("x", x, enabled=True)
+            check_tensor_finite("y", y, enabled=True)
 
+        transported = torch.zeros_like(x)
         gen = self.generator if self.generator is not None else torch.Generator(device=device)
 
-        for i in range(n_projections):
-            # Generate and normalize theta in FP32 for stability
-            theta = torch.randn(d, device=device, dtype=torch.float32, generator=gen)
-            theta = F.normalize(theta, dim=0, eps=1e-8)
-            theta = theta.to(dtype)  # Cast back to data dtype
+        chunk = self._projection_chunk_size(B, N, x.element_size(), n_projections)
+        done = 0
+        while done < n_projections:
+            current = min(chunk, n_projections - done)
+            theta = common._randn_like_compat(
+                torch.empty((current, d), device=device, dtype=torch.float32),
+                gen
+            )
+            theta = F.normalize(theta, dim=1, eps=1e-8).to(dtype)
 
-            torch.matmul(x.view(B, N, d), theta, out=x_proj.view(B, N))
-            torch.matmul(y.view(B, N, d), theta, out=y_proj.view(B, N))
+            x_proj = torch.matmul(x, theta.transpose(0, 1))
+            y_proj = torch.matmul(y, theta.transpose(0, 1))
 
             _, x_indices = torch.sort(x_proj, dim=1)
             y_sorted, _ = torch.sort(y_proj, dim=1)
 
+            transported_proj = torch.empty_like(x_proj)
             transported_proj.scatter_(1, x_indices, y_sorted)
 
-            diff_proj = (transported_proj - x_proj).unsqueeze(-1)
-            transported += diff_proj * theta.unsqueeze(0).unsqueeze(0)
+            diff = transported_proj - x_proj
+            transported += torch.einsum("bnp,pd->bnd", diff, theta)
+            done += current
 
         return x + transported / n_projections
 
     def _full_ot(self, x: torch.Tensor, y: torch.Tensor, eps: float) -> torch.Tensor:
-        """Full OT with FP32 Sinkhorn and matmul for numeric stability"""
+        """Full OT with FP32 Sinkhorn and matmul for numeric stability.
+
+        Shapes:
+            - x, y: (B, N, d)
+            - return: (B, N, d)
+        """
         B, N, d = x.shape
 
-        if os.environ.get('FASTSBOT_ASSERTS', '0') == '1':
+        if self.runtime_asserts:
             if x.shape != y.shape:
                 raise ValueError(f"Shape mismatch: x={x.shape}, y={y.shape}")
             if x.dim() != 3:
                 raise ValueError(f"Expected 3D tensor, got {x.dim()}D")
+        if self.nan_checks:
+            check_tensor_finite("x", x, enabled=True)
+            check_tensor_finite("y", y, enabled=True)
 
         x_expanded = x.unsqueeze(2)
         y_expanded = y.unsqueeze(1)
@@ -182,7 +227,13 @@ class SlicedOptimalTransport:
         row_marginals: Optional[torch.Tensor] = None,
         col_marginals: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """Support for custom marginals, defaults to uniform"""
+        """Support for custom marginals, defaults to uniform.
+
+        Shapes:
+            - C_batch: (B, n, m)
+            - row_marginals: (B, n), col_marginals: (B, m)
+            - return: (B, n, m)
+        """
         B, n, m = C_batch.shape
 
         if max_iter is None:
@@ -215,7 +266,8 @@ class SlicedOptimalTransport:
             log_v = log_b - log_sum_exp_stabilized(K_log + log_u.unsqueeze(-1), dim=1)
             log_u = log_a - log_sum_exp_stabilized(K_log + log_v.unsqueeze(1), dim=2)
 
-            if (iteration % 5 == 0) and (not C_batch.is_cuda):
+            check_every = 5 if not C_batch.is_cuda else 10
+            if iteration % check_every == 0:
                 err_u = torch.abs(log_u - log_u_prev).max()
                 err_v = torch.abs(log_v - log_v_prev).max()
                 if max(err_u.item(), err_v.item()) < tol:
@@ -226,6 +278,26 @@ class SlicedOptimalTransport:
         log_P = log_u.unsqueeze(-1) + K_log + log_v.unsqueeze(1)
         P = torch.exp(log_P)
 
+        if self.nan_checks:
+            check_tensor_finite("sinkhorn_plan", P, enabled=True)
+        if self.runtime_asserts:
+            if row_marginals is None:
+                expected_rows = C_batch.new_full((B, n), 1.0 / n)
+            else:
+                expected_rows = row_marginals
+            if col_marginals is None:
+                expected_cols = C_batch.new_full((B, m), 1.0 / m)
+            else:
+                expected_cols = col_marginals
+            row_err = (P.sum(dim=2) - expected_rows).abs().max()
+            col_err = (P.sum(dim=1) - expected_cols).abs().max()
+            tol_mass = max(self.sinkhorn_mass_tolerance, self.sinkhorn_tol * 10)
+            if max(row_err.item(), col_err.item()) > tol_mass:
+                raise ValueError(
+                    f"Sinkhorn mass conservation failed (row_err={row_err.item():.3e}, "
+                    f"col_err={col_err.item():.3e}, tol={tol_mass:.3e})."
+                )
+
         return P
 
 
@@ -235,19 +307,22 @@ class SlicedOptimalTransport:
 class MomentumTransport(nn.Module):
     """Transport with momentum for accelerated convergence"""
 
-    def __init__(self, beta: float = 0.9, device: torch.device = torch.device('cpu')):
+    def __init__(self, beta: float = 0.9, device: torch.device = torch.device('cpu')) -> None:
         super().__init__()
         self.beta = beta
         self.device = device
         self.register_buffer('velocity', None, persistent=False)
-        self.velocity_shape = None
+        self.velocity: Optional[torch.Tensor]
+        self.velocity_shape: Optional[torch.Size] = None
 
-    def reset_velocity(self):
+    def reset_velocity(self) -> None:
         """Reset momentum velocity"""
         self.velocity = None
         self.velocity_shape = None
 
-    def apply_transport(self, x: torch.Tensor, drift: torch.Tensor, alpha_bar_t: torch.Tensor) -> torch.Tensor:
+    def apply_transport(
+        self, x: torch.Tensor, drift: torch.Tensor, alpha_bar_t: Union[float, torch.Tensor]
+    ) -> torch.Tensor:
         """Apply transport with momentum (handles shape changes)"""
         if self.velocity is not None and x.shape != self.velocity_shape:
             self.reset_velocity()
@@ -264,7 +339,9 @@ class MomentumTransport(nn.Module):
 
         return x + transport_weight * self.velocity
 
-    def _compute_adaptive_weight(self, x: torch.Tensor, alpha_bar_t: torch.Tensor) -> torch.Tensor:
+    def _compute_adaptive_weight(
+        self, x: torch.Tensor, alpha_bar_t: Union[float, torch.Tensor]
+    ) -> torch.Tensor:
         """Compute adaptive weight for transport"""
         if x.dim() == 4 and x.shape[-1] > 1 and x.shape[-2] > 1:
             dx = x[:, :, :, 1:] - x[:, :, :, :-1]
@@ -297,17 +374,22 @@ class MomentumTransport(nn.Module):
 class HierarchicalBridge(nn.Module):
     """Multi-scale Schrodinger bridge decomposition"""
 
-    def __init__(self, scales: List[float] = [1.0, 0.5, 0.25], device: torch.device = torch.device('cpu')):
+    def __init__(
+        self, scales: List[float] = [1.0, 0.5, 0.25], device: torch.device = torch.device('cpu')
+    ) -> None:
         super().__init__()
         self.scales = scales
         self.device = device
-        self.bridge_cache = {}
+        self.bridge_cache: Dict[str, torch.Tensor] = {}
 
     @compile_function_fixed(dynamic=True, use_global_cache=True)
-    def compute_multiscale_transport(self, x: torch.Tensor, drift: torch.Tensor, alpha_bar_t: torch.Tensor) -> torch.Tensor:
+    def compute_multiscale_transport(
+        self, x: torch.Tensor, drift: torch.Tensor, alpha_bar_t: Union[float, torch.Tensor]
+    ) -> torch.Tensor:
         """Compute transport at multiple scales"""
         s = 12.0
-        gate = torch.sigmoid(((1 - alpha_bar_t).mean() - 0.5) * s).to(x.dtype)
+        alpha_tensor = torch.as_tensor(alpha_bar_t, device=x.device, dtype=x.dtype)
+        gate = torch.sigmoid(((1 - alpha_tensor).mean() - 0.5) * s).to(x.dtype)
 
         transports = []
         weights = []
@@ -340,7 +422,8 @@ class HierarchicalBridge(nn.Module):
             weights_tensor = F.softmax(weights_tensor / 0.1, dim=0).to(x.dtype)
             # Unstack back to list for weighted sum (more explicit than zip iteration)
             weights_list = [weights_tensor[i] for i in range(len(transports))]
-            multiscale = sum(w * tr for w, tr in zip(weights_list, transports))
+            weighted = torch.stack([w * tr for w, tr in zip(weights_list, transports)], dim=0)
+            multiscale = weighted.sum(dim=0)
 
         return (1 - gate) * (x + drift) + gate * multiscale
 
@@ -354,8 +437,9 @@ class HierarchicalBridge(nn.Module):
 
         return x + drift
 
-    def _compute_scale_weight(self, x: torch.Tensor, transport: torch.Tensor,
-                            scale: float, alpha_bar_t: torch.Tensor) -> torch.Tensor:
+    def _compute_scale_weight(
+        self, x: torch.Tensor, transport: torch.Tensor, scale: float, alpha_bar_t: Union[float, torch.Tensor]
+    ) -> torch.Tensor:
         """Compute importance weight for each scale"""
         x_fft = torch.fft.rfft2(x)
         t_fft = torch.fft.rfft2(transport)
@@ -378,7 +462,8 @@ class HierarchicalBridge(nn.Module):
 
         energy = (torch.abs(t_fft - x_fft) * freq_weight[None, None, :, :]).mean()
 
-        time_factor = 1.0 - (alpha_bar_t if torch.is_tensor(alpha_bar_t) else x.new_tensor(alpha_bar_t))
+        alpha_tensor = torch.as_tensor(alpha_bar_t, device=x.device, dtype=x.dtype)
+        time_factor = 1.0 - alpha_tensor
 
         return energy * (1.0 + time_factor * scale)
 
@@ -389,7 +474,7 @@ class HierarchicalBridge(nn.Module):
 class TransportModule(nn.Module):
     """Optimized transport operations module with sliced OT"""
 
-    def __init__(self, config: FastSBOTConfig, device: torch.device):
+    def __init__(self, config: FastSBOTConfig, device: torch.device) -> None:
         super().__init__()
         self.config = config
         self.device = device
@@ -400,7 +485,10 @@ class TransportModule(nn.Module):
             config._sinkhorn_iterations,
             config.sinkhorn_tolerance,
             config.sliced_ot_projection_fn,
-            generator=config.generator
+            generator=config.generator,
+            runtime_asserts=runtime_asserts_enabled(config),
+            nan_checks=nan_checks_enabled(config),
+            sinkhorn_mass_tolerance=config.sinkhorn_mass_tolerance,
         )
 
 
