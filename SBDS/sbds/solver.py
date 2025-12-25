@@ -241,7 +241,7 @@ class EnhancedScoreBasedSBDiffusionSolver:
         
         # Set up mixed precision if requested and available
         self.amp_dtype = torch.float16 if self.use_mixed_precision and device.type == 'cuda' else torch.float32
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_mixed_precision and device.type == 'cuda' else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_mixed_precision and device.type == 'cuda' else None
         
         # Pre-create constants for log-uniform distributions to avoid host-device sync
         self.log_batch_size: Dict[int, torch.Tensor] = {}  # Cache for different batch sizes
@@ -794,8 +794,9 @@ class EnhancedScoreBasedSBDiffusionSolver:
         """
         # Normalize transport plan with protection against zero sum
         # row_sums: (N, 1) - sum over target dimension
-        row_sums = transport_plan.sum(dim=1, keepdim=True)
-        row_sums = torch.clamp(row_sums, min=LOG_STABILITY_EPS)  # Prevent division by zero
+        sum_dtype = torch.float32 if transport_plan.dtype in (torch.float16, torch.bfloat16) else transport_plan.dtype
+        row_sums = transport_plan.sum(dim=1, keepdim=True, dtype=sum_dtype)
+        row_sums = torch.clamp(row_sums, min=LOG_STABILITY_EPS).to(transport_plan.dtype)  # Prevent division by zero
         # P_normalized: (N, M) - each row sums to 1
         P_normalized = transport_plan / row_sums
 
@@ -862,8 +863,11 @@ class EnhancedScoreBasedSBDiffusionSolver:
                 log_P = torch.clamp(log_P, min=-50.0, max=50.0)
                 P = torch.exp(log_P)
                 # Normalize defensively to avoid accumulation of numerical error
-                P = P / P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
-                transport_cost = float(torch.sum(P * cost_matrix))
+                sum_dtype = torch.float32 if P.dtype in (torch.float16, torch.bfloat16) else P.dtype
+                row_sums = P.sum(dim=1, keepdim=True, dtype=sum_dtype)
+                row_sums = row_sums.clamp_min(LOG_STABILITY_EPS).to(P.dtype)
+                P = P / row_sums
+                transport_cost = torch.sum(P * cost_matrix, dtype=sum_dtype).item()
 
                 x_transported = self._apply_transport_map(x_pred, x_ref, P)
                 x_pred = TRANSPORT_RELAXATION_FACTOR * x_pred + TRANSPORT_CORRECTION_FACTOR * x_transported
@@ -882,25 +886,32 @@ class EnhancedScoreBasedSBDiffusionSolver:
                     if self.adaptive_eps
                     else self.eps
                 )
+                if C.dtype in (torch.float16, torch.bfloat16):
+                    C = C.float()
                 # Prevent degenerate kernels: set a floor tied to data scale
                 median_cost = torch.median(C).item()
                 mean_cost = torch.mean(C).item()
                 eps = max(float(eps), 1e-3, 0.1 * median_cost, 0.5 * mean_cost)
-                K = torch.exp(-C / eps).clamp_min(LOG_STABILITY_EPS)
+                log_K = (-C / eps).clamp(min=STABLE_EXP_MIN)
                 
                 # Initialize dual potentials (use x_pred's device for consistency)
-                u = torch.zeros(batch_size, device=x_pred.device)
-                v = torch.zeros(batch_size, device=x_pred.device)
+                u = torch.zeros(batch_size, device=x_pred.device, dtype=log_K.dtype)
+                v = torch.zeros(batch_size, device=x_pred.device, dtype=log_K.dtype)
                 
-                # Sinkhorn iterations
+                # Sinkhorn iterations (log-sum-exp updates for stability)
                 for _ in range(SINKHORN_ITERATIONS_FULL):
-                    u = self._stable_log(1.0 / (K @ torch.exp(v)))
-                    v = self._stable_log(1.0 / (K.T @ torch.exp(u)))
+                    u = -torch.logsumexp(log_K + v[None, :], dim=1)
+                    v = -torch.logsumexp(log_K.T + u[None, :], dim=1)
                 
                 # Compute transport plan
-                P = torch.diag(torch.exp(u)) @ K @ torch.diag(torch.exp(v))
-                P = P / P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
-                transport_cost = torch.sum(P * C).item()
+                log_P = (u[:, None] + v[None, :]) + log_K
+                log_P = torch.clamp(log_P, min=STABLE_EXP_MIN, max=STABLE_EXP_MAX)
+                P = torch.exp(log_P)
+                sum_dtype = torch.float32 if P.dtype in (torch.float16, torch.bfloat16) else P.dtype
+                row_sums = P.sum(dim=1, keepdim=True, dtype=sum_dtype)
+                row_sums = row_sums.clamp_min(LOG_STABILITY_EPS).to(P.dtype)
+                P = P / row_sums
+                transport_cost = torch.sum(P * C, dtype=sum_dtype).item()
                 
                 # Apply transport
                 x_transported = self._apply_transport_map(x_pred, x_ref, P)
@@ -983,10 +994,12 @@ class EnhancedScoreBasedSBDiffusionSolver:
             P = torch.diag(a) @ K @ torch.diag(b)
             
             # Compute transport cost using the feature-space squared distances
-            transport_cost = torch.sum(P * C_approx).item()
+            sum_dtype = torch.float32 if P.dtype in (torch.float16, torch.bfloat16) else P.dtype
+            transport_cost = torch.sum(P * C_approx, dtype=sum_dtype).item()
             
             # Apply transport
-            row_sums = P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
+            row_sums = P.sum(dim=1, keepdim=True, dtype=sum_dtype)
+            row_sums = row_sums.clamp_min(LOG_STABILITY_EPS).to(P.dtype)
             x_transported = (P @ x_ref_flat) / row_sums
             x_transported = x_transported.reshape(x_t.shape)
             
@@ -1228,10 +1241,12 @@ class EnhancedScoreBasedSBDiffusionSolver:
             
             # Approximate transport cost
             C_approx = torch.cdist(x_pred_flat, x_ref_flat, p=2).pow(2)
-            transport_cost = torch.sum(P * C_approx).item()
+            sum_dtype = torch.float32 if P.dtype in (torch.float16, torch.bfloat16) else P.dtype
+            transport_cost = torch.sum(P * C_approx, dtype=sum_dtype).item()
             
             # Apply transport
-            row_sums = P.sum(dim=1, keepdim=True).clamp_min(LOG_STABILITY_EPS)
+            row_sums = P.sum(dim=1, keepdim=True, dtype=sum_dtype)
+            row_sums = row_sums.clamp_min(LOG_STABILITY_EPS).to(P.dtype)
             x_transported = (P @ x_ref_flat) / row_sums
             x_transported = x_transported.reshape(x_t.shape)
             
