@@ -1,10 +1,13 @@
 """Builder utilities and factory functions for SPOT solvers."""
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 
 from .config import SolverConfig
 from .constants import DEFAULT_DPM_ORDER
+from .schedules import NoiseScheduleProtocol
 from .solver import ProductionSPOTSolver
 
 __all__ = [
@@ -18,70 +21,75 @@ __all__ = [
 class SolverBuilder:
     """Builder for ergonomic solver configuration."""
 
-    def __init__(self, score_model):
+    def __init__(self, score_model: torch.nn.Module) -> None:
         self.score_model = score_model
         self.config = SolverConfig()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.noise_schedule = None
-        self.compute_dtype = None
+        self.noise_schedule: Optional[NoiseScheduleProtocol] = None
+        self.compute_dtype: Optional[torch.dtype] = None
 
-    def with_device(self, device):
+    def with_device(self, device: torch.device) -> "SolverBuilder":
         self.device = device
         return self
 
-    def with_compute_dtype(self, dtype):
+    def with_compute_dtype(self, dtype: torch.dtype) -> "SolverBuilder":
         self.compute_dtype = dtype
         return self
 
-    def with_deterministic(self, enabled: bool = True, cdist_cpu: bool = False):
+    def with_deterministic(self, enabled: bool = True, cdist_cpu: bool = False) -> "SolverBuilder":
         self.config.deterministic = enabled
         self.config.deterministic_cdist_cpu = cdist_cpu
         return self
 
-    def with_tf32(self, enabled: bool = True):
+    def with_tf32(self, enabled: bool = True) -> "SolverBuilder":
         self.config.enable_tf32 = enabled
         return self
 
-    def with_dpm_solver_order(self, order: int):
+    def with_dpm_solver_order(self, order: int) -> "SolverBuilder":
         if order not in [1, 2, 3]:
             raise ValueError(f"DPM-Solver order must be 1-3, got {order}")
         self.config.dpm_solver_order = order
         return self
 
-    def with_richardson_extrapolation(self, enabled: bool = True, threshold: float = 0.1, max_overhead: float = 0.5):
+    def with_richardson_extrapolation(
+        self,
+        enabled: bool = True,
+        threshold: float = 0.1,
+        max_overhead: float = 0.5,
+    ) -> "SolverBuilder":
         self.config.richardson_extrapolation = enabled
         self.config.richardson_threshold = threshold
         self.config.richardson_max_overhead = max_overhead
         return self
 
-    def with_timestep_shape_b1(self, enabled: bool = False):
+    def with_timestep_shape_b1(self, enabled: bool = False) -> "SolverBuilder":
         self.config.timestep_shape_b1 = enabled
         return self
 
-    def with_patch_based_ot(self, enabled: bool = True, patch_size: int = 64):
+    def with_patch_based_ot(self, enabled: bool = True, patch_size: int = 64) -> "SolverBuilder":
         self.config.use_patch_based_ot = enabled
         self.config.patch_size = patch_size
         return self
 
-    def with_noise_schedule(self, schedule):
+    def with_noise_schedule(self, schedule: NoiseScheduleProtocol) -> "SolverBuilder":
         self.noise_schedule = schedule
         return self
 
-    def with_blockwise_threshold(self, threshold: int):
+    def with_blockwise_threshold(self, threshold: int) -> "SolverBuilder":
         self.config.blockwise_threshold = threshold
         return self
 
-    def with_max_dense_matrix_elements(self, max_elements: int):
+    def with_max_dense_matrix_elements(self, max_elements: int) -> "SolverBuilder":
         self.config.max_dense_matrix_elements = max_elements
         return self
 
-    def with_adaptive_eps_scale(self, mode: str = "sigma"):
+    def with_adaptive_eps_scale(self, mode: str = "sigma") -> "SolverBuilder":
         if mode not in ["sigma", "data", "none"]:
             raise ValueError("adaptive_eps_scale must be 'sigma', 'data', or 'none'")
         self.config.adaptive_eps_scale = mode
         return self
 
-    def with_sinkhorn_iterations(self, iterations: int):
+    def with_sinkhorn_iterations(self, iterations: int) -> "SolverBuilder":
         """Set the number of Sinkhorn iterations for OT computation.
 
         Args:
@@ -94,7 +102,7 @@ class SolverBuilder:
         self.config.sinkhorn_iterations = iterations
         return self
 
-    def with_mixed_precision(self, enabled: bool):
+    def with_mixed_precision(self, enabled: bool) -> "SolverBuilder":
         """Enable mixed precision computation (FP16/BF16 on CUDA).
 
         Args:
@@ -118,7 +126,12 @@ class SolverBuilder:
         )
 
 
-def create_balanced_solver(score_model, noise_schedule=None, device=None, compute_dtype=None) -> ProductionSPOTSolver:
+def create_balanced_solver(
+    score_model: torch.nn.Module,
+    noise_schedule: Optional[NoiseScheduleProtocol] = None,
+    device: Optional[torch.device] = None,
+    compute_dtype: Optional[torch.dtype] = None,
+) -> ProductionSPOTSolver:
     """Create a solver with balanced speed/quality (recommended).
 
     Args:
@@ -153,7 +166,11 @@ def create_balanced_solver(score_model, noise_schedule=None, device=None, comput
     )
 
 
-def create_fast_solver(score_model, noise_schedule=None, device=None) -> ProductionSPOTSolver:
+def create_fast_solver(
+    score_model: torch.nn.Module,
+    noise_schedule: Optional[NoiseScheduleProtocol] = None,
+    device: Optional[torch.device] = None,
+) -> ProductionSPOTSolver:
     """Create a fast solver with reduced quality.
 
     Args:
@@ -192,7 +209,11 @@ def create_fast_solver(score_model, noise_schedule=None, device=None) -> Product
     )
 
 
-def create_repro_solver(score_model, noise_schedule=None, device=None) -> ProductionSPOTSolver:
+def create_repro_solver(
+    score_model: torch.nn.Module,
+    noise_schedule: Optional[NoiseScheduleProtocol] = None,
+    device: Optional[torch.device] = None,
+) -> ProductionSPOTSolver:
     """Create a reproducible solver with bit-exact determinism.
 
     Args:

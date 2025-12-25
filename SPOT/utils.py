@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Callable, Protocol, Union
 
 import torch
 import torch.nn as nn
+
+from .schedules import NoiseScheduleProtocol
 
 __all__ = [
     "NoisePredictorToScoreWrapper",
     "wrap_noise_predictor",
 ]
+
+
+class _AlphaSigmaCallable(Protocol):
+    def __call__(self, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        ...
+
+
+ScheduleLike = Union[NoiseScheduleProtocol, _AlphaSigmaCallable]
 
 
 class NoisePredictorToScoreWrapper(nn.Module):
@@ -34,7 +44,7 @@ class NoisePredictorToScoreWrapper(nn.Module):
     def __init__(
         self,
         noise_model: nn.Module,
-        schedule,
+        schedule: ScheduleLike,
         *,
         clamp: float = 1e-8,
         device: Union[torch.device, str, None] = None,
@@ -47,36 +57,37 @@ class NoisePredictorToScoreWrapper(nn.Module):
             self.to(device)
 
     def forward(self, x: torch.Tensor, t: Union[torch.Tensor, float]) -> torch.Tensor:
-        eps = self.noise_model(x, t)
-        sigma = self._sigma_from_t(t, ref=x)
+        """Convert predicted noise to score with shape-preserving broadcast."""
+        eps = self.noise_model(x, t)  # (B, *S) -> (B, *S)
+        sigma = self._sigma_from_t(t, ref=x)  # (1,) or (B,) -> broadcast
 
         while sigma.ndim < eps.ndim:
-            sigma = sigma.unsqueeze(-1)
+            sigma = sigma.unsqueeze(-1)  # (B, ..., 1)
 
-        return -eps / sigma
+        return -eps / sigma  # (B, *S)
 
     # ------------------------------------------------------------------
     def _sigma_from_t(self, t: Union[torch.Tensor, float], ref: torch.Tensor) -> torch.Tensor:
         device = ref.device
         if isinstance(t, torch.Tensor):
-            t_tensor = t.detach().to(device=device, dtype=torch.float32)
+            t_tensor = t.detach().to(device=device, dtype=torch.float32)  # (B,) or (1,)
         else:
-            t_tensor = torch.tensor([float(t)], device=device, dtype=torch.float32)
+            t_tensor = torch.tensor([float(t)], device=device, dtype=torch.float32)  # (1,)
 
         if hasattr(self.schedule, "alpha_sigma"):
-            _, sigma = self.schedule.alpha_sigma(t_tensor)
+            _, sigma = self.schedule.alpha_sigma(t_tensor)  # (N,)
         else:
-            _, sigma = self.schedule(t_tensor)
+            _, sigma = self.schedule(t_tensor)  # (N,)
 
-        sigma = sigma.to(device=device, dtype=torch.float32)
-        sigma = torch.clamp(sigma, min=self.clamp)
+        sigma = sigma.to(device=device, dtype=torch.float32)  # (N,)
+        sigma = torch.clamp(sigma, min=self.clamp)  # (N,)
 
         return sigma.to(ref.dtype if ref.dtype.is_floating_point else torch.float32)
 
 
 def wrap_noise_predictor(
     noise_model: nn.Module,
-    schedule,
+    schedule: ScheduleLike,
     *,
     clamp: float = 1e-8,
     device: Union[torch.device, str, None] = None,

@@ -1,7 +1,7 @@
 """Transport-related utilities for SPOT."""
 from __future__ import annotations
 
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple, TYPE_CHECKING
 
 import torch
 
@@ -10,8 +10,17 @@ from .logger import logger
 
 __all__ = ["make_grid_patch_transport", "blockwise_soft_assignment"]
 
+if TYPE_CHECKING:
+    from .solver import ProductionSPOTSolver
 
-def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None = None) -> Callable:
+TransportMap = Callable[[torch.Tensor], torch.Tensor]
+TransportFactory = Callable[[torch.Tensor, torch.Tensor, float], TransportMap]
+
+def make_grid_patch_transport(
+    solver: "ProductionSPOTSolver",
+    patch_size: int = 64,
+    stride: int | None = None,
+) -> TransportFactory:
     """Create a patch-based transport map factory bound to a solver instance.
 
     Args:
@@ -32,7 +41,7 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
     # Store norm in fp32 to avoid precision loss when normalizing overlapping patches
     norm_cache: Dict[Tuple[int, int, int, int, int, torch.device, torch.dtype], torch.Tensor] = {}
 
-    def factory(x_img: torch.Tensor, y_img: torch.Tensor, eps: float):
+    def factory(x_img: torch.Tensor, y_img: torch.Tensor, eps: float) -> TransportMap:
         if x_img.dim() != 4 or y_img.dim() != 4:
             logger.debug("Patch transport expects BCHW tensors; using identity")
             return lambda z: z
@@ -41,7 +50,7 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
             logger.debug("Patch transport requires matching shapes; using identity")
             return lambda z: z
 
-        B, C, H, W = x_img.shape
+        B, C, H, W = x_img.shape  # (B, C, H, W)
         if B != 1:
             logger.debug("Patch transport currently supports batch size 1; using identity")
             return lambda z: z
@@ -90,9 +99,9 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
         unfold = unfold_cache[cache_key]
         fold = fold_cache[cache_key]
 
-        patches_x = unfold(x_img)
-        patches_y = unfold(y_img)
-        _, patch_dim, num_patches = patches_x.shape
+        patches_x = unfold(x_img)  # (B, C*ps*ps, P)
+        patches_y = unfold(y_img)  # (B, C*ps*ps, P)
+        _, patch_dim, num_patches = patches_x.shape  # (B, D, P)
 
         logger.debug(
             "Patch transport: patch_size=%d, stride=%d, image=%dx%d, num_patches=%d",
@@ -101,12 +110,12 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
 
         norm_key = (C, H, W, ps, st, x_img.device, torch.float32)
         if norm_key not in norm_cache:
-            ones = torch.ones((B, patch_dim, num_patches), device=x_img.device, dtype=torch.float32)
-            norm_cache[norm_key] = fold(ones).clamp_min(1e-6)
+            ones = torch.ones((B, patch_dim, num_patches), device=x_img.device, dtype=torch.float32)  # (B, D, P)
+            norm_cache[norm_key] = fold(ones).clamp_min(1e-6)  # (B, C, H, W)
         norm = norm_cache[norm_key]
 
-        x_vec = patches_x.transpose(1, 2).reshape(-1, patch_dim)
-        y_vec = patches_y.transpose(1, 2).reshape(-1, patch_dim)
+        x_vec = patches_x.transpose(1, 2).reshape(-1, patch_dim)  # (B*P, D)
+        y_vec = patches_y.transpose(1, 2).reshape(-1, patch_dim)  # (B*P, D)
 
         log_u, log_v = solver.sinkhorn_kernel.sinkhorn_log_stabilized(
             x_vec, y_vec, eps, n_iter=solver.config.sinkhorn_iterations
@@ -128,10 +137,10 @@ def make_grid_patch_transport(solver, patch_size: int = 64, stride: int | None =
                 logger.debug("Patch transport received mismatched shape %s; returning input unchanged", tuple(z.shape))
                 return z
 
-            patches_z = unfold(z)
-            z_vec = patches_z.transpose(1, 2).reshape(-1, patch_dim)
-            transported_vec = transport_map(z_vec).reshape(B, num_patches, patch_dim).transpose(1, 2)
-            transported = fold(transported_vec.to(norm.dtype)) / norm
+            patches_z = unfold(z)  # (B, D, P)
+            z_vec = patches_z.transpose(1, 2).reshape(-1, patch_dim)  # (B*P, D)
+            transported_vec = transport_map(z_vec).reshape(B, num_patches, patch_dim).transpose(1, 2)  # (B, D, P)
+            transported = fold(transported_vec.to(norm.dtype)) / norm  # (B, C, H, W)
             return transported.to(z.dtype)
 
         return apply_transport
@@ -150,27 +159,27 @@ def blockwise_soft_assignment(
     """Compute W @ Ybar in blocks to handle large NM."""
 
     n_z = zf.size(0)
-    result = torch.zeros_like(zf)
+    result = torch.zeros_like(zf)  # (N, D)
 
     xf_cpu = xf.float().cpu() if (deterministic_cdist_cpu and zf.is_cuda) else None
 
     for i in range(0, n_z, block_size):
         end_i = min(i + block_size, n_z)
-        zf_block = zf[i:end_i]
+        zf_block = zf[i:end_i]  # (B, D)
 
         with torch.no_grad():
             device_type = "cuda" if zf.is_cuda else "cpu"
             with torch.amp.autocast(device_type=device_type, enabled=False):
                 if xf_cpu is not None:
                     zf_block_cpu = zf_block.float().cpu()
-                    C_block = torch.cdist(zf_block_cpu, xf_cpu, p=2).pow(2).to(zf.device)
+                    C_block = torch.cdist(zf_block_cpu, xf_cpu, p=2).pow(2).to(zf.device)  # (B, M)
                 else:
-                    C_block = torch.cdist(zf_block.float(), xf.float(), p=2).pow(2)
-                S_block = -C_block / eps
-                S_block = S_block - S_block.max(dim=1, keepdim=True)[0]
-                W_block = torch.softmax(S_block, dim=1)
+                    C_block = torch.cdist(zf_block.float(), xf.float(), p=2).pow(2)  # (B, M)
+                S_block = -C_block / eps  # (B, M)
+                S_block = S_block - S_block.max(dim=1, keepdim=True)[0]  # (B, M)
+                W_block = torch.softmax(S_block, dim=1)  # (B, M)
 
-        result[i:end_i] = (W_block @ Ybar).to(zf.dtype)
+        result[i:end_i] = (W_block @ Ybar).to(zf.dtype)  # (B, M) @ (M, D) -> (B, D)
 
     return result
 

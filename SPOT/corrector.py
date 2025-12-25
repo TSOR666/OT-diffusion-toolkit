@@ -5,7 +5,7 @@ predictor steps to refine samples and reduce discretization errors.
 """
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, Protocol
 
 import torch
 
@@ -16,7 +16,32 @@ __all__ = [
     "LangevinCorrector",
     "TweedieCorrector",
     "AdaptiveCorrector",
+    "PredictorCorrectorSampler",
 ]
+
+
+class PredictorProtocol(Protocol):
+    def step(
+        self,
+        x: torch.Tensor,
+        t_curr: float,
+        t_next: float,
+        score_fn: Callable[[torch.Tensor, float], torch.Tensor],
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        ...
+
+
+class CorrectorProtocol(Protocol):
+    def correct(
+        self,
+        x: torch.Tensor,
+        t: float,
+        score_fn: Callable[[torch.Tensor, float], torch.Tensor],
+        *args: Any,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        ...
 
 
 class LangevinCorrector:
@@ -48,7 +73,7 @@ class LangevinCorrector:
         n_steps: int = 1,
         snr: float = 0.16,
         denoise: bool = False,
-    ):
+    ) -> None:
         """Initialize Langevin corrector.
 
         Args:
@@ -79,14 +104,14 @@ class LangevinCorrector:
             generator: Optional random generator
 
         Returns:
-            Refined sample
+            Refined sample with same shape as ``x`` (B, *S) -> (B, *S)
         """
         if self.n_steps == 0:
             return x
 
         # Get noise level
-        t_tensor = torch.full((1,), t, device=x.device, dtype=torch.float32)
-        _, sigma_t = self.schedule.alpha_sigma(t_tensor)
+        t_tensor = torch.full((1,), t, device=x.device, dtype=torch.float32)  # (1,)
+        _, sigma_t = self.schedule.alpha_sigma(t_tensor)  # (1,)
         sigma = sigma_t.item()
 
         # Langevin step size based on SNR
@@ -97,23 +122,22 @@ class LangevinCorrector:
 
         for i in range(self.n_steps):
             # Compute score
-            score = score_fn(x_current, t)
+            score = score_fn(x_current, t)  # (B, *S)
 
             # Generate noise
             if generator is not None:
-                noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)
+                noise = torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator)  # (B, *S)
             else:
-                noise = torch.randn_like(x)
+                noise = torch.randn_like(x)  # (B, *S)
 
             # Langevin update: x_{i+1} = x_i + step_size * score + sqrt(2 * step_size) * noise
             if self.denoise and i == self.n_steps - 1:
                 # Final step: no noise (denoising)
-                x_current = x_current + step_size * score
+                x_current = x_current + step_size * score  # (B, *S)
             else:
                 # Regular Langevin step with noise
-                x_current = x_current + step_size * score + torch.sqrt(
-                    torch.tensor(2.0 * step_size, device=x.device)
-                ) * noise
+                noise_scale = torch.sqrt(torch.tensor(2.0 * step_size, device=x.device, dtype=x.dtype))  # ()
+                x_current = x_current + step_size * score + noise_scale * noise  # (B, *S)
 
         return x_current
 
@@ -130,7 +154,7 @@ class TweedieCorrector:
         self,
         schedule: NoiseScheduleProtocol,
         mixing: float = 0.5,
-    ):
+    ) -> None:
         """Initialize Tweedie corrector.
 
         Args:
@@ -157,11 +181,11 @@ class TweedieCorrector:
             score_fn: Score function
 
         Returns:
-            Corrected sample
+            Corrected sample with same shape as ``x`` (B, *S) -> (B, *S)
         """
         # Get noise parameters
-        t_tensor = torch.full((1,), t, device=x.device, dtype=torch.float32)
-        alpha_t, sigma_t = self.schedule.alpha_sigma(t_tensor)
+        t_tensor = torch.full((1,), t, device=x.device, dtype=torch.float32)  # (1,)
+        alpha_t, sigma_t = self.schedule.alpha_sigma(t_tensor)  # (1,), (1,)
 
         # Safety check: alpha should never be too close to 0
         # This can happen at t → T (pure noise regime)
@@ -174,23 +198,23 @@ class TweedieCorrector:
             return x
 
         # Compute score
-        score = score_fn(x, t)
+        score = score_fn(x, t)  # (B, *S)
 
         # Tweedie's formula: estimate x0
         # Disable autocast to avoid precision issues in division
         with torch.amp.autocast(device_type='cuda' if x.is_cuda else 'cpu', enabled=False):
-            sigma_sq = sigma_t.float() ** 2
-            alpha_float = alpha_t.float()
+            sigma_sq = sigma_t.float() ** 2  # (1,)
+            alpha_float = alpha_t.float()  # (1,)
 
             # x0_estimate = (x_t - sigma^2 * score) / alpha
             # Use clamp instead of epsilon addition for more principled stability
-            alpha_clamped = torch.clamp(alpha_float, min=alpha_min)
-            x0_estimate = (x.float() - sigma_sq * score.float()) / alpha_clamped
+            alpha_clamped = torch.clamp(alpha_float, min=alpha_min)  # (1,)
+            x0_estimate = (x.float() - sigma_sq * score.float()) / alpha_clamped  # (B, *S)
             x0_estimate = x0_estimate.to(x.dtype)
 
         # Mix with original sample
         x_corrected = (1 - self.mixing) * x + self.mixing * (
-            alpha_t.to(x.dtype) * x0_estimate
+            alpha_t.to(x.dtype) * x0_estimate  # (B, *S)
         )
 
         return x_corrected
@@ -209,7 +233,7 @@ class AdaptiveCorrector:
         error_threshold: float = 0.1,
         langevin_snr: float = 0.16,
         max_corrections: int = 3,
-    ):
+    ) -> None:
         """Initialize adaptive corrector.
 
         Args:
@@ -245,14 +269,14 @@ class AdaptiveCorrector:
             generator: Optional random generator
 
         Returns:
-            Corrected sample
+            Corrected sample with same shape as ``x`` (B, *S) -> (B, *S)
         """
         self.total_calls += 1
 
         # Estimate error if we have previous sample
         if x_prev is not None:
             # Simple error estimate based on change magnitude
-            change = torch.norm(x - x_prev) / (torch.norm(x) + 1e-8)
+            change = torch.norm(x - x_prev) / (torch.norm(x) + 1e-8)  # scalar
             error = change.item()
         else:
             # No previous sample, use moderate error estimate
@@ -302,7 +326,7 @@ class AdaptiveCorrector:
             "correction_rate": correction_rate,
         }
 
-    def reset_stats(self):
+    def reset_stats(self) -> None:
         """Reset correction statistics."""
         self.correction_count = 0
         self.total_calls = 0
@@ -317,11 +341,11 @@ class PredictorCorrectorSampler:
 
     def __init__(
         self,
-        predictor,
-        corrector,
+        predictor: PredictorProtocol,
+        corrector: Optional[CorrectorProtocol],
         schedule: NoiseScheduleProtocol,
         use_corrector: bool = True,
-    ):
+    ) -> None:
         """Initialize predictor-corrector sampler.
 
         Args:
@@ -353,7 +377,7 @@ class PredictorCorrectorSampler:
             generator: Optional random generator
 
         Returns:
-            Next state after prediction and correction
+            Next state after prediction and correction with same shape as ``x`` (B, *S) -> (B, *S)
 
         Raises:
             TypeError: If predictor does not have a step() method
@@ -367,18 +391,18 @@ class PredictorCorrectorSampler:
                 f"or ensure your custom predictor implements the step() interface."
             )
 
-        x_pred = self.predictor.step(x, t_curr, t_next, score_fn)
+        x_pred = self.predictor.step(x, t_curr, t_next, score_fn)  # (B, *S)
 
         # Corrector step
         if self.use_corrector and self.corrector is not None:
             if isinstance(self.corrector, AdaptiveCorrector):
                 x_corrected = self.corrector.correct(
                     x_pred, t_next, score_fn, x_prev=x, generator=generator
-                )
+                )  # (B, *S)
             else:
                 x_corrected = self.corrector.correct(
                     x_pred, t_next, score_fn, generator=generator
-                )
+                )  # (B, *S)
         else:
             x_corrected = x_pred
 

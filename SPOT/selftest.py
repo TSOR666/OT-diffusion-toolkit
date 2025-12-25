@@ -21,8 +21,9 @@ def selftest(verbose: bool = True) -> Dict[str, Any]:
             super().__init__()
             self.net = torch.nn.Conv2d(3, 3, kernel_size=1)
 
-        def forward(self, x, t):
-            return self.net(x)
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            _ = t  # unused, but required by SPOT interface
+            return self.net(x)  # (B, 3, H, W) -> (B, 3, H, W)
 
     solver = (
         SolverBuilder(DummyScore())

@@ -8,6 +8,7 @@ from typing import Tuple
 import numpy as np
 import torch
 
+from .config import SolverConfig
 from .logger import logger
 
 # Try to import Triton acceleration
@@ -23,7 +24,7 @@ __all__ = ["OptimizedSinkhornKernel"]
 class OptimizedSinkhornKernel:
     """Production-grade Sinkhorn implementation."""
 
-    def __init__(self, device: torch.device, dtype: torch.dtype, config):
+    def __init__(self, device: torch.device, dtype: torch.dtype, config: SolverConfig) -> None:
         self.device = device
         self.dtype = dtype
         self.config = config
@@ -54,7 +55,7 @@ class OptimizedSinkhornKernel:
     def sinkhorn_log_stabilized(
         self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int = 10
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return Sinkhorn dual variables in log-space for numerical stability."""
+        """Return log-space duals for x (N, D) and y (M, D): (N,), (M,)."""
 
         N, M = x.size(0), y.size(0)
         required_cost_elems = N * M
@@ -76,8 +77,8 @@ class OptimizedSinkhornKernel:
             )
             return self._sinkhorn_blockwise(x, y, eps, n_iter)
 
-        x = x.to(device=self.device, dtype=self.dtype)
-        y = y.to(device=self.device, dtype=self.dtype)
+        x = x.to(device=self.device, dtype=self.dtype)  # (N, D)
+        y = y.to(device=self.device, dtype=self.dtype)  # (M, D)
 
         # Try Triton backend for large problems where tiling provides benefits
         # Triton is designed for medium-large problems (>= 1M elements) where GPU tiling helps
@@ -111,7 +112,9 @@ class OptimizedSinkhornKernel:
         self.last_backend_used = "torch_native"
         return self._sinkhorn_native(x, y, eps, n_iter)
 
-    def _sinkhorn_native(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
+    def _sinkhorn_native(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Native PyTorch Sinkhorn implementation with memory-efficient computation.
 
         IMPORTANT: This method should only be called for problems that fit in memory.
@@ -122,8 +125,8 @@ class OptimizedSinkhornKernel:
         # Handle degenerate case where N=0 or M=0
         if N == 0 or M == 0:
             logger.warning("Sinkhorn called with empty tensor (N=%d, M=%d), returning NaN duals", N, M)
-            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)
-            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)
+            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)  # (N,)
+            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)  # (M,)
             return log_u, log_v
 
         # Safety check: Verify we won't OOM on the cost matrix
@@ -138,51 +141,53 @@ class OptimizedSinkhornKernel:
 
         if self.config.deterministic_cdist_cpu and self.device.type == "cuda":
             with torch.amp.autocast(device_type="cpu", enabled=False):
-                x_cpu = x.float().cpu()
-                y_cpu = y.float().cpu()
-                C = torch.cdist(x_cpu, y_cpu, p=2).pow(2).to(self.device)
+                x_cpu = x.float().cpu()  # (N, D)
+                y_cpu = y.float().cpu()  # (M, D)
+                C = torch.cdist(x_cpu, y_cpu, p=2).pow(2).to(self.device)  # (N, M)
         else:
             device_type = "cuda" if self.device.type == "cuda" else "cpu"
             with torch.amp.autocast(device_type=device_type, enabled=False):
-                C = torch.cdist(x.float(), y.float(), p=2).pow(2)
+                C = torch.cdist(x.float(), y.float(), p=2).pow(2)  # (N, M)
 
-        log_a = torch.full((N,), -math.log(N), device=self.device, dtype=torch.float32)
-        log_b = torch.full((M,), -math.log(M), device=self.device, dtype=torch.float32)
+        log_a = torch.full((N,), -math.log(N), device=self.device, dtype=torch.float32)  # (N,)
+        log_b = torch.full((M,), -math.log(M), device=self.device, dtype=torch.float32)  # (M,)
 
         device_type = "cuda" if self.device.type == "cuda" else "cpu"
         with torch.amp.autocast(device_type=device_type, enabled=False):
             # MEMORY OPTIMIZATION: We still materialize log_K here, but at least
             # we've gated entry to this function via max_tensor_size_elements check.
             # For truly large problems, the blockwise path should be taken.
-            log_K = -C / float(eps)
+            log_K = -C / float(eps)  # (N, M)
 
-            lu = torch.zeros(N, device=self.device, dtype=torch.float32)
-            lv = torch.zeros(M, device=self.device, dtype=torch.float32)
+            lu = torch.zeros(N, device=self.device, dtype=torch.float32)  # (N,)
+            lv = torch.zeros(M, device=self.device, dtype=torch.float32)  # (M,)
 
             for _ in range(n_iter):
-                lu = log_a - torch.logsumexp(log_K + lv[None, :], dim=1)
-                lv = log_b - torch.logsumexp(log_K.T + lu[None, :], dim=1)
+                lu = log_a - torch.logsumexp(log_K + lv[None, :], dim=1)  # (N,)
+                lv = log_b - torch.logsumexp(log_K.T + lu[None, :], dim=1)  # (M,)
 
         if not (torch.isfinite(lu).all() and torch.isfinite(lv).all()):
             logger.warning(
                 "Non-finite Sinkhorn duals (eps=%s), using identity fallback - may affect quality", eps
             )
-            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)
-            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)
+            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)  # (N,)
+            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)  # (M,)
             return log_u, log_v
 
         return lu, lv
 
-    def _sinkhorn_blockwise(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
-        x = x.to(device=self.device, dtype=torch.float32)
-        y = y.to(device=self.device, dtype=torch.float32)
+    def _sinkhorn_blockwise(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = x.to(device=self.device, dtype=torch.float32)  # (N, D)
+        y = y.to(device=self.device, dtype=torch.float32)  # (M, D)
 
         N, M = x.size(0), y.size(0)
-        log_a = torch.full((N,), -math.log(max(N, 1)), device=self.device, dtype=torch.float32)
-        log_b = torch.full((M,), -math.log(max(M, 1)), device=self.device, dtype=torch.float32)
+        log_a = torch.full((N,), -math.log(max(N, 1)), device=self.device, dtype=torch.float32)  # (N,)
+        log_b = torch.full((M,), -math.log(max(M, 1)), device=self.device, dtype=torch.float32)  # (M,)
 
-        log_u = torch.zeros_like(log_a)
-        log_v = torch.zeros_like(log_b)
+        log_u = torch.zeros_like(log_a)  # (N,)
+        log_v = torch.zeros_like(log_b)  # (M,)
 
         threshold = max(self.config.blockwise_threshold, 1)
         row_block = max(128, min(N, int(math.sqrt(threshold))))
@@ -213,51 +218,53 @@ class OptimizedSinkhornKernel:
         dtype = torch.float32
         size_primary = x_primary.size(0)
 
-        updated = torch.empty(size_primary, device=device, dtype=dtype)
+        updated = torch.empty(size_primary, device=device, dtype=dtype)  # (N,)
 
         for i_start in range(0, size_primary, primary_block):
             i_end = min(i_start + primary_block, size_primary)
-            primary_chunk = x_primary[i_start:i_end]
-            marginal_chunk = log_marginal[i_start:i_end]
+            primary_chunk = x_primary[i_start:i_end]  # (B, D)
+            marginal_chunk = log_marginal[i_start:i_end]  # (B,)
 
-            accumulator = torch.full((i_end - i_start,), -float("inf"), device=device, dtype=dtype)
+            accumulator = torch.full((i_end - i_start,), -float("inf"), device=device, dtype=dtype)  # (B,)
 
             for j_start in range(0, x_secondary.size(0), secondary_block):
                 j_end = min(j_start + secondary_block, x_secondary.size(0))
-                secondary_chunk = x_secondary[j_start:j_end]
-                dual_chunk = log_dual_secondary[j_start:j_end]
+                secondary_chunk = x_secondary[j_start:j_end]  # (M, D)
+                dual_chunk = log_dual_secondary[j_start:j_end]  # (M,)
 
-                C_chunk = torch.cdist(primary_chunk, secondary_chunk, p=2).pow(2)
-                log_kernel = -C_chunk / eps + dual_chunk[None, :]
+                C_chunk = torch.cdist(primary_chunk, secondary_chunk, p=2).pow(2)  # (B, M)
+                log_kernel = -C_chunk / eps + dual_chunk[None, :]  # (B, M)
 
-                accumulator = torch.logaddexp(accumulator, torch.logsumexp(log_kernel, dim=1))
+                accumulator = torch.logaddexp(accumulator, torch.logsumexp(log_kernel, dim=1))  # (B,)
 
-            updated[i_start:i_end] = marginal_chunk - accumulator
+            updated[i_start:i_end] = marginal_chunk - accumulator  # (B,)
 
         return updated
 
-    def _sinkhorn_triton(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
+    def _sinkhorn_triton(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Triton-accelerated Sinkhorn with log-stabilization."""
         N, M = x.size(0), y.size(0)
 
         # Handle degenerate case where N=0 or M=0
         if N == 0 or M == 0:
             logger.warning("Triton Sinkhorn called with empty tensor (N=%d, M=%d), returning NaN duals", N, M)
-            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)
-            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)
+            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)  # (N,)
+            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)  # (M,)
             return log_u, log_v
 
         # Initialize log marginals
-        log_a = torch.full((N,), -math.log(N), device=self.device, dtype=torch.float32)
-        log_b = torch.full((M,), -math.log(M), device=self.device, dtype=torch.float32)
+        log_a = torch.full((N,), -math.log(N), device=self.device, dtype=torch.float32)  # (N,)
+        log_b = torch.full((M,), -math.log(M), device=self.device, dtype=torch.float32)  # (M,)
 
         # Initialize dual variables in log space
-        log_u = torch.zeros(N, device=self.device, dtype=torch.float32)
-        log_v = torch.zeros(M, device=self.device, dtype=torch.float32)
+        log_u = torch.zeros(N, device=self.device, dtype=torch.float32)  # (N,)
+        log_v = torch.zeros(M, device=self.device, dtype=torch.float32)  # (M,)
 
         # Precompute squared norms for efficiency
-        x_sq = (x.float() * x.float()).sum(dim=1)
-        y_sq = (y.float() * y.float()).sum(dim=1)
+        x_sq = (x.float() * x.float()).sum(dim=1)  # (N,)
+        y_sq = (y.float() * y.float()).sum(dim=1)  # (M,)
 
         # Sinkhorn iterations using Triton
         # Note: triton_sinkhorn_update is guaranteed non-None here because
@@ -282,13 +289,15 @@ class OptimizedSinkhornKernel:
         # Check for numerical issues
         if not (torch.isfinite(log_u).all() and torch.isfinite(log_v).all()):
             logger.warning("Non-finite Sinkhorn duals with Triton (eps=%s), using identity fallback", eps)
-            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)
-            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)
+            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)  # (N,)
+            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)  # (M,)
             return log_u, log_v
 
         return log_u, log_v
 
-    def _sinkhorn_pot(self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int):
+    def _sinkhorn_pot(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float, n_iter: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         import ot  # Local import to ensure optional dependency is available when needed
 
         N, M = x.size(0), y.size(0)
@@ -296,17 +305,17 @@ class OptimizedSinkhornKernel:
         # Handle degenerate case where N=0 or M=0
         if N == 0 or M == 0:
             logger.warning("POT Sinkhorn called with empty tensor (N=%d, M=%d), returning NaN duals", N, M)
-            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)
-            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)
+            log_u = torch.full((N,), float("nan"), device=self.device, dtype=torch.float32)  # (N,)
+            log_v = torch.full((M,), float("nan"), device=self.device, dtype=torch.float32)  # (M,)
             return log_u, log_v
 
-        x_np = x.detach().cpu().float().numpy()
-        y_np = y.detach().cpu().float().numpy()
+        x_np = x.detach().cpu().float().numpy()  # (N, D)
+        y_np = y.detach().cpu().float().numpy()  # (M, D)
 
-        a = np.ones(N, dtype=np.float32) / N
-        b = np.ones(M, dtype=np.float32) / M
+        a = np.ones(N, dtype=np.float32) / N  # (N,)
+        b = np.ones(M, dtype=np.float32) / M  # (M,)
 
-        C = np.sum((x_np[:, None, :] - y_np[None, :, :]) ** 2, axis=2)
+        C = np.sum((x_np[:, None, :] - y_np[None, :, :]) ** 2, axis=2)  # (N, M)
 
         P, log = ot.sinkhorn(a, b, C, eps, numItermax=n_iter, log=True)
 
@@ -324,11 +333,11 @@ class OptimizedSinkhornKernel:
                 v_np = np.ones_like(b)
             log_v_np = np.log(np.clip(v_np, np.finfo(np.float32).tiny, None))
 
-        log_u = torch.from_numpy(log_u_np.astype(np.float32)).to(self.device)
-        log_v = torch.from_numpy(log_v_np.astype(np.float32)).to(self.device)
+        log_u = torch.from_numpy(log_u_np.astype(np.float32)).to(self.device)  # (N,)
+        log_v = torch.from_numpy(log_v_np.astype(np.float32)).to(self.device)  # (M,)
 
         return log_u, log_v
 
-    def cleanup_cache(self):
+    def cleanup_cache(self) -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

@@ -7,7 +7,7 @@ This module provides optimized GPU kernels for:
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -34,21 +34,21 @@ NUMERICAL_STABILITY_EPSILON = 1e-12
 if TRITON_AVAILABLE:
     @triton.jit
     def _sinkhorn_logsumexp_kernel(
-        x_ptr,
-        y_ptr,
-        log_other_ptr,
-        log_target_ptr,
-        out_ptr,
-        x_sq_ptr,
-        y_sq_ptr,
-        n_rows,
-        n_cols,
-        dim,
-        eps,
+        x_ptr: Any,
+        y_ptr: Any,
+        log_other_ptr: Any,
+        log_target_ptr: Any,
+        out_ptr: Any,
+        x_sq_ptr: Any,
+        y_sq_ptr: Any,
+        n_rows: Any,
+        n_cols: Any,
+        dim: Any,
+        eps: Any,
         BLOCK_ROWS: tl.constexpr,
         BLOCK_COLS: tl.constexpr,
         BLOCK_DIM: tl.constexpr,
-    ):
+    ) -> None:
         """Fused Sinkhorn logsumexp kernel with cost computation."""
         row_pid = tl.program_id(axis=0)
         row_start = row_pid * BLOCK_ROWS
@@ -114,19 +114,19 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def _fused_cost_softmax_kernel(
-        x_ptr,
-        y_ptr,
-        x_sq_ptr,
-        y_sq_ptr,
-        out_ptr,
-        n_rows,
-        n_cols,
-        dim,
-        eps,
+        x_ptr: Any,
+        y_ptr: Any,
+        x_sq_ptr: Any,
+        y_sq_ptr: Any,
+        out_ptr: Any,
+        n_rows: Any,
+        n_cols: Any,
+        dim: Any,
+        eps: Any,
         BLOCK_ROWS: tl.constexpr,
         BLOCK_COLS: tl.constexpr,
         BLOCK_DIM: tl.constexpr,
-    ):
+    ) -> None:
         """Fused cost computation and softmax kernel.
 
         IMPORTANT: This kernel only works correctly when ALL columns fit in a single tile
@@ -242,12 +242,12 @@ def triton_sinkhorn_update(
 
     # Precompute squared norms if not provided
     if precomputed_sq is None:
-        x_sq = (x * x).sum(dim=1)
-        y_sq = (y * y).sum(dim=1)
+        x_sq = (x * x).sum(dim=1)  # (N,)
+        y_sq = (y * y).sum(dim=1)  # (M,)
     else:
         x_sq, y_sq = precomputed_sq
 
-    out = torch.empty_like(log_target, dtype=torch.float32)
+    out = torch.empty_like(log_target, dtype=torch.float32)  # (N,)
 
     n_rows = x.shape[0]
     n_cols = y.shape[0]
@@ -317,14 +317,14 @@ def fused_cost_softmax(
     x = x.float()
     y = y.float()
 
-    x_sq = (x * x).sum(dim=1)
-    y_sq = (y * y).sum(dim=1)
+    x_sq = (x * x).sum(dim=1)  # (N,)
+    y_sq = (y * y).sum(dim=1)  # (M,)
 
     n_rows = x.shape[0]
     n_cols = y.shape[0]
     dim = x.shape[1]
 
-    out = torch.empty((n_rows, n_cols), device=x.device, dtype=torch.float32)
+    out = torch.empty((n_rows, n_cols), device=x.device, dtype=torch.float32)  # (N, M)
 
     # Cap block sizes at 64 for numerical stability and compatibility
     BLOCK_ROWS = min(64, max(16, tile_size))
@@ -336,8 +336,8 @@ def fused_cost_softmax(
     # fall back to PyTorch to avoid incorrect softmax computation across tiles.
     if n_cols > BLOCK_COLS:
         # Fallback to numerically stable PyTorch implementation
-        cost = (x_sq[:, None] + y_sq[None, :] - 2.0 * (x @ y.T)) / eps
-        return torch.softmax(-cost, dim=1)
+        cost = (x_sq[:, None] + y_sq[None, :] - 2.0 * (x @ y.T)) / eps  # (N, D) @ (D, M) -> (N, M)
+        return torch.softmax(-cost, dim=1)  # (N, M)
 
     # Assertion: Verify we can process all columns in one tile
     # This should always pass due to the fallback above, but serves as a safety check

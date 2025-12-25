@@ -6,7 +6,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -76,12 +76,12 @@ class ProductionSPOTSolver:
     
     def __init__(
         self,
-        score_model,
+        score_model: torch.nn.Module,
         noise_schedule: Optional[NoiseScheduleProtocol] = None,
         config: Optional[SolverConfig] = None,
         device: Optional[torch.device] = None,
-        compute_dtype: Optional[torch.dtype] = None
-    ):
+        compute_dtype: Optional[torch.dtype] = None,
+    ) -> None:
         """Initialize SPOT solver with unified schedule semantics.
         
         Args:
@@ -189,12 +189,12 @@ class ProductionSPOTSolver:
         # Validate score model signature
         try:
             with torch.no_grad():
-                test_x = torch.randn(1, 3, 8, 8, device=self.device, dtype=self.dtype)
+                test_x = torch.randn(1, 3, 8, 8, device=self.device, dtype=self.dtype)  # (B=1, C=3, H=8, W=8)
                 if self.config.timestep_shape_b1:
-                    test_t = torch.full((1, 1), 0.5, device=self.device, dtype=torch.float32)
+                    test_t = torch.full((1, 1), 0.5, device=self.device, dtype=torch.float32)  # (B, 1)
                 else:
-                    test_t = torch.full((1,), 0.5, device=self.device, dtype=torch.float32)
-                test_out = self.score_model(test_x, test_t)
+                    test_t = torch.full((1,), 0.5, device=self.device, dtype=torch.float32)  # (B,)
+                test_out = self.score_model(test_x, test_t)  # (B, C, H, W)
                 if test_out.shape != test_x.shape:
                     raise ValueError(f"Score model output shape {test_out.shape} doesn't match input {test_x.shape}")
         except Exception as e:
@@ -298,12 +298,12 @@ class ProductionSPOTSolver:
 
         logger.info(f"SPOT {__version__} initialized (compute_dtype={self.dtype})")
 
-    def _increment_fallback(self):
+    def _increment_fallback(self) -> None:
         """Thread-safe fallback counter increment."""
         with self._state_lock:
             self.fallback_count += 1
     
-    def _enable_tf32_internal(self):
+    def _enable_tf32_internal(self) -> None:
         """Internal method to enable TF32 settings."""
         try:
             self._original_tf32_matmul = torch.backends.cuda.matmul.allow_tf32
@@ -321,7 +321,7 @@ class ProductionSPOTSolver:
         except Exception as e:
             logger.warning(f"Could not enable TF32: {e}")
     
-    def _restore_tf32_settings(self):
+    def _restore_tf32_settings(self) -> None:
         """Restore original TF32 settings."""
         if not self._tf32_enabled:
             return
@@ -350,7 +350,7 @@ class ProductionSPOTSolver:
         self._tf32_enabled = False
     
     @contextmanager
-    def tf32_context(self):
+    def tf32_context(self) -> Iterator[None]:
         """Context manager for safe TF32 usage."""
         if not torch.cuda.is_available():
             yield
@@ -375,7 +375,7 @@ class ProductionSPOTSolver:
                 torch.set_float32_matmul_precision(original_prec)
     
     @contextmanager
-    def _deterministic_context(self):
+    def _deterministic_context(self) -> Iterator[None]:
         """Context manager for deterministic mode without permanent global state mutation."""
         if not self.config.deterministic:
             yield
@@ -428,7 +428,7 @@ class ProductionSPOTSolver:
                 logger.debug(f"Could not fully restore deterministic settings: {e}")
     
     @contextmanager
-    def memory_profiler(self):
+    def memory_profiler(self) -> Iterator[None]:
         """Context manager for memory profiling."""
         if not self.config.profile_memory or not torch.cuda.is_available():
             yield
@@ -452,13 +452,13 @@ class ProductionSPOTSolver:
         if self._model_outputs_score:
             return model_output
 
-        alpha, sigma = self.noise_schedule.alpha_sigma(t_tensor)
-        sigma = sigma.to(model_output.dtype)
+        alpha, sigma = self.noise_schedule.alpha_sigma(t_tensor)  # (B,) or (B,1)
+        sigma = sigma.to(model_output.dtype)  # (B,)
 
         while sigma.ndim < model_output.ndim:
-            sigma = sigma.unsqueeze(-1)
+            sigma = sigma.unsqueeze(-1)  # (B, 1, 1, 1)
 
-        return -model_output / torch.clamp(sigma, min=EPSILON_CLAMP)
+        return -model_output / torch.clamp(sigma, min=EPSILON_CLAMP)  # (B, *S)
 
     def _apply_memory_format_to_module(self, module: torch.nn.Module) -> None:
         if self._memory_format != torch.channels_last:
@@ -478,7 +478,7 @@ class ProductionSPOTSolver:
 
     def _format_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         if self._memory_format == torch.channels_last and tensor.dim() == 4:
-            return tensor.contiguous(memory_format=torch.channels_last)
+            return tensor.contiguous(memory_format=torch.channels_last)  # (B, C, H, W)
         return tensor
 
     def _ensure_patch_transport(self, patch_size: int) -> None:
@@ -547,21 +547,21 @@ class ProductionSPOTSolver:
 
         try:
             warmup_shape = tuple(shape)
-            dummy = torch.zeros(warmup_shape, device=self.device, dtype=self.dtype)
-            dummy = self._format_tensor(dummy)
+            dummy = torch.zeros(warmup_shape, device=self.device, dtype=self.dtype)  # (B, *S)
+            dummy = self._format_tensor(dummy)  # (B, *S)
             if self.config.timestep_shape_b1:
-                t = torch.zeros((warmup_shape[0], 1), device=self.device, dtype=torch.float32)
+                t = torch.zeros((warmup_shape[0], 1), device=self.device, dtype=torch.float32)  # (B, 1)
             else:
-                t = torch.zeros((warmup_shape[0],), device=self.device, dtype=torch.float32)
+                t = torch.zeros((warmup_shape[0],), device=self.device, dtype=torch.float32)  # (B,)
             with torch.inference_mode():
-                self.score_model(dummy, t)
+                self.score_model(dummy, t)  # (B, *S)
             logger.debug("Completed torch.compile warmup run")
         except Exception as exc:
             logger.warning(f"Warmup invocation failed: {exc}")
         finally:
             self._compile_warmup_done = True
 
-    def _compute_score_optimized(self, x, t):
+    def _compute_score_optimized(self, x: torch.Tensor, t: float) -> torch.Tensor:
         """Compute score with gradient safety checks."""
         if x.numel() > self.config.max_tensor_size_elements:
             raise ValueError(f"Input tensor too large: {x.numel()}")
@@ -570,22 +570,22 @@ class ProductionSPOTSolver:
             raise RuntimeError("Score computation requires inference mode (x.requires_grad must be False)")
         
         if self.config.timestep_shape_b1:
-            t_tensor = torch.full((x.size(0), 1), float(t), device=x.device, dtype=torch.float32)
+            t_tensor = torch.full((x.size(0), 1), float(t), device=x.device, dtype=torch.float32)  # (B, 1)
         else:
-            t_tensor = torch.full((x.size(0),), float(t), device=x.device, dtype=torch.float32)
+            t_tensor = torch.full((x.size(0),), float(t), device=x.device, dtype=torch.float32)  # (B,)
         
         if t_tensor.requires_grad:
             raise RuntimeError("Score computation requires inference mode (t.requires_grad must be False)")
         
-        x_in = self._format_tensor(x)
+        x_in = self._format_tensor(x)  # (B, *S)
 
         with torch.amp.autocast(**self._autocast_kwargs):
-            model_out = self.score_model(x_in, t_tensor)
+            model_out = self.score_model(x_in, t_tensor)  # (B, *S)
 
-        score = self._convert_model_output_to_score(model_out, t_tensor)
-        return score.to(x.dtype)
+        score = self._convert_model_output_to_score(model_out, t_tensor)  # (B, *S)
+        return score.to(x.dtype)  # (B, *S)
     
-    def _should_use_richardson(self, score):
+    def _should_use_richardson(self, score: torch.Tensor) -> bool:
         """Determine if Richardson extrapolation should be used."""
         if not hasattr(self._thread_local, 'richardson_state'):
             self._thread_local.richardson_state = {
@@ -610,9 +610,9 @@ class ProductionSPOTSolver:
             state['prev_score'] = score.clone().detach()
             return False
         
-        score_diff = score - state['prev_score']
-        score_change = torch.norm(score_diff.float()).item()
-        score_norm = torch.norm(score.float()).item()
+        score_diff = score - state['prev_score']  # (B, *S)
+        score_change = torch.norm(score_diff.float()).item()  # scalar
+        score_norm = torch.norm(score.float()).item()  # scalar
         normalized_change = score_change / (score_norm + EPSILON_CLAMP) / math.sqrt(score.numel())
         
         state['score_change_history'].append(normalized_change)
@@ -624,26 +624,28 @@ class ProductionSPOTSolver:
         
         return False
     
-    def _suggest_eps(self, X, Y, base):
+    def _suggest_eps(self, X: torch.Tensor, Y: torch.Tensor, base: float) -> float:
         """Data-scaled epsilon suggestion."""
         with torch.no_grad():
             sample = min(2048, X.shape[0], Y.shape[0])
-            Xi = X[:sample].float()
-            Yi = Y[:sample].float()
-            C = torch.cdist(Xi, Yi, p=2).pow(2)
-            med = torch.median(C).item()
+            Xi = X[:sample].float()  # (S, D)
+            Yi = Y[:sample].float()  # (S, D)
+            C = torch.cdist(Xi, Yi, p=2).pow(2)  # (S, S)
+            med = torch.median(C).item()  # scalar
         return max(EPSILON_MIN, base * (med + 1e-12))
     
-    def _per_sample_pixel_transport(self, xb, yb, eps):
+    def _per_sample_pixel_transport(
+        self, xb: torch.Tensor, yb: torch.Tensor, eps: float
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
         """Per-pixel transport treating pixels as points in color space."""
         if eps < EPSILON_MIN:
             logger.debug(f"Epsilon too small ({eps:.2e}) in per-pixel transport, using identity")
             return lambda z: z
         
-        _, C, H, W = xb.shape
+        _, C, H, W = xb.shape  # (B=1, C, H, W)
         
-        X = xb.permute(0, 2, 3, 1).reshape(-1, C)
-        Y = yb.permute(0, 2, 3, 1).reshape(-1, C)
+        X = xb.permute(0, 2, 3, 1).reshape(-1, C)  # (H*W, C)
+        Y = yb.permute(0, 2, 3, 1).reshape(-1, C)  # (H*W, C)
         
         if self.config.adaptive_eps_scale == 'data':
             eps = self._suggest_eps(X, Y, eps)
@@ -678,7 +680,7 @@ class ProductionSPOTSolver:
         
         log_u, log_v = self.sinkhorn_kernel.sinkhorn_log_stabilized(
             X, Y, eps, n_iter=self.config.sinkhorn_iterations
-        )
+        )  # (H*W,), (H*W,)
 
         if not (torch.isfinite(log_u).all() and torch.isfinite(log_v).all()):
             logger.debug("Per-pixel Sinkhorn failed, using identity transport")
@@ -691,20 +693,20 @@ class ProductionSPOTSolver:
             with torch.amp.autocast(device_type='cuda' if X.is_cuda else 'cpu', enabled=False):
                 if not needs_blockwise:
                     if self.config.deterministic_cdist_cpu and X.is_cuda:
-                        X_cpu = X.float().cpu()
-                        Y_cpu = Y.float().cpu()
-                        C_xy = torch.cdist(X_cpu, Y_cpu, p=2).pow(2).to(X.device)
+                        X_cpu = X.float().cpu()  # (N, C)
+                        Y_cpu = Y.float().cpu()  # (N, C)
+                        C_xy = torch.cdist(X_cpu, Y_cpu, p=2).pow(2).to(X.device)  # (N, N)
                     else:
-                        C_xy = torch.cdist(X.float(), Y.float(), p=2).pow(2)
-                    S = -C_xy / eps
-                    log_weights = log_u.float()[:, None] + S + log_v.float()[None, :]
-                    row_max = log_weights.max(dim=1, keepdim=True).values
-                    weights = torch.exp(log_weights - row_max)
-                    rows = weights.sum(1, keepdim=True).clamp_min(ROW_SUM_MIN)
-                    Ybar = (weights @ Y.float()) / rows
+                        C_xy = torch.cdist(X.float(), Y.float(), p=2).pow(2)  # (N, N)
+                    S = -C_xy / eps  # (N, N)
+                    log_weights = log_u.float()[:, None] + S + log_v.float()[None, :]  # (N, N)
+                    row_max = log_weights.max(dim=1, keepdim=True).values  # (N, 1)
+                    weights = torch.exp(log_weights - row_max)  # (N, N)
+                    rows = weights.sum(1, keepdim=True).clamp_min(ROW_SUM_MIN)  # (N, 1)
+                    Ybar = (weights @ Y.float()) / rows  # (N, N) @ (N, C) -> (N, C)
                 else:
-                    Ybar = torch.zeros_like(X, dtype=torch.float32)
-                    log_u32, log_v32 = log_u.float(), log_v.float()
+                    Ybar = torch.zeros_like(X, dtype=torch.float32)  # (N, C)
+                    log_u32, log_v32 = log_u.float(), log_v.float()  # (N,), (N,)
 
                     memory_ratio = min(1.0, max_elems / 50_000_000)
                     optimal_block = int(MAX_BLOCK_SIZE * (1 + memory_ratio))
@@ -712,64 +714,72 @@ class ProductionSPOTSolver:
 
                     Y_cpu = Y.float().cpu() if (self.config.deterministic_cdist_cpu and X.is_cuda) else None
 
-                    row_max = torch.full((n_pixels, 1), -torch.inf, device=X.device, dtype=torch.float32)
-                    row_sum = torch.zeros((n_pixels, 1), device=X.device, dtype=torch.float32)
+                    row_max = torch.full((n_pixels, 1), -torch.inf, device=X.device, dtype=torch.float32)  # (N, 1)
+                    row_sum = torch.zeros((n_pixels, 1), device=X.device, dtype=torch.float32)  # (N, 1)
 
                     for i in range(0, n_pixels, block_size):
                         end_i = min(i + block_size, n_pixels)
-                        X_block = X[i:end_i].float()
+                        X_block = X[i:end_i].float()  # (B, C)
 
                         if Y_cpu is not None:
                             X_block_cpu = X_block.cpu()
-                            C_block = torch.cdist(X_block_cpu, Y_cpu, p=2).pow(2).to(X.device)
+                            C_block = torch.cdist(X_block_cpu, Y_cpu, p=2).pow(2).to(X.device)  # (B, N)
                         else:
-                            C_block = torch.cdist(X_block, Y.float(), p=2).pow(2)
+                            C_block = torch.cdist(X_block, Y.float(), p=2).pow(2)  # (B, N)
                         
-                        S_block = -C_block / eps
-                        log_weights = log_u32[i:end_i, None] + S_block + log_v32[None, :]
-                        block_max = log_weights.max(dim=1, keepdim=True).values
-                        weights = torch.exp(log_weights - block_max)
-                        block_sum = weights.sum(dim=1, keepdim=True)
-                        block_num = weights @ Y.float()
+                        S_block = -C_block / eps  # (B, N)
+                        log_weights = log_u32[i:end_i, None] + S_block + log_v32[None, :]  # (B, N)
+                        block_max = log_weights.max(dim=1, keepdim=True).values  # (B, 1)
+                        weights = torch.exp(log_weights - block_max)  # (B, N)
+                        block_sum = weights.sum(dim=1, keepdim=True)  # (B, 1)
+                        block_num = weights @ Y.float()  # (B, N) @ (N, C) -> (B, C)
 
-                        new_max = torch.maximum(row_max[i:end_i], block_max)
-                        existing_scale = torch.exp(row_max[i:end_i] - new_max)
-                        block_scale = torch.exp(block_max - new_max)
+                        new_max = torch.maximum(row_max[i:end_i], block_max)  # (B, 1)
+                        existing_scale = torch.exp(row_max[i:end_i] - new_max)  # (B, 1)
+                        block_scale = torch.exp(block_max - new_max)  # (B, 1)
 
-                        row_sum[i:end_i] = row_sum[i:end_i] * existing_scale + block_sum * block_scale
-                        Ybar[i:end_i] = Ybar[i:end_i] * existing_scale + block_num * block_scale
+                        row_sum[i:end_i] = row_sum[i:end_i] * existing_scale + block_sum * block_scale  # (B, 1)
+                        Ybar[i:end_i] = Ybar[i:end_i] * existing_scale + block_num * block_scale  # (B, C)
                         row_max[i:end_i] = new_max
 
-                    rows = row_sum.clamp_min(ROW_SUM_MIN)
-                    Ybar = Ybar / rows
+                    rows = row_sum.clamp_min(ROW_SUM_MIN)  # (N, 1)
+                    Ybar = Ybar / rows  # (N, C)
 
-        def transport_map(zb):
-            Z = zb.permute(0, 2, 3, 1).reshape(-1, C)
+        def transport_map(zb: torch.Tensor) -> torch.Tensor:
+            Z = zb.permute(0, 2, 3, 1).reshape(-1, C)  # (H*W, C)
 
             if needs_blockwise:
                 memory_ratio = min(1.0, max_elems / 50_000_000)
                 optimal_block = int(MAX_BLOCK_SIZE * (1 + memory_ratio))
                 bs = max(MIN_BLOCK_SIZE, min(optimal_block, int(max_elems // max(1, n_pixels))))
-                Z_next = blockwise_soft_assignment(Z, X, eps, Ybar, block_size=bs, 
-                                                   deterministic_cdist_cpu=self.config.deterministic_cdist_cpu)
+                Z_next = blockwise_soft_assignment(
+                    Z,
+                    X,
+                    eps,
+                    Ybar,
+                    block_size=bs,
+                    deterministic_cdist_cpu=self.config.deterministic_cdist_cpu,
+                )  # (H*W, C)
             else:
                 with torch.no_grad():
                     with torch.amp.autocast(device_type='cuda' if Z.is_cuda else 'cpu', enabled=False):
                         if self.config.deterministic_cdist_cpu and Z.is_cuda:
-                            Z_cpu = Z.float().cpu()
-                            X_cpu = X.float().cpu()
-                            C_zx = torch.cdist(Z_cpu, X_cpu, p=2).pow(2).to(Z.device)
+                            Z_cpu = Z.float().cpu()  # (N, C)
+                            X_cpu = X.float().cpu()  # (N, C)
+                            C_zx = torch.cdist(Z_cpu, X_cpu, p=2).pow(2).to(Z.device)  # (N, N)
                         else:
-                            C_zx = torch.cdist(Z.float(), X.float(), p=2).pow(2)
-                        S = -C_zx / eps
-                        S = S - S.max(dim=1, keepdim=True)[0]
-                        Z_next = (torch.softmax(S, dim=1) @ Ybar).to(Z.dtype)
+                            C_zx = torch.cdist(Z.float(), X.float(), p=2).pow(2)  # (N, N)
+                        S = -C_zx / eps  # (N, N)
+                        S = S - S.max(dim=1, keepdim=True)[0]  # (N, N)
+                        Z_next = (torch.softmax(S, dim=1) @ Ybar).to(Z.dtype)  # (N, N) @ (N, C) -> (N, C)
             
-            return Z_next.view(1, H, W, C).permute(0, 3, 1, 2).contiguous()
+            return Z_next.view(1, H, W, C).permute(0, 3, 1, 2).contiguous()  # (1, C, H, W)
         
         return transport_map
     
-    def _standard_transport(self, x, y, eps):
+    def _standard_transport(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
         """Standard transport with per-pixel OT."""
         B = x.size(0)
         
@@ -778,26 +788,28 @@ class ProductionSPOTSolver:
         
         transport_maps = []
         for b in range(B):
-            xb = x[b:b+1]
-            yb = y[b:b+1]
+            xb = x[b:b+1]  # (1, C, H, W)
+            yb = y[b:b+1]  # (1, C, H, W)
             transport_maps.append(self._per_sample_pixel_transport(xb, yb, eps))
         
-        def batched_transport(z):
+        def batched_transport(z: torch.Tensor) -> torch.Tensor:
             outputs = []
             for b, tm in enumerate(transport_maps):
-                outputs.append(tm(z[b:b+1]))
-            return torch.cat(outputs, dim=0)
+                outputs.append(tm(z[b:b+1]))  # (1, C, H, W)
+            return torch.cat(outputs, dim=0)  # (B, C, H, W)
         
         return batched_transport
     
-    def _standard_transport_fallback(self, x, y, eps):
+    def _standard_transport_fallback(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
         """Fallback for batch > 1 in patch transport."""
         B = x.size(0)
         
-        image_pairs = [(x[b:b+1], y[b:b+1]) for b in range(B)]
+        image_pairs = [(x[b:b+1], y[b:b+1]) for b in range(B)]  # (B, 1, C, H, W)
         cached_transports = [None] * B
         
-        def batched_transport(z):
+        def batched_transport(z: torch.Tensor) -> torch.Tensor:
             outputs = []
             for b in range(B):
                 if cached_transports[b] is None:
@@ -806,8 +818,8 @@ class ProductionSPOTSolver:
                     if z.dim() == 4:
                         cached_transports[b] = self._per_sample_pixel_transport(xb_img, yb_img, eps)
                     else:
-                        xb_flat = xb_img.reshape(xb_img.size(0), -1)
-                        yb_flat = yb_img.reshape(yb_img.size(0), -1)
+                        xb_flat = xb_img.reshape(xb_img.size(0), -1)  # (1, C*H*W)
+                        yb_flat = yb_img.reshape(yb_img.size(0), -1)  # (1, C*H*W)
 
                         if xb_flat.size(0) == 1 and yb_flat.size(0) == 1:
                             logger.warning("N=M=1 degenerate case, using identity fallback - may affect quality")
@@ -817,20 +829,28 @@ class ProductionSPOTSolver:
                             log_u, log_v = self.sinkhorn_kernel.sinkhorn_log_stabilized(
                                 xb_flat, yb_flat, eps,
                                 n_iter=self.config.sinkhorn_iterations
-                            )
+                            )  # (1,), (1,)
                             if not (torch.isfinite(log_u).all() and torch.isfinite(log_v).all()):
                                 self._increment_fallback()
                                 cached_transports[b] = lambda z: z
                             else:
                                 cached_transports[b] = self._create_transport_map(xb_flat, yb_flat, log_u, log_v, eps)
                 
-                outputs.append(cached_transports[b](z[b:b+1]))
+                outputs.append(cached_transports[b](z[b:b+1]))  # (1, C, H, W)
             
-            return torch.cat(outputs, dim=0)
+            return torch.cat(outputs, dim=0)  # (B, C, H, W)
         
         return batched_transport
     
-    def _create_transport_map(self, x, y, log_u, log_v, eps, allow_single_point=False):
+    def _create_transport_map(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        log_u: torch.Tensor,
+        log_v: torch.Tensor,
+        eps: float,
+        allow_single_point: bool = False,
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
         """Create transport map from dual variables with blockwise computation for large problems.
 
         Args:
@@ -850,8 +870,8 @@ class ProductionSPOTSolver:
             self._increment_fallback()
             return lambda z: z
 
-        xf = x.reshape(x.size(0), -1)
-        yf = y.reshape(y.size(0), -1)
+        xf = x.reshape(x.size(0), -1)  # (N, D)
+        yf = y.reshape(y.size(0), -1)  # (M, D)
 
         n, m = xf.size(0), yf.size(0)
 
@@ -862,7 +882,7 @@ class ProductionSPOTSolver:
             )
             self._increment_fallback()
             # Use pure identity for degenerate N=M=1 case
-            def identity_transport(z):
+            def identity_transport(z: torch.Tensor) -> torch.Tensor:
                 return z
             return identity_transport
         
@@ -903,22 +923,22 @@ class ProductionSPOTSolver:
             with torch.amp.autocast(device_type='cuda' if xf.is_cuda else 'cpu', enabled=False):
                 if not needs_blockwise:
                     if self.config.deterministic_cdist_cpu and xf.is_cuda:
-                        xf_cpu = xf.float().cpu()
-                        yf_cpu = yf.float().cpu()
-                        C_xy = torch.cdist(xf_cpu, yf_cpu, p=2).pow(2).to(xf.device)
+                        xf_cpu = xf.float().cpu()  # (N, D)
+                        yf_cpu = yf.float().cpu()  # (M, D)
+                        C_xy = torch.cdist(xf_cpu, yf_cpu, p=2).pow(2).to(xf.device)  # (N, M)
                     else:
-                        C_xy = torch.cdist(xf.float(), yf.float(), p=2).pow(2)
-                    S = -C_xy / eps
-                    log_weights = log_u.float()[:, None] + S + log_v.float()[None, :]
-                    row_max = log_weights.max(dim=1, keepdim=True).values
-                    weights = torch.exp(log_weights - row_max)
-                    row_sum = weights.sum(1, keepdim=True).clamp_min(ROW_SUM_MIN)
-                    Ybar = (weights @ yf.float()) / row_sum
+                        C_xy = torch.cdist(xf.float(), yf.float(), p=2).pow(2)  # (N, M)
+                    S = -C_xy / eps  # (N, M)
+                    log_weights = log_u.float()[:, None] + S + log_v.float()[None, :]  # (N, M)
+                    row_max = log_weights.max(dim=1, keepdim=True).values  # (N, 1)
+                    weights = torch.exp(log_weights - row_max)  # (N, M)
+                    row_sum = weights.sum(1, keepdim=True).clamp_min(ROW_SUM_MIN)  # (N, 1)
+                    Ybar = (weights @ yf.float()) / row_sum  # (N, M) @ (M, D) -> (N, D)
                 else:
-                    Ybar = torch.zeros_like(xf, dtype=torch.float32)
-                    row_sum = torch.zeros(n, 1, device=xf.device, dtype=torch.float32)
-                    log_u32, log_v32 = log_u.float(), log_v.float()
-                    row_max = torch.full((n, 1), -torch.inf, device=xf.device, dtype=torch.float32)
+                    Ybar = torch.zeros_like(xf, dtype=torch.float32)  # (N, D)
+                    row_sum = torch.zeros(n, 1, device=xf.device, dtype=torch.float32)  # (N, 1)
+                    log_u32, log_v32 = log_u.float(), log_v.float()  # (N,), (M,)
+                    row_max = torch.full((n, 1), -torch.inf, device=xf.device, dtype=torch.float32)  # (N, 1)
 
                     memory_ratio = min(1.0, max_elems / 50_000_000)
                     optimal_block = int(MAX_BLOCK_SIZE * (1 + memory_ratio))
@@ -928,34 +948,34 @@ class ProductionSPOTSolver:
 
                     for i in range(0, n, block_size):
                         end_i = min(i + block_size, n)
-                        xf_block = xf[i:end_i].float()
+                        xf_block = xf[i:end_i].float()  # (B, D)
 
                         if yf_cpu is not None:
                             xf_block_cpu = xf_block.cpu()
-                            C_block = torch.cdist(xf_block_cpu, yf_cpu, p=2).pow(2).to(xf.device)
+                            C_block = torch.cdist(xf_block_cpu, yf_cpu, p=2).pow(2).to(xf.device)  # (B, M)
                         else:
-                            C_block = torch.cdist(xf_block, yf.float(), p=2).pow(2)
-                        S_block = -C_block / eps
-                        log_weights = log_u32[i:end_i, None] + S_block + log_v32[None, :]
-                        block_max = log_weights.max(dim=1, keepdim=True).values
-                        weights = torch.exp(log_weights - block_max)
-                        block_sum = weights.sum(dim=1, keepdim=True)
-                        block_num = weights @ yf.float()
+                            C_block = torch.cdist(xf_block, yf.float(), p=2).pow(2)  # (B, M)
+                        S_block = -C_block / eps  # (B, M)
+                        log_weights = log_u32[i:end_i, None] + S_block + log_v32[None, :]  # (B, M)
+                        block_max = log_weights.max(dim=1, keepdim=True).values  # (B, 1)
+                        weights = torch.exp(log_weights - block_max)  # (B, M)
+                        block_sum = weights.sum(dim=1, keepdim=True)  # (B, 1)
+                        block_num = weights @ yf.float()  # (B, M) @ (M, D) -> (B, D)
 
-                        new_max = torch.maximum(row_max[i:end_i], block_max)
-                        existing_scale = torch.exp(row_max[i:end_i] - new_max)
-                        block_scale = torch.exp(block_max - new_max)
+                        new_max = torch.maximum(row_max[i:end_i], block_max)  # (B, 1)
+                        existing_scale = torch.exp(row_max[i:end_i] - new_max)  # (B, 1)
+                        block_scale = torch.exp(block_max - new_max)  # (B, 1)
 
-                        row_sum[i:end_i] = row_sum[i:end_i] * existing_scale + block_sum * block_scale
-                        Ybar[i:end_i] = Ybar[i:end_i] * existing_scale + block_num * block_scale
+                        row_sum[i:end_i] = row_sum[i:end_i] * existing_scale + block_sum * block_scale  # (B, 1)
+                        Ybar[i:end_i] = Ybar[i:end_i] * existing_scale + block_num * block_scale  # (B, D)
                         row_max[i:end_i] = new_max
 
-                    row_sum = row_sum.clamp_min(ROW_SUM_MIN)
-                    Ybar = Ybar / row_sum
+                    row_sum = row_sum.clamp_min(ROW_SUM_MIN)  # (N, 1)
+                    Ybar = Ybar / row_sum  # (N, D)
         
-        def transport_map(z):
+        def transport_map(z: torch.Tensor) -> torch.Tensor:
             try:
-                zf = z.reshape(z.size(0), -1)
+                zf = z.reshape(z.size(0), -1)  # (N, D)
                 
                 if needs_blockwise:
                     memory_ratio = min(1.0, max_elems / 50_000_000)
@@ -965,21 +985,21 @@ class ProductionSPOTSolver:
                         zf, xf, eps, Ybar, 
                         block_size=bs,
                         deterministic_cdist_cpu=self.config.deterministic_cdist_cpu
-                    )
+                    )  # (N, D)
                 else:
                     with torch.no_grad():
                         with torch.amp.autocast(device_type='cuda' if zf.is_cuda else 'cpu', enabled=False):
                             if self.config.deterministic_cdist_cpu and zf.is_cuda:
-                                zf_cpu = zf.float().cpu()
-                                xf_cpu = xf.float().cpu()
-                                C_zx = torch.cdist(zf_cpu, xf_cpu, p=2).pow(2).to(zf.device)
+                                zf_cpu = zf.float().cpu()  # (N, D)
+                                xf_cpu = xf.float().cpu()  # (M, D)
+                                C_zx = torch.cdist(zf_cpu, xf_cpu, p=2).pow(2).to(zf.device)  # (N, M)
                             else:
-                                C_zx = torch.cdist(zf.float(), xf.float(), p=2).pow(2)
-                            S = -C_zx / eps
-                            S = S - S.max(dim=1, keepdim=True)[0]
-                            z_next_flat = (torch.softmax(S, dim=1) @ Ybar).to(zf.dtype)
+                                C_zx = torch.cdist(zf.float(), xf.float(), p=2).pow(2)  # (N, M)
+                            S = -C_zx / eps  # (N, M)
+                            S = S - S.max(dim=1, keepdim=True)[0]  # (N, M)
+                            z_next_flat = (torch.softmax(S, dim=1) @ Ybar).to(zf.dtype)  # (N, M) @ (M, D) -> (N, D)
                 
-                return z_next_flat.reshape(z.shape)
+                return z_next_flat.reshape(z.shape)  # (B, *S)
                 
             except Exception as e:
                 logger.warning(
@@ -1008,8 +1028,15 @@ class ProductionSPOTSolver:
         return_stats: bool = False,
         output_dtype: Optional[torch.dtype] = torch.float32,
         use_result_dataclass: bool = False
-    ):
-        """Main sampling function with all fixes applied."""
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]], SamplingResult]:
+        """Main sampling function.
+
+        Args:
+            shape: Output tensor shape (B, C, H, W) or (B, ...).
+
+        Returns:
+            Samples with requested shape; optionally returns stats or a SamplingResult.
+        """
 
         # Input validation for better error messages
         if not isinstance(shape, (tuple, list)) or len(shape) < 3:
@@ -1061,10 +1088,10 @@ class ProductionSPOTSolver:
                     timesteps = self.dpm_solver.get_timesteps(num_steps, device=torch.device('cpu'))
                     
                     if generator is not None:
-                        x_t = torch.randn(shape, device=self.device, dtype=self.dtype, generator=generator)
+                        x_t = torch.randn(shape, device=self.device, dtype=self.dtype, generator=generator)  # (B, C, H, W)
                     else:
-                        x_t = torch.randn(shape, device=self.device, dtype=self.dtype)
-                    x_t = self._format_tensor(x_t)
+                        x_t = torch.randn(shape, device=self.device, dtype=self.dtype)  # (B, C, H, W)
+                    x_t = self._format_tensor(x_t)  # (B, C, H, W)
                     
                     model_outputs = deque(maxlen=self.dpm_solver.order)
                     
@@ -1092,42 +1119,42 @@ class ProductionSPOTSolver:
                         
                         score_start = time.time()
                         with self.memory_profiler():
-                            score = self._compute_score_optimized(x_t, t_curr)
+                            score = self._compute_score_optimized(x_t, t_curr)  # (B, C, H, W)
                         model_outputs.append(score)
                         self.timing_stats['score_eval'].append(time.time() - score_start)
                         
                         # Production release: Avoid redundant t_tensor computation
-                        def drift_fn(x, t):
-                            t_tensor = torch.full((1,), float(t), device=x.device, dtype=torch.float32)
+                        def drift_fn(x: torch.Tensor, t: float) -> torch.Tensor:
+                            t_tensor = torch.full((1,), float(t), device=x.device, dtype=torch.float32)  # (1,)
 
                             if abs(t - t_curr) < 1e-8:
                                 s = score
                             else:
                                 s = self._compute_score_optimized(x, t)
 
-                            beta_t = self.noise_schedule.beta(t_tensor).to(x.dtype)
+                            beta_t = self.noise_schedule.beta(t_tensor).to(x.dtype)  # (1,)
                             
                             # Probability-flow ODE drift: -0.5 * beta * x - beta * score
-                            return -0.5 * beta_t * x - beta_t * s
+                            return -0.5 * beta_t * x - beta_t * s  # (B, C, H, W)
                         
-                        def compute_eps_at(t_scalar):
+                        def compute_eps_at(t_scalar: float) -> float:
                             eps_base = self.config.eps
                             if self.config.adaptive_eps and self.config.adaptive_eps_scale == 'sigma':
-                                t_tensor = torch.full((1,), float(t_scalar), device=self.device, dtype=torch.float32)
-                                _, sigma_curr = self.noise_schedule.alpha_sigma(t_tensor)
+                                t_tensor = torch.full((1,), float(t_scalar), device=self.device, dtype=torch.float32)  # (1,)
+                                _, sigma_curr = self.noise_schedule.alpha_sigma(t_tensor)  # (1,)
                                 return max(EPSILON_MIN, eps_base * (float(sigma_curr.float().item()) + EPSILON_CLAMP))
                             return max(EPSILON_MIN, eps_base)
                         
-                        def _dpm_solver_predict(x_current):
-                            return self.dpm_solver.multistep_update(x_current, model_outputs, timesteps, i)
+                        def _dpm_solver_predict(x_current: torch.Tensor) -> torch.Tensor:
+                            return self.dpm_solver.multistep_update(x_current, model_outputs, timesteps, i)  # (B, C, H, W)
 
                         integration_start = time.time()
                         with self.memory_profiler():
                             # Choose integrator
                             if self.integrator is not None:
                                 # Use alternative integrator
-                                def score_fn_wrapper(x_val, t_val):
-                                    return self._compute_score_optimized(x_val, t_val)
+                                def score_fn_wrapper(x_val: torch.Tensor, t_val: float) -> torch.Tensor:
+                                    return self._compute_score_optimized(x_val, t_val)  # (B, C, H, W)
 
                                 # Different integrators have different interfaces
                                 # Guard isinstance checks for optional imports
@@ -1138,17 +1165,17 @@ class ProductionSPOTSolver:
                                 )
                                 if is_ddim:
                                     # DDIM needs generator for optional stochasticity
-                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper, generator)  # type: ignore[call-arg]
+                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper, generator)  # (B, C, H, W)
                                 elif hasattr(self.integrator, 'step'):
                                     # All other integrators (Heun, Exponential, Adaptive) use standard step interface
-                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper)
+                                    y_pred = self.integrator.step(x_t, t_curr, t_next, score_fn_wrapper)  # (B, C, H, W)
                                 else:
                                     # Fallback to DPM-Solver++ if integrator doesn't have step method
                                     logger.warning(f"Integrator {type(self.integrator).__name__} lacks step() method, using DPM-Solver++")
-                                    y_pred = _dpm_solver_predict(x_t)
+                                    y_pred = _dpm_solver_predict(x_t)  # (B, C, H, W)
                             else:
                                 # Use default DPM-Solver++
-                                y_pred = _dpm_solver_predict(x_t)
+                                y_pred = _dpm_solver_predict(x_t)  # (B, C, H, W)
 
                             # Apply optimal transport
                             eps = compute_eps_at(t_curr)
@@ -1156,12 +1183,12 @@ class ProductionSPOTSolver:
                             tm = (self._richardson_extrapolated_transport(x_t, y_pred, eps)
                                   if use_richardson and self._should_use_richardson(score)
                                   else self._standard_transport(x_t, y_pred, eps))
-                            x_t = tm(x_t)
+                            x_t = tm(x_t)  # (B, C, H, W)
 
                             # Apply corrector step if enabled
                             if self.corrector is not None:
-                                def score_fn_wrapper(x_val, t_val):
-                                    return self._compute_score_optimized(x_val, t_val)
+                                def score_fn_wrapper(x_val: torch.Tensor, t_val: float) -> torch.Tensor:
+                                    return self._compute_score_optimized(x_val, t_val)  # (B, C, H, W)
 
                                 # Guard isinstance checks for optional imports
                                 is_adaptive_corrector = (
@@ -1178,15 +1205,15 @@ class ProductionSPOTSolver:
                                 if is_adaptive_corrector:
                                     # Adaptive corrector needs previous sample for error estimation
                                     x_prev = y_pred if i > 0 else None
-                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, x_prev, generator)  # type: ignore[call-arg]
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, x_prev, generator)  # (B, C, H, W)
                                 elif is_tweedie_corrector:
                                     # Tweedie corrector doesn't need generator
-                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper)  # type: ignore[call-arg]
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper)  # (B, C, H, W)
                                 else:
                                     # Langevin corrector needs generator
-                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, generator)  # type: ignore[call-arg]
+                                    x_t = self.corrector.correct(x_t, t_next, score_fn_wrapper, generator)  # (B, C, H, W)
 
-                            x_t = self._format_tensor(x_t)
+                            x_t = self._format_tensor(x_t)  # (B, C, H, W)
 
                         self.timing_stats['integration'].append(time.time() - integration_start)
                         self.timing_stats['total_step'].append(time.time() - step_start)
@@ -1197,8 +1224,8 @@ class ProductionSPOTSolver:
                             iterator.set_postfix_str(f"t={t_next:.3f}, ETA={eta:.1f}s")
                     
                     if output_dtype is not None:
-                        x_t = x_t.to(output_dtype)
-                    x_t = self._format_tensor(x_t)
+                        x_t = x_t.to(output_dtype)  # (B, C, H, W)
+                    x_t = self._format_tensor(x_t)  # (B, C, H, W)
                     
                     stats = None
                     if return_stats or use_result_dataclass:
@@ -1224,7 +1251,9 @@ class ProductionSPOTSolver:
         finally:
             pass  # No config mutation to restore
     
-    def _richardson_extrapolated_transport(self, x, y, eps):
+    def _richardson_extrapolated_transport(
+        self, x: torch.Tensor, y: torch.Tensor, eps: float
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
         """Richardson extrapolation for unbiased OT with performance budget."""
         B = x.size(0)
         if B == 1 and self._patch_transport is not None and not self.config.force_per_pixel_b1:
@@ -1253,14 +1282,14 @@ class ProductionSPOTSolver:
         
         self.timing_stats['richardson_overhead'].append(overhead)
         
-        def extrapolated_transport(z):
-            t1 = transport1(z)
-            t2 = transport2(z)
-            return 2 * t2 - t1
+        def extrapolated_transport(z: torch.Tensor) -> torch.Tensor:
+            t1 = transport1(z)  # (B, *S)
+            t2 = transport2(z)  # (B, *S)
+            return 2 * t2 - t1  # (B, *S)
         
         return extrapolated_transport
     
-    def sample(self, *args, **kwargs):
+    def sample(self, *args: Any, **kwargs: Any) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]], SamplingResult]:
         """Deprecated: Use sample_enhanced() instead."""
         logger.warning("sample() is deprecated and will be removed in a future major release. Use sample_enhanced() instead.")
         return self.sample_enhanced(*args, **kwargs)
@@ -1281,7 +1310,7 @@ class ProductionSPOTSolver:
             self.config.deterministic_cdist_cpu = True
             self.config.richardson_extrapolation = False
 
-            t_vals = torch.linspace(0, 1, 10, device=self.device)
+            t_vals = torch.linspace(0, 1, 10, device=self.device)  # (T,)
 
             # Test 1: lambda(t) is always float32
             test_start = time.time()
@@ -1313,8 +1342,8 @@ class ProductionSPOTSolver:
 
             # Test 2: lambda(t) monotonicity
             test_start = time.time()
-            lambda_vals = torch.stack([self.noise_schedule.lambda_(float(t)) for t in t_vals]).squeeze(-1)
-            is_monotonic = torch.all(lambda_vals[:-1] >= lambda_vals[1:]).item()
+            lambda_vals = torch.stack([self.noise_schedule.lambda_(float(t)) for t in t_vals]).squeeze(-1)  # (T,)
+            is_monotonic = torch.all(lambda_vals[:-1] >= lambda_vals[1:]).item()  # scalar
             results["tests"]["lambda_monotonic"] = bool(is_monotonic)
             if not is_monotonic:
                 results["status"] = "failed"
@@ -1330,9 +1359,9 @@ class ProductionSPOTSolver:
 
             # Test 3: alpha^2 + sigma^2 ~= 1
             test_start = time.time()
-            alpha, sigma = self.noise_schedule.alpha_sigma(t_vals)
-            sum_squares = torch.square(alpha.float()) + torch.square(sigma.float())
-            max_error = (sum_squares - 1).abs().max().item()
+            alpha, sigma = self.noise_schedule.alpha_sigma(t_vals)  # (T,), (T,)
+            sum_squares = torch.square(alpha.float()) + torch.square(sigma.float())  # (T,)
+            max_error = (sum_squares - 1).abs().max().item()  # scalar
             test_passed = max_error < 1e-5
             results["tests"]["alpha_sigma_unity"] = bool(test_passed)
             results["tests"]["alpha_sigma_max_error"] = max_error
@@ -1353,9 +1382,9 @@ class ProductionSPOTSolver:
             test_start = time.time()
             shape = (1, 3, 32, 32)
 
-            x1 = self.sample_enhanced(shape, num_steps=2, verbose=False, seed=42)
-            x2 = self.sample_enhanced(shape, num_steps=2, verbose=False, seed=42)
-            is_deterministic = torch.allclose(x1, x2, atol=0, rtol=0)
+            x1 = self.sample_enhanced(shape, num_steps=2, verbose=False, seed=42)  # (1, 3, 32, 32)
+            x2 = self.sample_enhanced(shape, num_steps=2, verbose=False, seed=42)  # (1, 3, 32, 32)
+            is_deterministic = torch.allclose(x1, x2, atol=0, rtol=0)  # scalar
             results["tests"]["deterministic_sampling"] = bool(is_deterministic)
             if not is_deterministic:
                 results["status"] = "failed"
@@ -1375,7 +1404,7 @@ class ProductionSPOTSolver:
             all_work = True
             for sz in small_sizes:
                 try:
-                    x_small = self.sample_enhanced(sz, num_steps=2, verbose=False, seed=42)
+                    x_small = self.sample_enhanced(sz, num_steps=2, verbose=False, seed=42)  # (1, 3, H, W)
                     if x_small.shape != sz:
                         logger.debug("Small image %s returned shape %s", sz, tuple(x_small.shape))
                         all_work = False
@@ -1416,7 +1445,7 @@ class ProductionSPOTSolver:
 
         return results
     
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Clean up resources and restore global settings."""
         self._restore_tf32_settings()
         logger.debug("SPOT solver cleanup complete")
