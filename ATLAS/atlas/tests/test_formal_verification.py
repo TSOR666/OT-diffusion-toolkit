@@ -78,6 +78,7 @@ def _make_solver() -> SchroedingerBridgeSolver:
         rff_features=128,
         n_landmarks=8,
         max_kernel_cache_size=2,
+        orthogonal=False,
     )
     sampler_cfg = SamplerConfig(
         sb_iterations=10,
@@ -150,6 +151,46 @@ class TestGradientCorrectness:
         # Convert weights to double
         op.weights = [w.double() for w in op.weights]
         op.offsets = [o.double() for o in op.offsets]
+
+        def apply_fn(v_in: torch.Tensor) -> torch.Tensor:
+            return op.apply(x, v_in)
+
+        assert torch.autograd.gradcheck(apply_fn, (v,), eps=1e-6, atol=1e-4, rtol=1e-3)
+
+    def test_nystrom_kernel_gradcheck(self) -> None:
+        """Verify NystromKernelOperator gradients are correct."""
+        torch.manual_seed(42)
+        landmarks = torch.randn(5, 3, dtype=torch.float64)
+        op = NystromKernelOperator(
+            landmarks=landmarks,
+            kernel_type="gaussian",
+            epsilon=0.5,
+            device=torch.device("cpu"),
+            regularization=1e-6,
+        )
+
+        x = torch.randn(4, 3, dtype=torch.float64, requires_grad=False)
+        v = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+
+        def apply_fn(v_in: torch.Tensor) -> torch.Tensor:
+            return op.apply(x, v_in)
+
+        assert torch.autograd.gradcheck(apply_fn, (v,), eps=1e-6, atol=1e-4, rtol=1e-3)
+
+    def test_fft_kernel_gradcheck(self) -> None:
+        """Verify FFTKernelOperator gradients are correct."""
+        torch.manual_seed(42)
+        op = FFTKernelOperator(
+            grid_shape=[4, 4],
+            kernel_type="gaussian",
+            epsilon=0.5,
+            device=torch.device("cpu"),
+            multi_scale=False,
+        )
+        op.kernel_fft = op.kernel_fft.to(dtype=torch.complex128)
+
+        x = torch.zeros(1, 4, 4, dtype=torch.float64)
+        v = torch.randn(1, 4, 4, dtype=torch.float64, requires_grad=True)
 
         def apply_fn(v_in: torch.Tensor) -> torch.Tensor:
             return op.apply(x, v_in)

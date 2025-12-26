@@ -48,6 +48,7 @@ def _make_solver(use_linear_solver: bool = False) -> SchroedingerBridgeSolver:
         rff_features=128,
         n_landmarks=8,
         max_kernel_cache_size=2,
+        orthogonal=False,
     )
     sampler_cfg = SamplerConfig(
         sb_iterations=50,  # Increased for robust convergence

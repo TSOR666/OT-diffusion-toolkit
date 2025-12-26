@@ -25,6 +25,7 @@ from ..kernels import (
 )
 from ..utils.noise_prediction import NoisePredictionAdapter
 from ..utils.random import set_seed
+from ..utils.numerical import get_practical_eps
 from ..types import ConditioningPayload, NoiseSchedule
 
 from ..schedules.noise import karras_noise_schedule
@@ -205,9 +206,9 @@ class SchroedingerBridgeSolver:
 
     def _compute_sigma(self, alpha: torch.Tensor) -> torch.Tensor:
         """Compute the noise scale sigma(t) from alpha(t): sigma^2 = (1-alpha)/alpha."""
-        info = torch.finfo(alpha.dtype)
-        alpha_clamped = torch.clamp(alpha, min=info.tiny, max=1.0)
-        one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=info.tiny)
+        eps = get_practical_eps(alpha.dtype)
+        alpha_clamped = torch.clamp(alpha, min=eps, max=1.0)
+        one_minus_alpha = torch.clamp(alpha.new_tensor(1.0) - alpha_clamped, min=eps)
         return torch.sqrt(one_minus_alpha / alpha_clamped)
 
     def _extract_karras_params(
@@ -321,10 +322,10 @@ class SchroedingerBridgeSolver:
         if alpha_prime is None:
             alpha_prime = self._finite_difference_alpha_prime(t, reference, alpha_t)
 
-        info = torch.finfo(alpha_t.dtype)
-        alpha_safe = torch.clamp(alpha_t, min=info.tiny)
+        eps = get_practical_eps(alpha_t.dtype)
+        alpha_safe = torch.clamp(alpha_t, min=eps)
         beta_raw = -alpha_prime / alpha_safe
-        beta_mag = torch.clamp(beta_raw.abs(), min=info.tiny)
+        beta_mag = torch.clamp(beta_raw.abs(), min=eps)
         beta_signed = torch.where(beta_raw >= 0, beta_mag, -beta_mag)
 
         # Drift keeps the sign of the schedule derivative; diffusion uses magnitude.
@@ -866,9 +867,12 @@ class SchroedingerBridgeSolver:
             denom = torch.sum(p * Ap)
             denom_is_finite = torch.isfinite(denom)
             denom_abs = torch.abs(denom)
-            min_denom = denom_abs.new_tensor(
-                dtype_info.tiny * self._min_curvature_multiplier
+            denom_info = torch.finfo(denom.dtype)
+            practical_eps = max(
+                get_practical_eps(denom.dtype),
+                denom_info.eps * self._min_curvature_multiplier,
             )
+            min_denom = denom_abs.new_tensor(practical_eps)
 
             if (not denom_is_finite) or denom_abs < min_denom:
                 denom_value = float(denom.detach().cpu().item()) if denom_is_finite else float("nan")
@@ -1080,10 +1084,10 @@ class SchroedingerBridgeSolver:
                 fg_broadcasted = fg.unsqueeze(0).to(dtype=norm_dtype)
                 P_zx = weights.to(dtype=norm_dtype) * fg_broadcasted  # (batch_z, batch_x)
                 row_sums = P_zx.sum(dim=1, keepdim=True)
-                if not bool((row_sums > 0).all()):
-                    raise RuntimeError("Transport map has zero-weight rows; cannot normalize.")
-                min_row_sum = max(1e-12, torch.finfo(norm_dtype).tiny)
+                min_row_sum = max(1e-10, torch.finfo(norm_dtype).tiny)
                 row_sums = torch.clamp(row_sums, min=min_row_sum)
+                if not bool((row_sums >= min_row_sum).all()):
+                    raise RuntimeError("Transport map has zero-weight rows; cannot normalize.")
                 P_zx_norm = P_zx / row_sums
 
                 # Second normalization pass to reduce fp16/accumulation drift.

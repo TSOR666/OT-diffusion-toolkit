@@ -5,7 +5,8 @@ from atlas.easy_api import GPUProfile, validate_configs
 
 
 def test_validate_configs_raises_on_context_mismatch() -> None:
-    model_config = HighResModelConfig(context_dim=512)
+    model_conditioning = ConditioningConfig(use_clip=True, clip_model="ViT-B-16", context_dim=512)
+    model_config = HighResModelConfig(context_dim=512, conditioning=model_conditioning)
     kernel_config = KernelConfig()
     sampler_config = SamplerConfig()
     conditioning_config = ConditioningConfig(use_clip=True, clip_model="ViT-L-14")

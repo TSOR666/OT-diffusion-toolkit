@@ -114,8 +114,8 @@ class NystromKernelOperator(KernelOperator):
         elif self._svd_factors is not None:
             U, S, Vh = self._svd_factors
             s_inv = torch.where(S > 1e-10, 1.0 / S, torch.zeros_like(S))
-            inv = (U.mT @ rhs) * s_inv.unsqueeze(-1)
-            solution = Vh.mT @ inv
+            inv = (U.T @ rhs) * s_inv.unsqueeze(-1)
+            solution = Vh.T @ inv
         else:
             eye = torch.eye(self.n_landmarks, device=self.device, dtype=self.K_ll.dtype)
             system = self.K_ll + eye * self.regularization

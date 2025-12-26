@@ -147,9 +147,10 @@ class LinearSchedule:
         t32 = self._ensure_tensor(t).clamp(0.0, 1.0)  # (N,)
         beta_t = self.beta_start + (self.beta_end - self.beta_start) * t32  # (N,)
 
-        # Relation for VP-style schedules: -d lambda/dt = beta(t) / (1 - alpha_bar(t))
-        alpha, _ = self.alpha_sigma(t32)  # (N,)
-        alpha_bar = (alpha.float() * alpha.float()).clamp(0.0, 1.0)  # (N,)
+        # Compute alpha_bar in fp32 to keep beta invariant to the configured dtype.
+        beta0, beta1 = self.beta_start, self.beta_end
+        integral = beta0 * t32 + 0.5 * (beta1 - beta0) * t32 * t32  # (N,)
+        alpha_bar = torch.exp(-integral).clamp(0.0, 1.0)  # (N,)
         denom = (1.0 - alpha_bar).clamp_min(EPSILON_CLAMP)  # (N,)
         beta_lambda = beta_t / denom  # (N,)
 
@@ -157,4 +158,3 @@ class LinearSchedule:
             assert beta_lambda.dtype == torch.float32, f"beta(t) must be fp32, got {beta_lambda.dtype}"
 
         return beta_lambda
-

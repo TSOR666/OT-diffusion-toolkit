@@ -105,17 +105,21 @@ class RFFKernelOperator(KernelOperator):
                 weights = torch.randn(self.input_dim, num_features, device=self.device, generator=self.rng)
             elif self.kernel_type == "laplacian":
                 u = torch.rand(self.input_dim, num_features, device=self.device, generator=self.rng)
-                # Clamp away from 0 and 1 to prevent tan() from producing ±inf
-                u = torch.clamp(u, min=1e-7, max=1.0 - 1e-7)
+                # Clamp away from 0 and 1 to prevent tan() singularities.
+                u = torch.clamp(u, min=1e-4, max=1.0 - 1e-4)
                 weights = torch.tan(math.pi * (u - 0.5))
             elif self.kernel_type == "cauchy":
                 # Cauchy kernel RFF: sample from standard Cauchy distribution
                 # Cauchy(0,1) = Normal(0,1) / Normal(0,1) (ratio of independent normals)
                 numer = torch.randn(self.input_dim, num_features, device=self.device, generator=self.rng)
                 denom = torch.randn(self.input_dim, num_features, device=self.device, generator=self.rng)
-                # Clamp denominator away from zero to prevent inf
-                denom = torch.sign(denom) * torch.clamp(denom.abs(), min=1e-7)
-                weights = numer / denom
+                # Avoid division by near-zero values without introducing bias.
+                denom_safe = torch.where(
+                    denom.abs() < 1e-7,
+                    torch.sign(denom) * 1e-7 + (denom.abs() < 1e-10).float() * 1e-7,
+                    denom,
+                )
+                weights = numer / denom_safe
                 cauchy_clip = 1e4
                 weights = torch.nan_to_num(weights, nan=0.0, posinf=cauchy_clip, neginf=-cauchy_clip)
                 weights = torch.clamp(weights, min=-cauchy_clip, max=cauchy_clip)
