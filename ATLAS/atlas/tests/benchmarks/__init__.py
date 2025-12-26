@@ -20,7 +20,12 @@ def benchmark_sampling(resolution: int = 32, steps: int = 10) -> None:
     )
     score_model = HighResLatentScoreModel(config)
 
-    kernel_config = KernelConfig(kernel_type="gaussian", epsilon=0.1, solver_type="direct")
+    kernel_config = KernelConfig(
+        kernel_type="gaussian",
+        epsilon=0.1,
+        solver_type="direct",
+        orthogonal=False,
+    )
     sampler_config = SamplerConfig(
         sb_iterations=1,
         hierarchical_sampling=False,
@@ -38,7 +43,11 @@ def benchmark_sampling(resolution: int = 32, steps: int = 10) -> None:
     timesteps = torch.linspace(1.0, 0.01, steps).tolist()
 
     start = time.time()
-    _ = sampler.sample((1, config.in_channels, resolution, resolution), timesteps, verbose=False)
+    _ = sampler.sample(
+        (1, config.in_channels, resolution, resolution),
+        timesteps,
+        show_progress=False,
+    )
     duration = time.time() - start
 
     print(f"Sampled {resolution}x{resolution} image in {duration:.2f} s over {steps} steps")

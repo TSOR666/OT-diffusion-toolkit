@@ -57,6 +57,7 @@ def _build_solver(model: torch.nn.Module) -> SchroedingerBridgeSolver:
         n_landmarks=8,
         max_kernel_cache_size=2,
         epsilon=0.1,  # Increased for better conditioning
+        orthogonal=False,
     )
     sampler_cfg = SamplerConfig(
         sb_iterations=50,  # Increased for robust convergence

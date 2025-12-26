@@ -41,4 +41,4 @@ packages = ["sbds"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-testpaths = ["sbds/tests"]
+testpaths = ["tests", "verification_test.py"]

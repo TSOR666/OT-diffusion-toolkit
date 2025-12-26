@@ -5,6 +5,7 @@ from .tiling import TiledModelWrapper
 from .cuda_graphs import CUDAGraphModelWrapper
 from .random import set_seed
 from .noise_prediction import NoisePredictionAdapter
+from .numerical import get_practical_eps
 
 __all__ = [
     'build_dataset',
@@ -19,5 +20,6 @@ __all__ = [
     'TiledModelWrapper',
     'CUDAGraphModelWrapper',
     'NoisePredictionAdapter',
+    'get_practical_eps',
 ]
 

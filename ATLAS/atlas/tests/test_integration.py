@@ -10,7 +10,7 @@ def test_sampler_generates_tensor() -> None:
     model_config = HighResModelConfig(
         in_channels=2,
         out_channels=2,
-        base_channels=16,
+        base_channels=32,
         channel_mult=(1,),
         num_res_blocks=1,
         attention_levels=(),
@@ -20,7 +20,12 @@ def test_sampler_generates_tensor() -> None:
     )
     score_model = HighResLatentScoreModel(model_config)
 
-    kernel_config = KernelConfig(kernel_type="gaussian", epsilon=0.1, solver_type="direct")
+    kernel_config = KernelConfig(
+        kernel_type="gaussian",
+        epsilon=0.1,
+        solver_type="direct",
+        orthogonal=False,
+    )
     sampler_config = SamplerConfig(
         sb_iterations=1,
         hierarchical_sampling=False,
@@ -38,6 +43,6 @@ def test_sampler_generates_tensor() -> None:
     )
 
     timesteps = [1.0, 0.0]
-    output = sampler.sample((1, model_config.in_channels, 16, 16), timesteps, verbose=False)
+    output = sampler.sample((1, model_config.in_channels, 16, 16), timesteps, show_progress=False)
 
     assert output.shape == (1, model_config.out_channels, 16, 16)

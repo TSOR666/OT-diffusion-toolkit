@@ -137,12 +137,13 @@ class FFTKernelOperator(KernelOperator):
             
         # Normalize kernel
         kernel_sum = kernel.sum()
-        if kernel_sum <= 0:
+        if kernel_sum < 1e-10:
             raise ValueError(
                 f"Kernel normalization failed: kernel sum is {kernel_sum:.6e}. "
                 f"This may indicate invalid epsilon ({epsilon}) or numerical issues."
             )
-        kernel = kernel / kernel_sum
+        kernel_sum_safe = torch.clamp(kernel_sum, min=1e-10)
+        kernel = kernel / kernel_sum_safe
 
         kernel = torch.fft.fftshift(kernel, dim=tuple(range(len(shape))))
 

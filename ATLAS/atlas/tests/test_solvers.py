@@ -58,6 +58,7 @@ def solver() -> SchroedingerBridgeSolver:
             epsilon=0.1,
             solver_type="direct",
             max_kernel_cache_size=4,
+            orthogonal=False,
         ),
         sampler_config=SamplerConfig(
             sb_iterations=2,
@@ -77,6 +78,7 @@ def hierarchical_sampler() -> AdvancedHierarchicalDiffusionSampler:
             kernel_type="gaussian",
             epsilon=0.1,
             solver_type="direct",
+            orthogonal=False,
         ),
         sampler_config=SamplerConfig(
             sb_iterations=2,
@@ -175,7 +177,7 @@ def test_hierarchical_sampler_rejects_duplicate_timesteps(
     hierarchical_sampler: AdvancedHierarchicalDiffusionSampler,
 ) -> None:
     with pytest.raises(ValueError):
-        hierarchical_sampler.sample((1, 1, 4), [0.5, 0.5], verbose=False)
+        hierarchical_sampler.sample((1, 1, 4), [0.5, 0.5], show_progress=False)
 
 
 def test_sampler_initializes_in_eval_mode() -> None:
